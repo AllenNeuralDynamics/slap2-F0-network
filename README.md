@@ -10,24 +10,27 @@ The design, measurements and phases are in [docs/plan.md](docs/plan.md).
 
 | Piece | State |
 |---|---|
-| Training-data export (`code/matlab/exportF0TrainingData.m`) | Working. Tested on two 780125 trials, which give slope 0.97–1.00 of the movie on the activity at source peaks |
-| Code Ocean data capsule (`code/run`, `code/run_export.m`, `environment/`) | Written, not yet run on Code Ocean |
+| Training-data export (`code/matlab/exportF0TrainingData.m`) | Working. Tested on four 780125 trials: after the per-trial gain (0.83–0.97), the movie-on-activity slope is 0.98–1.03 |
+| Code Ocean data capsule ("SLAP2 F0 network - training data", `run --mode export`) | First 180 s runs in progress (780125, 885233) |
+| Code Ocean training capsule (`run --mode train`) | Code ready, tested on CPU; the GPU capsule is not created yet (see below) |
 | Session list (`sessions/slap2_iglusnfr4_sessions.csv`) | 142 iGluSnFR4 multiROI sessions on `aind-open-data`; start with the 4 integration-test sessions |
-| Python package (`code/slap2_f0`) | Reader, slab blind-spot model (v0/v1), likelihoods, training loop, tests; not trained yet |
+| Python package (`code/slap2_f0`) | Reader, slab blind-spot model (v0/v1), likelihoods, training loop with validation and calibration, tests; not trained yet |
 | Integration into GIAnT | Not started |
 
 ## Repository layout
 
-The repository is laid out as a Code Ocean capsule, so it can be linked as one.
+The repository is laid out as a Code Ocean capsule. Two capsules use it, with the same code and environment and different machines: a large-memory CPU machine for the export, and a GPU machine for training.
 
 ```
 code/
-  run                  capsule entry point: GIAnT on each attached session, then the export
+  run                  capsule entry point: --mode export (default) or --mode train
   run_export.m         per session: trial table -> trim -> MultiRoiRegistration -> SILo -> export
+  startup.m            MATLAB path for the capsule (SLAP2 reader, NoRMCorre, Fast_Tiff_Write)
   matlab/              exportF0TrainingData.m, trimTrialTableSLAP2.m
-  slap2_f0/            Python package: io, data, model, losses, cli
-  tests/               pytest (blind-spot exactness, likelihoods, reader)
-environment/           Dockerfile and postInstall (MATLAB R2023b, Slap2DataReader, GIAnT-MATLAB)
+  slap2_f0/            Python package: io, data, model, losses, train, cli
+  tests/               pytest (blind-spot exactness, likelihoods, reader, training smoke test)
+environment/           Dockerfile and postInstall (MATLAB R2023b, Slap2DataReader, GIAnT-MATLAB, PyTorch)
+.codeocean/            the capsule's machine (each capsule keeps its own; see below)
 metadata/              Code Ocean capsule metadata
 sessions/              list of qualifying sessions and the survey scripts that made it
 tools/measure/         one-off MATLAB scripts behind the measurements in docs/plan.md
@@ -79,6 +82,22 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 - **Space.** It applies the sub-pixel trial offset that best aligns the movie with the activity.
 - **Gain.** It scales the activity by the movie-on-activity slope of the flux in a 4 px disk around each source, which barely depends on blur or offset.
 - **Blur.** It applies the small Gaussian blur (typically 0.5–1 px) that makes the slope at source peak pixels match that gain. The 80 Hz frames are slightly blurrier than the 200 Hz data the footprints were fitted to.
+
+## Training
+
+`slap2-f0 train <folder>` trains the slab blind-spot network on every exported trial under `<folder>`.
+
+- **Validation split:** whole sessions are held out when there are at least 3, otherwise whole trials.
+- **Every `--val_every` steps** it reports the validation loss and the calibration of the predicted noise. z = (target − μ)/σ should have mean 0 and variance 1, with about 95% of values within ±2.
+- **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt` and `last.pt`.
+- **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
+
+### On Code Ocean
+
+1. **Create the GPU capsule.** New Capsule → Clone from Git → `AllenNeuralDynamics/slap2-F0-network`. In its Environment, choose a GPU machine. g5.4xlarge (one A10G with 24 GB, 16 vCPUs for data loading, 64 GB of memory) is a good start.
+2. **Keep its machine setting out of GitHub.** Changing the machine writes `.codeocean/resources.json`, and that file in GitHub belongs to the data capsule. Commit the change in the GPU capsule, but don't sync that commit to GitHub. Updates from GitHub `main` merge cleanly as long as `main` doesn't change this file.
+3. **Make the training data a data asset.** Save each export run's results as a data asset, then attach those assets to the GPU capsule.
+4. **Run.** Use `--mode train --train_args "--steps 20000 --batch 8 --max_hours 10"`. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`.
 
 ## Python
 

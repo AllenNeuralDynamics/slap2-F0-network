@@ -17,5 +17,10 @@ RUN pip install -U --no-cache-dir \
     numpy==1.26.4 \
     scipy==1.13.1
 
+# PyTorch for training (run --mode train). The Linux wheel bundles the CUDA
+# 12.1 runtime, so it uses the GPU of a GPU machine (only the host driver is
+# needed) and runs on the CPU elsewhere.
+RUN pip install --no-cache-dir torch==2.4.1
+
 COPY postInstall /
 RUN /postInstall

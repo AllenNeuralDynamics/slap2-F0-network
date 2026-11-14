@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
-# Make F0-network training data from every attached SLAP2 session.
+# Capsule entry point. Two modes:
 #
-#   ./run [--giant_ref main] [--max_duration_s 180] [--datasets all]
-#         [--n_workers 0] [--channels 1] [--keep_giant_outputs summary]
+# export (default): make F0-network training data from every attached SLAP2
+# session (GIAnT registration and SiLo, then exportF0TrainingData).
+#   ./run [--mode export] [--giant_ref main] [--max_duration_s 180]
+#         [--datasets all] [--n_workers 0] [--channels 1]
+#         [--keep_giant_outputs summary]
+#   giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
+#   training target. datasets is "all" or comma-separated mount names.
+#   keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
+#   per_trial_summary) or none.
 #
-# giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
-# training target. datasets is "all" or comma-separated mount names.
-# keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
-# per_trial_summary) or none. See README.md for the output format.
+# train: train the blind-spot network on the exported trials found anywhere
+# under the attached data assets (results of export runs), on the GPU if
+# there is one.
+#   ./run --mode train [--train_args "--steps 20000 --batch 8 ..."]
+#   train_args is passed to `slap2-f0 train` (see code/slap2_f0/cli.py).
+#
+# See README.md for the output formats.
 set -uo pipefail
 
+mode=export
 giant_ref=main
 max_duration_s=180
 datasets=all
 n_workers=0
 channels=1
 keep_giant_outputs=summary
+train_args=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -24,7 +36,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -34,8 +46,18 @@ RESULTS=/root/capsule/results
 SCRATCH=/root/capsule/scratch
 CODE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$RESULTS/logs" "$SCRATCH"
-# GIAnT writes several GB per trial and path; record where there is room
 df -h /root/capsule/scratch /root/capsule/results /tmp 2>/dev/null | tee "$RESULTS/logs/disk.txt"
+
+if [[ "$mode" == "train" ]]; then
+    nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
+    # shellcheck disable=SC2086  # train_args is a list of arguments
+    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
+        2>&1 | tee "$RESULTS/logs/train.log"
+    exit "${PIPESTATUS[0]}"
+elif [[ "$mode" != "export" ]]; then
+    echo "Unknown mode: $mode (use export or train)"
+    exit 2
+fi
 
 # GIAnT checkout: the image has a full clone; fetch newer commits when possible
 dest="$SCRATCH/giant"

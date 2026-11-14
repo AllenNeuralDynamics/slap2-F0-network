@@ -18,11 +18,13 @@ implemented yet.
 
 Outputs, in units of the trial scale (see ``io.TrialFile.scale``):
     mu      baseline, as mean_image * exp(correction), positive
-    var     noise variance, (gain * mu + floor) * exp(correction)
+    var     noise variance; in counts (gain * mu * scale + floor) * exp(correction),
+            so a single gain fits trials of different brightness
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -130,19 +132,26 @@ class SlabBlindSpotNet(nn.Module):
         nn.init.zeros_(self.head_mu.bias)
         nn.init.zeros_(self.head_var.weight)
         nn.init.zeros_(self.head_var.bias)
-        # noise model in units of the trial scale: var = (gain * mu + floor) * exp(s)
-        self.log_gain = nn.Parameter(torch.tensor(-2.0))
-        self.log_floor = nn.Parameter(torch.tensor(-4.0))
+        # noise model in movie counts: var = (gain * mu + floor) * exp(s). The
+        # movie's variance is about 6.6 x its mean on 780125 (photons times
+        # detector gain, with the 80 Hz kernel); start there.
+        self.log_gain = nn.Parameter(torch.tensor(math.log(6.6)))
+        self.log_floor = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """x: (B, n_inputs, T, H, W) from ``make_inputs``. Returns mu and var,
-        each (B, T, H, W)."""
+    def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """x: (B, n_inputs, T, H, W) from ``make_inputs``; scale (B,) the trial
+        scale the inputs were divided by. Returns mu and var, each (B, T, H, W),
+        in units of the trial scale. The noise model is applied in counts
+        (mu * scale), so one gain fits trials of any brightness."""
         hp = self.past(x)
         hf = self.future(x.flip(2)).flip(2)
         h = self.fuse(torch.cat([hp, hf], 1))
         mean_image = x[:, 2:3].clamp_min(1e-3)
         mu = mean_image * torch.exp(self.head_mu(h).clamp(-5, 5))
-        var = (self.log_gain.exp() * mu + self.log_floor.exp()) * torch.exp(self.head_var(h).clamp(-8, 8))
+        s = torch.ones(x.shape[0], device=x.device, dtype=mu.dtype) if scale is None else scale.to(mu.dtype)
+        s = s.view(-1, 1, 1, 1, 1)
+        var_counts = self.log_gain.exp() * mu * s + self.log_floor.exp()
+        var = var_counts / s ** 2 * torch.exp(self.head_var(h).clamp(-8, 8))
         return mu[:, 0], var[:, 0]
 
 
