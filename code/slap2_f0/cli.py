@@ -33,6 +33,9 @@ def main(argv=None) -> None:
     pt = sub.add_parser("train", help="train the slab blind-spot network")
     train_mod.add_arguments(pt)
     pt.set_defaults(func=train_mod.train)
+    pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
+    train_mod.add_probe_arguments(pp)
+    pp.set_defaults(func=train_mod.probe)
     args = p.parse_args(argv)
     args.func(args)
 

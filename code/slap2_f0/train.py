@@ -182,6 +182,81 @@ def train(args) -> None:
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best validation loss {best:.4f}")
 
 
+def probe(args) -> None:
+    """Peak GPU memory and time per training step over a grid of settings, on
+    random inputs of the real window size; writes probe.csv to --out."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else None
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    grid = [(b, w, fr, md) for md in [int(v) for v in args.max_dilations.split(",")]
+            for fr in [int(v) for v in args.full_res_list.split(",")]
+            for w in [int(v) for v in args.widths.split(",")]
+            for b in [int(v) for v in args.batches.split(",")]]
+    for b, w, fr, md in grid:
+        dil = [2 ** k for k in range(int(math.log2(md)) + 1)]
+        mcfg = ModelConfig(width=w, full_res_blocks=fr, temporal_dilations=dil)
+        T = args.out_frames + 2 * (mcfg.gap + 1 + mcfg.temporal_reach)
+        S = args.out_px + 2 * mcfg.spatial_reach
+        region = (slice(T // 2 - args.out_frames // 2, T // 2 + args.out_frames // 2),
+                  slice(mcfg.spatial_reach, mcfg.spatial_reach + args.out_px),
+                  slice(mcfg.spatial_reach, mcfg.spatial_reach + args.out_px))
+        row = {"batch": b, "width": w, "full_res_blocks": fr, "max_dilation": md, "window_frames": T,
+               "window_px": S, "peak_gb": float("nan"), "s_per_step": float("nan"), "status": "ok"}
+        model = opt = None
+        try:
+            model = SlabBlindSpotNet(mcfg).to(device)
+            opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            movie = torch.rand(b, T, S, S, device=device) * 20
+            mean = torch.full((b, S, S), 10.0, device=device)
+            vf = torch.ones(b, S, S, device=device)
+            scale = torch.full((b,), 10.0, device=device)
+            y = torch.rand(b, args.out_frames, args.out_px, args.out_px, device=device)
+            w8 = torch.ones_like(y)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            times = []
+            for _ in range(3):
+                t1 = time.time()
+                x = make_inputs(movie, mean, vf, scale)
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                    mu, var = model(x, scale, region)
+                loss = student_t_nll(y, mu.float(), var.float(), w8)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                times.append(time.time() - t1)
+            row["s_per_step"] = float(np.mean(times[1:]))
+            if device.type == "cuda":
+                row["peak_gb"] = torch.cuda.max_memory_allocated() / 2**30
+        except torch.OutOfMemoryError:
+            row["status"] = "out of memory"
+        finally:
+            del model, opt
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        rows.append(row)
+        print(" ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()), flush=True)
+    with open(out / "probe.csv", "w", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        wr.writeheader()
+        wr.writerows(rows)
+
+
+def add_probe_arguments(p) -> None:
+    p.add_argument("--out", default="results/probe")
+    p.add_argument("--batches", default="1,2,4,8")
+    p.add_argument("--widths", default="16,32")
+    p.add_argument("--full_res_list", default="0,1,2")
+    p.add_argument("--max_dilations", default="32,64")
+    p.add_argument("--out_frames", type=int, default=64)
+    p.add_argument("--out_px", type=int, default=32)
+
+
 def add_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
     p.add_argument("--out", default="results/train")

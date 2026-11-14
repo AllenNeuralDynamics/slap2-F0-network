@@ -49,7 +49,7 @@ class ModelConfig:
     # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
     # so the blind spot in time is unaffected); checkpointing recomputes blocks
     # in the backward pass instead of storing their activations
-    full_res_blocks: int = 2
+    full_res_blocks: int = 1
     downsample: int = 2
     checkpoint: bool = True
 
@@ -76,23 +76,14 @@ class ModelConfig:
         return reach + (self.spatial_factor - 1)
 
 
-class ChannelNorm(nn.Module):
-    """LayerNorm over the channel axis at each (frame, row, col)."""
-
-    def __init__(self, width: int, eps: float = 1e-5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(1, width, 1, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(1, width, 1, 1, 1))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        m = x.mean(1, keepdim=True)
-        v = x.var(1, keepdim=True, unbiased=False)
-        return (x - m) / torch.sqrt(v + self.eps) * self.weight + self.bias
-
-
 class CausalBlock(nn.Module):
-    """Per-frame spatial conv, then a causal dilated temporal conv, residual."""
+    """Per-frame spatial conv, then a causal dilated temporal conv, residual.
+
+    The residual branch is scaled by a learnable factor that starts at 0
+    (ReZero), which keeps deep stacks stable without a normalization layer.
+    Normalizations that pool over frames (GroupNorm, BatchNorm) would leak
+    hidden frames into the output, and a per-position channel norm costs
+    several full-size temporaries per block."""
 
     def __init__(self, width: int, t_dil: int, s_dil: int, s_kernel: int):
         super().__init__()
@@ -103,15 +94,12 @@ class CausalBlock(nn.Module):
         else:
             self.spatial = nn.Conv3d(width, width, 1)
         self.temporal = nn.Conv3d(width, width, (3, 1, 1), dilation=(t_dil, 1, 1))
-        # normalize over channels at each position only: statistics pooled over
-        # frames (GroupNorm, BatchNorm) would leak hidden frames into the output
-        self.norm = ChannelNorm(width)
+        self.alpha = nn.Parameter(torch.zeros(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T, H, W)
         h = F.gelu(self.spatial(x))
         h = F.pad(h, (0, 0, 0, 0, self.t_pad, 0))  # left (past) padding only
-        h = self.temporal(h)
-        return x + F.gelu(self.norm(h))
+        return x + self.alpha * F.gelu(self.temporal(h))
 
 
 class CausalBranch(nn.Module):

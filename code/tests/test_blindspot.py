@@ -3,7 +3,16 @@
 import pytest
 import torch
 
-from slap2_f0.model import ModelConfig, SlabBlindSpotNet, make_inputs
+from slap2_f0.model import CausalBlock, ModelConfig, SlabBlindSpotNet, make_inputs
+
+
+def _activate(model):
+    """Non-zero heads and residual scales (both start at 0), so outputs use every block."""
+    for head in (model.head_mu, model.head_var):
+        torch.nn.init.normal_(head.weight, std=0.5)
+    for m in model.modules():
+        if isinstance(m, CausalBlock):
+            m.alpha.data.fill_(0.5)
 
 
 @pytest.mark.parametrize("spatial_kernel", [3, 1])
@@ -13,8 +22,7 @@ def test_no_dependence_inside_gap(spatial_kernel, which):
     cfg = ModelConfig(gap=3, width=8, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 2, 1],
                       spatial_kernel=spatial_kernel)
     model = SlabBlindSpotNet(cfg).double()
-    for head in (model.head_mu, model.head_var):  # non-zero heads, so outputs use the features
-        torch.nn.init.normal_(head.weight, std=0.5)
+    _activate(model)
     x = torch.randn(1, cfg.n_inputs, 48, 10, 11, dtype=torch.float64)
     x[:, 2] = x[:, 2].abs() + 1  # positive mean image
     x.requires_grad_(True)
@@ -39,8 +47,7 @@ def test_region_output_matches_full_output():
     torch.manual_seed(1)
     cfg = ModelConfig(gap=2, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 1, 2], full_res_blocks=1)
     model = SlabBlindSpotNet(cfg).double().eval()
-    for head in (model.head_mu, model.head_var):
-        torch.nn.init.normal_(head.weight, std=0.5)
+    _activate(model)
     x = torch.randn(2, cfg.n_inputs, 30, 9, 13, dtype=torch.float64)
     x[:, 2] = x[:, 2].abs() + 1
     s = torch.tensor([2.0, 3.0], dtype=torch.float64)

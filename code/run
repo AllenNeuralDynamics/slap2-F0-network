@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capsule entry point. Two modes:
+# Capsule entry point. Three modes:
 #
 # export (default): make F0-network training data from every attached SLAP2
 # session (GIAnT registration and SiLo, then exportF0TrainingData).
@@ -10,6 +10,9 @@
 #   training target. datasets is "all" or comma-separated mount names.
 #   keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
 #   per_trial_summary) or none.
+#
+# probe: peak GPU memory and time per step over a grid of model settings
+#   (--train_args holds probe options, e.g. "--batches 2,4 --widths 32").
 #
 # train: train the blind-spot network on the exported trials found anywhere
 # under the attached data assets (results of export runs), on the GPU if
@@ -54,8 +57,16 @@ if [[ "$mode" == "train" ]]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
         2>&1 | tee "$RESULTS/logs/train.log"
     exit "${PIPESTATUS[0]}"
+elif [[ "$mode" == "probe" ]]; then
+    # peak GPU memory and time per step over model settings; train_args here
+    # are probe options (see `slap2-f0 probe --help`)
+    nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
+    # shellcheck disable=SC2086
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli probe --out "$RESULTS/probe" $train_args \
+        2>&1 | tee "$RESULTS/logs/probe.log"
+    exit "${PIPESTATUS[0]}"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export or train)"
+    echo "Unknown mode: $mode (use export, train or probe)"
     exit 2
 fi
 
