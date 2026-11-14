@@ -12,14 +12,14 @@ The design, measurements and phases are in [docs/plan.md](docs/plan.md).
 |---|---|
 | Training-data export (`code/matlab/exportF0TrainingData.m`) | Working. Tested on four 780125 trials: after the per-trial gain (0.83–0.97), the movie-on-activity slope is 0.98–1.03 |
 | Code Ocean data capsule ("SLAP2 F0 network - training data", `run --mode export`) | First 180 s runs in progress (780125, 885233) |
-| Code Ocean training capsule (`run --mode train`) | Code ready, tested on CPU; the GPU capsule is not created yet (see below) |
+| Code Ocean training capsule (`run --mode train`) | Code ready, tested on CPU; the GPU capsule (PyTorch starter) is not created yet (see Training) |
 | Session list (`sessions/slap2_iglusnfr4_sessions.csv`) | 142 iGluSnFR4 multiROI sessions on `aind-open-data`; start with the 4 integration-test sessions |
 | Python package (`code/slap2_f0`) | Reader, slab blind-spot model (v0/v1), likelihoods, training loop with validation and calibration, tests; not trained yet |
 | Integration into GIAnT | Not started |
 
 ## Repository layout
 
-The repository is laid out as a Code Ocean capsule. Two capsules use it, with the same code and environment and different machines: a large-memory CPU machine for the export, and a GPU machine for training.
+The repository is laid out as a Code Ocean capsule. Two capsules run its code: the data capsule (linked to this repository; MATLAB environment, large-memory CPU machine) runs the export, and a GPU capsule (PyTorch starter environment, GPU machine; code pushed to it, see Training) runs training.
 
 ```
 code/
@@ -94,9 +94,11 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 
 ### On Code Ocean
 
-1. **Create the GPU capsule.** New Capsule → Clone from Git → `AllenNeuralDynamics/slap2-F0-network`. In its Environment, choose a GPU machine. g5.4xlarge (one A10G with 24 GB, 16 vCPUs for data loading, 64 GB of memory) is a good start.
-2. **Keep its machine setting out of GitHub.** Changing the machine writes `.codeocean/resources.json`, and that file in GitHub belongs to the data capsule. Commit the change in the GPU capsule, but don't sync that commit to GitHub. Updates from GitHub `main` merge cleanly as long as `main` doesn't change this file.
-3. **Make the training data a data asset.** Save each export run's results as a data asset, then attach those assets to the GPU capsule.
+The GPU capsule can't share the data capsule's environment: Code Ocean has no starter environment with both MATLAB and GPU support, and training doesn't need MATLAB.
+
+1. **Create the capsule from a starter, not from Git.** Use the newest PyTorch starter with GPU (CUDA 12) support. Add the pip package `h5py`, and `numpy` if the starter lacks it. Choose a GPU machine: g5.4xlarge (one A10G with 24 GB, 16 vCPUs for data loading, 64 GB of memory) is a good start.
+2. **Push the code into it.** The capsule's own git remote takes this repository's `main`, merged so that the capsule keeps its own `environment/` and `.codeocean/`. The capsule isn't linked to GitHub, so nothing flows back.
+3. **Attach the training data.** Each export run's results are saved as a data asset (`f0train_<session>`); attach those to the capsule.
 4. **Run.** Use `--mode train --train_args "--steps 20000 --batch 8 --max_hours 10"`. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`.
 
 ## Python
