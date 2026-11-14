@@ -187,7 +187,7 @@ class SlabBlindSpotNet(nn.Module):
         s = torch.ones(x.shape[0], device=x.device, dtype=mu.dtype) if scale is None else scale.to(mu.dtype)
         s = s.view(-1, 1, 1, 1, 1)
         var_counts = self.log_gain.exp() * mu * s + self.log_floor.exp()
-        var = var_counts / s ** 2 * torch.exp(self.head_var(h).clamp(-8, 8))
+        var = var_counts / s ** 2 * torch.exp(self.head_var(h).clamp(-4, 4))
         return mu[:, 0], var[:, 0]
 
 

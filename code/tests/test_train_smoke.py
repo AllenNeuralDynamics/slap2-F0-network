@@ -42,4 +42,5 @@ def test_train_smoke(tmp_path):
           "--save_every", "2", "--w_unfitted", "1"])
     assert (out / "best.pt").exists() and (out / "last.pt").exists() and (out / "config.json").exists()
     rows = list(csv.DictReader(open(out / "metrics.csv")))
-    assert len(rows) == 2 and all(np.isfinite(float(r["val_loss"])) for r in rows)
+    assert [r["step"] for r in rows] == ["0", "2", "3"]  # untrained, then every 2 steps and the last
+    assert all(np.isfinite(float(r[k])) for r in rows for k in ("val_loss", "mse_net", "mse_silo", "mse_mean_image"))

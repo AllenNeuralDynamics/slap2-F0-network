@@ -1,6 +1,7 @@
 """Likelihoods are minimized at the true mean and variance; the reader pads windows."""
 
 import h5py
+import torch
 import numpy as np
 import torch
 
@@ -62,3 +63,24 @@ def test_read_pads_outside_trial(tmp_path):
         assert np.isnan(p.movie[5]).all()  # frame 3 is discarded
         assert np.isfinite(p.movie[2, 1:, :2]).all()
         assert p.activity[0].sum() == 0 and p.activity[2, 1:, :2].sum() == 6
+
+
+def test_silo_baseline_matches_numpy():
+    """Moving mean (MATLAB's even-window convention: k/2 before, k/2-1 after)
+    then a NaN-aware moving median, on the loss region."""
+    from slap2_f0.train import silo_baseline
+    rng = np.random.default_rng(3)
+    B, T, H, W, k, win = 2, 60, 5, 6, 4, 7
+    movie = rng.poisson(10.0, (B, T, H, W)).astype(np.float32)
+    movie[0, 20:23, 1, 2] = np.nan
+    scale = np.array([2.0, 4.0], np.float32)
+    region = (slice(20, 40), slice(1, 4), slice(2, 6))
+    got = silo_baseline(torch.from_numpy(movie), torch.from_numpy(scale), region, smooth=k, window=win).numpy()
+    m = movie / scale[:, None, None, None]
+    ref = np.zeros_like(got)
+    for t_out, t in enumerate(range(20, 40)):
+        meds = []
+        for u in range(t - win // 2, t + win // 2 + 1):
+            meds.append(np.nanmean(m[:, u - k // 2: u + k - k // 2, 1:4, 2:6], axis=1))
+        ref[:, t_out] = np.nanmedian(np.stack(meds, 1), axis=1)
+    assert np.allclose(got, ref, atol=1e-5)

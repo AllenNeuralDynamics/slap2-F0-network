@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .data import WindowConfig, WindowDataset, loss_region
@@ -68,27 +69,65 @@ def _forward(model, b, device, amp_dtype, region):
     return b, mu.float(), var.float()
 
 
+def silo_baseline(movie: torch.Tensor, scale: torch.Tensor, region, smooth: int = 8, window: int = 321) -> torch.Tensor:
+    """Today's SiLo localization baseline on the loss region: a moving mean over
+    `smooth` frames, then a moving median over `window` frames
+    (localizeSources_vIM at 80 Hz: ceil(0.2 s * 80 / 2) and 4 s * 80 + 1),
+    NaN-aware, in units of the trial scale. It is not blind: each frame's
+    baseline includes that frame and its events."""
+    tsl, rsl, csl = region
+    half = window // 2
+    m = movie[:, :, rsl, csl] / scale.view(-1, 1, 1, 1)
+    t0, t1 = tsl.start - half - smooth, tsl.stop + half + smooth
+    pad_l, pad_r = max(0, -t0), max(0, t1 - m.shape[1])
+    m = F.pad(m.permute(0, 2, 3, 1), (pad_l, pad_r), value=float("nan")).permute(0, 3, 1, 2)
+    m = m[:, t0 + pad_l: t1 + pad_l]
+    valid = torch.isfinite(m)
+    cs = F.pad(torch.where(valid, m, torch.zeros_like(m)).cumsum(1), (0, 0, 0, 0, 1, 0))
+    cn = F.pad(valid.float().cumsum(1), (0, 0, 0, 0, 1, 0))
+    lo, hi = smooth // 2, smooth - smooth // 2
+    idx = torch.arange(lo, m.shape[1] - hi, device=m.device)
+    mm = (cs[:, idx + hi] - cs[:, idx - lo]) / (cn[:, idx + hi] - cn[:, idx - lo])  # NaN where no data
+    n_out = tsl.stop - tsl.start
+    first = half + smooth - lo  # index in mm of the first output frame
+    win = mm[:, first - half: first - half + n_out + window - 1].unfold(1, window, 1)  # (B, n_out, H, W, window)
+    return torch.nanmedian(win, dim=-1).values
+
+
 @torch.no_grad()
 def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]:
+    """Validation loss and calibration of the network, plus the mean squared
+    error of its baseline and of two references on the same targets: today's
+    SiLo baseline (moving median) and the trial's mean image (the network's
+    starting point). The target's photon noise adds the same amount to every
+    MSE, so differences between them are differences in baseline error."""
     model.eval()
     sel = (slice(None),) + region
     tot = defaultdict(float)
     for b in loader:
         b, m, v = _forward(model, b, device, amp_dtype, region)
         y, w = b["target"][sel], b["weight"][sel]
+        mi = (b["mean_image"] / b["scale"].view(-1, 1, 1))[(slice(None),) + region[1:]].unsqueeze(1)
+        mb = silo_baseline(b["movie"], b["scale"], region)
+        w = w * torch.isfinite(mb) * torch.isfinite(mi)
         n = w.sum().item()
         if n == 0:
             continue
-        tot["loss"] += _loss(args, y, m, v, w).item() * n
-        z = (y - m) / v.sqrt()
+        y0 = torch.nan_to_num(y)
+        tot["loss"] += _loss(args, y0, m, v, w).item() * n
+        z = (y0 - m) / v.sqrt()
         tot["z"] += (z * w).sum().item()
         tot["z2"] += (z ** 2 * w).sum().item()
         tot["in2"] += ((z.abs() < 2).float() * w).sum().item()
+        tot["mse_net"] += (((y0 - m) ** 2) * w).sum().item()
+        tot["mse_silo"] += (((y0 - torch.nan_to_num(mb)) ** 2) * w).sum().item()
+        tot["mse_mean_image"] += (((y0 - torch.nan_to_num(mi)) ** 2) * w).sum().item()
         tot["n"] += n
     model.train()
     n = max(tot["n"], 1.0)
     zm = tot["z"] / n
-    return {"val_loss": tot["loss"] / n, "z_mean": zm, "z_var": tot["z2"] / n - zm ** 2, "within_2": tot["in2"] / n}
+    return {"val_loss": tot["loss"] / n, "z_mean": zm, "z_var": tot["z2"] / n - zm ** 2, "within_2": tot["in2"] / n,
+            "mse_net": tot["mse_net"] / n, "mse_silo": tot["mse_silo"] / n, "mse_mean_image": tot["mse_mean_image"] / n}
 
 
 def train(args) -> None:
@@ -115,7 +154,7 @@ def train(args) -> None:
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
-    warm = min(500, max(1, args.steps // 10))
+    warm = min(1000, max(1, args.steps // 5))
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps)))))
 
@@ -138,12 +177,25 @@ def train(args) -> None:
     print(f"model {n_params:,} parameters on {device} (amp {amp_dtype}); window {wcfg.out_frames + 2 * wcfg.t_reach} frames x "
           f"{wcfg.out_px + 2 * wcfg.s_reach}^2 px, loss on {wcfg.out_frames} x {wcfg.out_px}^2", flush=True)
 
-    fields = ["step", "train_loss", "val_loss", "z_mean", "z_var", "within_2", "lr", "elapsed_s"]
+    fields = ["step", "train_loss", "val_loss", "z_mean", "z_var", "within_2", "mse_net", "mse_silo",
+              "mse_mean_image", "lr", "elapsed_s"]
     with open(out / "metrics.csv", "w", newline="") as fh:
         csv.writer(fh).writerow(fields)
     best = math.inf
     ema = None
     t0 = time.time()
+
+    def validate(step):
+        m = evaluate(model, vl, region, device, amp_dtype, args)
+        row = {"step": step, "train_loss": ema if ema is not None else float("nan"), **m,
+               "lr": sched.get_last_lr()[0], "elapsed_s": time.time() - t0}
+        with open(out / "metrics.csv", "a", newline="") as fh:
+            csv.writer(fh).writerow([row[k] for k in fields])
+        print(f"validation at step {step}: " + " ".join(f"{k} {v:.4f}" for k, v in m.items()), flush=True)
+        return m
+
+    if vl is not None:
+        validate(0)  # the untrained network: mean image as baseline, Poisson-like noise
 
     def save(name, step):
         torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "config": asdict(mcfg),
@@ -167,11 +219,7 @@ def train(args) -> None:
                   f"{time.time() - t0:.0f} s{mem}", flush=True)
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
         if vl is not None and (step % args.val_every == 0 or last_step):
-            m = evaluate(model, vl, region, device, amp_dtype, args)
-            row = {"step": step, "train_loss": ema, **m, "lr": sched.get_last_lr()[0], "elapsed_s": time.time() - t0}
-            with open(out / "metrics.csv", "a", newline="") as fh:
-                csv.writer(fh).writerow([row[k] for k in fields])
-            print("validation " + " ".join(f"{k} {v:.4f}" for k, v in m.items()), flush=True)
+            m = validate(step)
             if m["val_loss"] < best:
                 best = m["val_loss"]
                 save("best.pt", step)
@@ -274,7 +322,7 @@ def add_arguments(p) -> None:
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--loss", choices=["beta", "student"], default="student")
     p.add_argument("--beta", type=float, default=0.5)
     p.add_argument("--nu", type=float, default=5.0)
