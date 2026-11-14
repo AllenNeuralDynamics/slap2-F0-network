@@ -2,7 +2,7 @@ function run_export(varargin)
 % RUN_EXPORT  Make F0-network training data from every SLAP2 session in dataDir.
 %
 %   Called by the `run` shell script on Code Ocean, e.g.
-%     run_export('giantDir','/scratch/giant','maxDuration_s','600', ...)
+%     run_export('giantDir','/scratch/giant','maxDuration_s','180', ...)
 %
 %   For each attached SLAP2 session (<asset>/slap2/dynamic_data/*.dat):
 %     buildTrialTableSLAP2 -> trimTrialTableSLAP2 (first maxDuration_s) ->
@@ -19,7 +19,7 @@ str = @(x) ischar(x) || isstring(x);
 p = inputParser;
 addParameter(p, 'giantDir', '/opt/GIAnT-MATLAB', str);
 addParameter(p, 'giantRef', '', str);
-addParameter(p, 'maxDuration_s', 600);
+addParameter(p, 'maxDuration_s', 180);
 addParameter(p, 'datasets', 'all', str);
 addParameter(p, 'nWorkers', 0);
 addParameter(p, 'channels', '1', str);
@@ -77,7 +77,11 @@ end
 
 function processSession(s, opts, giantCommit)
 outDir = fullfile(opts.resultsDir, s.name);
-work = fullfile(opts.scratchDir, 'giant_runs', s.name);
+% GIAnT's working files (registered movies, alignment data: several GB per
+% trial and path) go under /results, which has room for them, as in the
+% integration-test capsule; /scratch filled up after 3 trials. They are
+% deleted once the export has read them.
+work = fullfile(opts.resultsDir, '_work', s.name);
 for dd = {outDir, work}
     if exist(dd{1}, 'dir'), rmdir(dd{1}, 's'); end
     mkdir(dd{1});
@@ -137,14 +141,20 @@ if ~strcmpi(opts.keepGiantOutputs, 'none')
 end
 writeJson(fullfile(outDir, 'run_info.json'), info);
 rmdir(work, 's');
+if exist(fileparts(work), 'dir') && numel(dir(fileparts(work))) <= 2
+    rmdir(fileparts(work));
+end
 end
 
 function prov = provenance(opts)
 prov = struct('giant_ref', opts.giantRef);
 [~, sha] = system(sprintf('git -C "%s" rev-parse HEAD', opts.giantDir));
 prov.giant_commit = strtrim(sha);
-[~, sha] = system(sprintf('git -C "%s" rev-parse HEAD', fileparts(fileparts(mfilename('fullpath')))));
-prov.slap2_f0_commit = strtrim(sha);
+% on Code Ocean /code is not a git checkout; record the capsule and run
+prov.codeocean_capsule_id = getenv('CO_CAPSULE_ID');
+prov.codeocean_computation_id = getenv('CO_COMPUTATION_ID');
+[st, sha] = system(sprintf('git -C "%s" rev-parse HEAD', fileparts(fileparts(mfilename('fullpath')))));
+if st == 0, prov.slap2_f0_commit = strtrim(sha); else, prov.slap2_f0_commit = ''; end
 prov.matlab_version = version;
 prov.num_cores = feature('numcores');
 prov.n_workers = opts.nWorkers;

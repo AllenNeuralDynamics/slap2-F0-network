@@ -40,7 +40,7 @@ docs/plan.md           design and plan
 
 - **On Code Ocean**, the `run` parameters are:
   - `giant_ref` (GIAnT commit; default `main`);
-  - `max_duration_s` (seconds kept from the start of each session; default 600);
+  - `max_duration_s` (seconds kept from the start of each session; default 180, the length the integration-test capsule runs on these sessions);
   - `datasets` (`all`, or comma-separated mount names);
   - `n_workers`, `channels` (default `1`);
   - `keep_giant_outputs` (`summary`, `all` or `none`).

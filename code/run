@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Make F0-network training data from every attached SLAP2 session.
 #
-#   ./run [--giant_ref main] [--max_duration_s 600] [--datasets all]
+#   ./run [--giant_ref main] [--max_duration_s 180] [--datasets all]
 #         [--n_workers 0] [--channels 1] [--keep_giant_outputs summary]
 #
 # giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 giant_ref=main
-max_duration_s=600
+max_duration_s=180
 datasets=all
 n_workers=0
 channels=1
@@ -34,6 +34,8 @@ RESULTS=/root/capsule/results
 SCRATCH=/root/capsule/scratch
 CODE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$RESULTS/logs" "$SCRATCH"
+# GIAnT writes several GB per trial and path; record where there is room
+df -h /root/capsule/scratch /root/capsule/results /tmp 2>/dev/null | tee "$RESULTS/logs/disk.txt"
 
 # GIAnT checkout: the image has a full clone; fetch newer commits when possible
 dest="$SCRATCH/giant"
