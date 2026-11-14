@@ -102,5 +102,17 @@ def _scalar(v):
 
 
 def list_trials(root: str | Path) -> list[Path]:
-    """All exported trial files under a folder (any depth)."""
-    return sorted(Path(root).rglob("trial_*.h5"))
+    """All exported trial files (trial_<digits>.h5 with a movie) under a folder,
+    at any depth. Other HDF5 files that sit next to them, such as GIAnT's
+    trial_table.h5, are skipped."""
+    out = []
+    for p in sorted(Path(root).rglob("trial_*.h5")):
+        if not p.stem[len("trial_"):].isdigit():
+            continue
+        try:
+            with h5py.File(p, "r") as f:
+                if "movie" in f and "activity" in f:
+                    out.append(p)
+        except OSError:
+            continue
+    return out

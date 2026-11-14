@@ -38,6 +38,18 @@ def _write_trial(fn, T=20, R=6, C=7):
         f.attrs["nSources"] = 0
 
 
+def test_list_trials_skips_other_files(tmp_path):
+    from slap2_f0.io import list_trials
+    (tmp_path / "s" / "Path1").mkdir(parents=True)
+    (tmp_path / "s" / "giant").mkdir(parents=True)
+    _write_trial(tmp_path / "s" / "Path1" / "trial_001.h5")
+    with h5py.File(tmp_path / "s" / "giant" / "trial_table.h5", "w") as f:  # GIAnT's table, no movie
+        f["filename"] = np.zeros(2)
+    with h5py.File(tmp_path / "s" / "Path1" / "trial_002.h5", "w") as f:  # a trial file without a movie
+        f["x"] = np.zeros(2)
+    assert [p.name for p in list_trials(tmp_path)] == ["trial_001.h5"]
+
+
 def test_read_pads_outside_trial(tmp_path):
     fn = tmp_path / "trial_001.h5"
     _write_trial(fn)
