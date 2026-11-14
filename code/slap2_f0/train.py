@@ -59,11 +59,12 @@ def _loss(args, y, mu, var, w):
     return beta_nll(y, mu, var, w, beta=args.beta)
 
 
-def _forward(model, b, device, amp_dtype):
+def _forward(model, b, device, amp_dtype, region):
+    """Model outputs on the loss region only (mu, var: (B, frames, rows, cols))."""
     b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
     x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"])
     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-        mu, var = model(x, b["scale"])
+        mu, var = model(x, b["scale"], region)
     return b, mu.float(), var.float()
 
 
@@ -73,9 +74,8 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     sel = (slice(None),) + region
     tot = defaultdict(float)
     for b in loader:
-        b, mu, var = _forward(model, b, device, amp_dtype)
+        b, m, v = _forward(model, b, device, amp_dtype, region)
         y, w = b["target"][sel], b["weight"][sel]
-        m, v = mu[sel], var[sel]
         n = w.sum().item()
         if n == 0:
             continue
@@ -97,7 +97,9 @@ def train(args) -> None:
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
     train_files, val_files, how = split_files(files, args.val_fraction, args.seed)
-    mcfg = ModelConfig(gap=args.gap, width=args.width, spatial_kernel=args.spatial_kernel)
+    mcfg = ModelConfig(gap=args.gap, width=args.width, spatial_kernel=args.spatial_kernel,
+                       downsample=args.downsample, full_res_blocks=args.full_res_blocks,
+                       checkpoint=not args.no_checkpoint)
     if args.temporal_dilations:
         mcfg.temporal_dilations = [int(d) for d in args.temporal_dilations.split(",")]
     if args.spatial_dilations:
@@ -149,8 +151,8 @@ def train(args) -> None:
 
     step = 0
     for step, b in enumerate(dl, 1):
-        b, mu, var = _forward(model, b, device, amp_dtype)
-        loss = _loss(args, b["target"][sel], mu[sel], var[sel], b["weight"][sel])
+        b, mu, var = _forward(model, b, device, amp_dtype, region)
+        loss = _loss(args, b["target"][sel], mu, var, b["weight"][sel])
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
@@ -160,8 +162,9 @@ def train(args) -> None:
         sched.step()
         ema = loss.item() if ema is None else 0.98 * ema + 0.02 * loss.item()
         if step % args.log_every == 0 or step == 1:
+            mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
             print(f"step {step} loss {loss.item():.4f} (avg {ema:.4f}) lr {sched.get_last_lr()[0]:.2e} "
-                  f"{time.time() - t0:.0f} s", flush=True)
+                  f"{time.time() - t0:.0f} s{mem}", flush=True)
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
         if vl is not None and (step % args.val_every == 0 or last_step):
             m = evaluate(model, vl, region, device, amp_dtype, args)
@@ -187,10 +190,13 @@ def add_arguments(p) -> None:
     p.add_argument("--spatial_kernel", type=int, default=3, help="1 = each pixel's own trace only (v0)")
     p.add_argument("--temporal_dilations", default="", help="comma-separated, default 1,2,4,...,64")
     p.add_argument("--spatial_dilations", default="", help="comma-separated, default 1,1,2,2,4,4,8")
+    p.add_argument("--downsample", type=int, default=2, help="spatial downsampling after the full-resolution blocks")
+    p.add_argument("--full_res_blocks", type=int, default=2)
+    p.add_argument("--no_checkpoint", action="store_true", help="store activations instead of recomputing them")
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
     p.add_argument("--w_unfitted", type=float, default=0.0, help="loss weight of labeled pixels outside every footprint")
-    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--batch", type=int, default=4)
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=3e-4)

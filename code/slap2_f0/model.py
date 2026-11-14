@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 N_INPUTS = 4  # movie, valid flag, mean image, variance factor
 
@@ -39,9 +40,23 @@ class ModelConfig:
     gap: int = 8  # frames hidden on each side of the output frame
     width: int = 32  # feature channels per branch
     temporal_dilations: list[int] = field(default_factory=lambda: [1, 2, 4, 8, 16, 32, 64])
-    spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 2, 2, 4, 4, 8])
+    # per block; blocks after full_res_blocks run at 1/downsample resolution, so
+    # their dilations count double in pixels (default reach: 23 px)
+    spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 1, 1, 2, 2, 4])
     spatial_kernel: int = 3  # 1 = each pixel's own trace only
     n_inputs: int = N_INPUTS
+    # memory: the first full_res_blocks blocks of each branch run at full
+    # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
+    # so the blind spot in time is unaffected); checkpointing recomputes blocks
+    # in the backward pass instead of storing their activations
+    full_res_blocks: int = 2
+    downsample: int = 2
+    checkpoint: bool = True
+
+    @property
+    def spatial_factor(self) -> int:
+        """Spatial downsampling actually used (none for the own-trace model)."""
+        return 1 if self.spatial_kernel == 1 else max(1, self.downsample)
 
     @property
     def temporal_reach(self) -> int:
@@ -50,10 +65,15 @@ class ModelConfig:
 
     @property
     def spatial_reach(self) -> int:
-        """Pixels of context on each side."""
+        """Pixels of context on each side (an upper bound)."""
         if self.spatial_kernel == 1:
             return 0
-        return (self.spatial_kernel // 2) * sum(self.spatial_dilations[: len(self.temporal_dilations)])
+        k = self.spatial_kernel // 2
+        s = self.spatial_dilations
+        reach = 0
+        for i in range(len(self.temporal_dilations)):
+            reach += k * s[min(i, len(s) - 1)] * (1 if i < self.full_res_blocks else self.spatial_factor)
+        return reach + (self.spatial_factor - 1)
 
 
 class ChannelNorm(nn.Module):
@@ -95,22 +115,44 @@ class CausalBlock(nn.Module):
 
 
 class CausalBranch(nn.Module):
-    """Output at t depends on inputs at frames <= t - shift only."""
+    """Output at t depends on inputs at frames <= t - shift only.
+
+    The first ``full_res_blocks`` blocks run at full resolution; the rest run
+    on a per-frame strided downsampling and are upsampled (nearest, per frame)
+    and added back. Every spatial operation acts within a frame, so causality
+    in time is kept exactly."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.inp = nn.Conv3d(cfg.n_inputs, cfg.width, 1)
-        s_dils = cfg.spatial_dilations
-        self.blocks = nn.ModuleList(
-            CausalBlock(cfg.width, d, s_dils[min(i, len(s_dils) - 1)], cfg.spatial_kernel)
-            for i, d in enumerate(cfg.temporal_dilations)
-        )
+        self.cfg = cfg
+        w, s_dils, f = cfg.width, cfg.spatial_dilations, cfg.spatial_factor
+        self.inp = nn.Conv3d(cfg.n_inputs, w, 1)
+        blocks = [CausalBlock(w, d, s_dils[min(i, len(s_dils) - 1)], cfg.spatial_kernel)
+                  for i, d in enumerate(cfg.temporal_dilations)]
+        n_full = len(blocks) if f == 1 else min(cfg.full_res_blocks, len(blocks))
+        self.full = nn.ModuleList(blocks[:n_full])
+        self.low = nn.ModuleList(blocks[n_full:])
+        self.down = nn.Conv3d(w, w, (1, f, f), stride=(1, f, f)) if len(self.low) else None
         self.shift = cfg.gap + 1
+
+    def _run(self, block: nn.Module, h: torch.Tensor) -> torch.Tensor:
+        if self.cfg.checkpoint and self.training and h.requires_grad:
+            return torch.utils.checkpoint.checkpoint(block, h, use_reentrant=False)
+        return block(h)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.inp(x)
-        for b in self.blocks:
-            h = b(h)
+        for b in self.full:
+            h = self._run(b, h)
+        if self.down is not None:
+            T, H, W = h.shape[2:]
+            f = self.cfg.spatial_factor
+            hp = F.pad(h, (0, (-W) % f, 0, (-H) % f))
+            low = self.down(hp)
+            for b in self.low:
+                low = self._run(b, low)
+            up = F.interpolate(low, size=(T, hp.shape[3], hp.shape[4]), mode="nearest")
+            h = h + up[..., :H, :W]
         # shift forward in time: out[t] = h[t - shift]
         h = F.pad(h, (0, 0, 0, 0, self.shift, 0))[:, :, : x.shape[2]]
         return h
@@ -138,13 +180,19 @@ class SlabBlindSpotNet(nn.Module):
         self.log_gain = nn.Parameter(torch.tensor(math.log(6.6)))
         self.log_floor = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None,
+                region: tuple[slice, slice, slice] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """x: (B, n_inputs, T, H, W) from ``make_inputs``; scale (B,) the trial
-        scale the inputs were divided by. Returns mu and var, each (B, T, H, W),
-        in units of the trial scale. The noise model is applied in counts
-        (mu * scale), so one gain fits trials of any brightness."""
+        scale the inputs were divided by; region (frames, rows, cols) limits the
+        output to that part of the window (training needs only the loss region,
+        and the pointwise layers then run only there). Returns mu and var, each
+        (B, T', H', W'), in units of the trial scale. The noise model is applied
+        in counts (mu * scale), so one gain fits trials of any brightness."""
         hp = self.past(x)
         hf = self.future(x.flip(2)).flip(2)
+        if region is not None:
+            sel = (slice(None), slice(None)) + tuple(region)
+            hp, hf, x = hp[sel], hf[sel], x[sel]
         h = self.fuse(torch.cat([hp, hf], 1))
         mean_image = x[:, 2:3].clamp_min(1e-3)
         mu = mean_image * torch.exp(self.head_mu(h).clamp(-5, 5))

@@ -51,7 +51,7 @@ df -h /root/capsule/scratch /root/capsule/results /tmp 2>/dev/null | tee "$RESUL
 if [[ "$mode" == "train" ]]; then
     nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
     # shellcheck disable=SC2086  # train_args is a list of arguments
-    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
         2>&1 | tee "$RESULTS/logs/train.log"
     exit "${PIPESTATUS[0]}"
 elif [[ "$mode" != "export" ]]; then

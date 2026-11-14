@@ -34,6 +34,22 @@ def test_no_dependence_inside_gap(spatial_kernel, which):
         assert g[t0 - gap - 1, r0 + 1, c0].sum() > 0  # neighbours are used
 
 
+def test_region_output_matches_full_output():
+    """Cropping to a region before the pointwise layers gives the same values."""
+    torch.manual_seed(1)
+    cfg = ModelConfig(gap=2, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 1, 2], full_res_blocks=1)
+    model = SlabBlindSpotNet(cfg).double().eval()
+    for head in (model.head_mu, model.head_var):
+        torch.nn.init.normal_(head.weight, std=0.5)
+    x = torch.randn(2, cfg.n_inputs, 30, 9, 13, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    s = torch.tensor([2.0, 3.0], dtype=torch.float64)
+    region = (slice(10, 20), slice(2, 7), slice(3, 11))
+    mu, var = model(x, s)
+    mu_r, var_r = model(x, s, region)
+    assert torch.allclose(mu[(slice(None),) + region], mu_r) and torch.allclose(var[(slice(None),) + region], var_r)
+
+
 def test_make_inputs_masks_missing():
     movie = torch.tensor([[[[1.0, float("nan")], [2.0, 3.0]]]]).repeat(1, 5, 1, 1)
     x = make_inputs(movie, torch.ones(1, 2, 2), torch.ones(1, 2, 2), torch.tensor([2.0]))
