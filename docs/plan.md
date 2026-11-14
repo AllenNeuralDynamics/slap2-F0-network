@@ -28,7 +28,7 @@ All from one session: 780125 Neuron1 2025-03-14, path 1, trial 10 (80 Hz, 320 ×
 | Noise correlation, time | 0.59 at lag 1, 0.13 at lag 2 | the 80 Hz frames are formed with a kernel wider than one frame |
 | Noise level | variance ≈ 6.6 × mean; a few photons per pixel per frame | count statistics, not Gaussian, on dim pixels |
 | Event bias of today's baseline at source peak pixels | +42% (10th–90th percentile +23% to +72%) higher than the same filter on the residual; r = 0.91 with activity level | the problem to fix |
-| Same, with GIAnT's `splitFreq` lower envelope instead | −2% (−12% to +8%) | a cheap fix that removes most of the bias |
+| Same, with GIAnT's `splitFreq` lower envelope instead | −2% (−12% to +8%) at source peaks, but 0.31× the moving median on the dimmest pixels | not a fix: localization gets worse (see Phase 0) |
 | Residual 0.2–4 s component on footprint pixels | std 32% of mean, two thirds of it photon noise | how much the baseline moves beyond noise |
 | Its spatial correlation | 0.29 at 1–2 px (mostly correlated noise), 0.027 at 2–4 px, ≤ 0.013 beyond 4 px | there is little shared fast background |
 | Residual > 4 s component, spatial correlation | 0.51 (1–2 px), 0.23 (2–4), 0.07 (4–8), 0.03–0.05 (8–64), 0.02 (64–128) | slow drifts are shared over tens of pixels |
@@ -113,7 +113,11 @@ Yes: the σ² head trained by NLL is exactly that.
 ## Phases
 
 **Phase 0: headroom and target construction (in GIAnT and scratch; no new repo yet)**
-1. **Cheap comparator.** Add a `splitFreq` lower-envelope baseline as an option in `localizeSources_vIM`, and compare localization with today's baseline: precision/recall/F1 on the 12 simulations, and source agreement and stability on real sessions. The network has to beat this, not just the moving median.
+1. **Cheap comparator. Done; it lost.** I added a `splitFreq` option to `localizeSources_vIM` (GIAnT branch `localize-splitfreq-baseline`, f8c24ef, local) and scored localization with `tools/localization_eval/`.
+   - **Simulations:** median F1 drops from 0.712 to 0.620 (sims 1 and 2, two 180 s windows each; the other 10 simulations' movies aren't on this machine). It is worse at every threshold.
+   - **780125:** fewer sources match the final GIAnT run.
+   - **Why:** the lower envelope is far too low on dim pixels (0.31× the moving median), which skews the Z-scores.
+   - **Consequence:** the moving median is the comparator. Any replacement must be unbiased at low counts as well as robust to events.
 2. **Fix the target. Done.** The 0.69 slope came from three mismatches between my resampling and the way the 80 Hz movie is made (see the alignment row above). Two 780125 trials now give peak slopes of 0.97 and 1.00, with the event-triggered residual at 6% and 17% of the movie's.
 3. **Repeat the scale measurements** on 3–5 more sessions (other mice, depths and brightness) to confirm the blind spot and context sizes.
 
@@ -135,7 +139,7 @@ Yes: the σ² head trained by NLL is exactly that.
 
 **Phase 3: evaluation**
 - **Simulations, which have a true baseline:** baseline error near and away from events, and Z-score calibration.
-- **Localization:** today's baseline vs `splitFreq` vs the network, on the simulations (ground-truth F1, position error) and on real data (agreement with final sources, cross-trial stability, SNR of the resulting sources).
+- **Localization:** today's moving median vs the network, with `tools/localization_eval/`, on the simulations (ground-truth F1, position error) and on real data (agreement with final sources, cross-trial stability, SNR of the resulting sources). All 12 simulations need their movies, from `s3://aind-scratch-data/iGluSnFR_simulations_default/` (about 35 GB) or on Code Ocean.
 - **Runtime:** per trial, on GPU and CPU.
 
 **Phase 4: integration**
@@ -145,7 +149,7 @@ Yes: the σ² head trained by NLL is exactly that.
 
 ## Risks
 
-- **Headroom.** `splitFreq` already removes the mean event bias. The network's extra value is tracking 1–4 s fluctuations (R² ≈ 0.14–0.17 of a ≈ 0.33 ceiling with linear predictors) plus calibrated σ. Phase 0 and Phase 3 must show that this improves localization.
+- **Headroom.** The moving median's event bias (+42% at source peaks) is not simply harmful: the obvious fix (`splitFreq`) made localization worse, because it traded that bias for a brightness-dependent one. The network has to remove the event bias while staying unbiased on dim pixels, and track 1–4 s fluctuations (R² ≈ 0.14–0.17 of a ≈ 0.33 ceiling with linear predictors), with calibrated σ. Phase 3 must show this improves localization over the moving median.
 - **The target is GIAnT's definition of baseline.** With activity above 10% of baseline in 72% of frames at source peaks, the split between baseline and activity is model-dependent. The 0.69 gain is resolved. The per-trial QC (peak and disk slopes, event residual) flags trials where the activity doesn't line up with the movie.
 - **Contaminated targets.** Activity outside fitted footprints stays in the residual. The loss mask and the robust likelihood handle it.
 - **Domain shift** across indicators, microscopes and imaging settings. Track it with held-out mice and sessions.
