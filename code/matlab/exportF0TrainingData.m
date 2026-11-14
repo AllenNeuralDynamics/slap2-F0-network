@@ -29,15 +29,19 @@ function summary = exportF0TrainingData(trialTableFn, outDir, varargin)
 %            frames left out).
 %     space  footprints live on SiLo's consensus canvas. Each trial's
 %            sub-pixel offset is the one that maximizes the correlation of
-%            movie and activity at source peak pixels. The footprints are
-%            then blurred by the Gaussian (sigma from blurSigmas) that brings
-%            the movie-on-activity slope at peak pixels closest to 1: the
-%            80 Hz frames are slightly blurrier than the 200 Hz data the
-%            footprints were fitted to.
-%   QC per trial: that slope and correlation; the same for the flux in a
-%   4 px disk around each source (insensitive to blur and offset); and the
-%   event-triggered residual at source peaks as a fraction of the
-%   event-triggered movie (near 0 when the activity is removed).
+%            movie and activity at source peak pixels.
+%     gain   the movie-on-activity slope of the flux in a 4 px disk around
+%            each source (median over sources), which barely depends on blur
+%            or offset; the activity is scaled by it (activityGain).
+%     blur   the footprints are blurred by the Gaussian (sigma from
+%            blurSigmas) that makes the slope at peak pixels match the
+%            gain: the 80 Hz frames are slightly blurrier than the 200 Hz
+%            data the footprints were fitted to.
+%   QC per trial, after the gain: the slope and correlation at peak pixels
+%   (peakSlope, peakR) and for the disk flux (diskSlope, diskR), both near
+%   1 when the activity lines up; and the event-triggered residual at source
+%   peaks as a fraction of the event-triggered movie (near 0 when the
+%   activity is removed).
 %
 %   Name-Value options:
 %     saveDir     folder holding motion_correction/ and source_extraction/
@@ -50,7 +54,7 @@ function summary = exportF0TrainingData(trialTableFn, outDir, varargin)
 %     trials      trials to export (default all that SiLo analysed)
 %     channels    channels whose movie and activity are written (default 1,
 %                 the glutamate channel when activityChannel is 1)
-%     blurSigmas  candidate blur sigmas in px (default 0:0.25:1)
+%     blurSigmas  candidate blur sigmas in px (default 0:0.25:1.5)
 %     shiftRange, shiftStep  sub-pixel offset search around the integer
 %                 offset of the mean images (default 1 and 0.25 px)
 %     varFac      'mean' (per-pixel mean, default) or 'full' (every frame)
@@ -65,7 +69,7 @@ addParameter(p, 'rawDir', '');
 addParameter(p, 'paths', []);
 addParameter(p, 'trials', []);
 addParameter(p, 'channels', 1);
-addParameter(p, 'blurSigmas', 0:0.25:1);
+addParameter(p, 'blurSigmas', 0:0.25:1.5);
 addParameter(p, 'shiftRange', 1);
 addParameter(p, 'shiftStep', 0.25);
 addParameter(p, 'varFac', 'mean');
@@ -131,8 +135,8 @@ for DMDix = paths(:)'
             q = exportTrial(tt, t, DMDix, nf, fl, profSz, es, pts, grp, mocoDr, prm, o, ...
                 fullfile(pathDir, sprintf('trial_%03d.h5', t)));
             summary.trials{end+1} = q;
-            fprintf(['[exportF0]   peak slope %.2f (r %.2f), disk-flux slope %.2f (r %.2f), shift [%.2f %.2f], ' ...
-                'blur %.2f px, event residual %.2f\n'], q.peakSlope, q.peakR, q.diskSlope, q.diskR, ...
+            fprintf(['[exportF0]   gain %.2f; after it, peak slope %.2f (r %.2f), disk-flux slope %.2f (r %.2f); ' ...
+                'shift [%.2f %.2f], blur %.2f px, event residual %.2f\n'], q.activityGain, q.peakSlope, q.peakR, q.diskSlope, q.diskR, ...
                 q.shiftRC, q.blurSigma, q.eventResidualFraction);
         catch ME
             fprintf(2, '[exportF0]   failed: %s\n', ME.message);
@@ -231,30 +235,25 @@ for dr = sh0(1) + (-o.shiftRange:o.shiftStep:o.shiftRange)
         end
     end
 end
+%gain from the flux in a 4 px disk around each source, which barely depends on
+%blur or offset; then the blur that makes the peak-pixel slope match it
+[cfD, rD] = diskFit(placeFootprints(H, best.shift, 0, R, C), X80{prm.activityChannel}, Y1, hpf, R, C);
+gain = min(max(median(cfD, 'omitnan'), 0.5), 1.5);
 bestSig = struct('d', inf);
 for sg = o.blurSigmas
     Hs = placeFootprints(H, best.shift, sg, R, C);
     [sl, r] = peakFit(Hs, X80{prm.activityChannel}, Y1, hpf);
-    if abs(median(sl, 'omitnan') - 1) < bestSig.d
-        bestSig = struct('d', abs(median(sl, 'omitnan') - 1), 'sigma', sg, 'slope', median(sl, 'omitnan'), 'r', median(r, 'omitnan'));
+    if abs(median(sl, 'omitnan') - gain) < bestSig.d
+        bestSig = struct('d', abs(median(sl, 'omitnan') - gain), 'sigma', sg, 'slope', median(sl, 'omitnan'), 'r', median(r, 'omitnan'));
     end
 end
-Hs = placeFootprints(H, best.shift, bestSig.sigma, R, C); % (R*C) x nS sparse
+Hs = gain * placeFootprints(H, best.shift, bestSig.sigma, R, C); % (R*C) x nS sparse, scaled by the gain
 [~, pk] = max(Hs, [], 1); pk = full(pk(:));
-
-%--- QC: disk flux and event-triggered residual
-A1 = Hs * X80{prm.activityChannel}; % (R*C) x T, sparse rows outside support
 [pr, pc] = ind2sub([R C], pk);
-[sr, sc] = find(reshape(any(Hs, 2), R, C));
-cfD = nan(nS, 1); rD = cfD;
-for s = 1:nS
-    in = sub2ind([R C], sr(hypot(sr - pr(s), sc - pc(s)) <= 4), sc(hypot(sr - pr(s), sc - pc(s)) <= 4));
-    fy = sum(double(Y1(in, :)), 1); fa = full(sum(A1(in, :), 1));
-    yh = hpf(fy); ah = hpf(fa); ok = isfinite(yh) & isfinite(ah);
-    if nnz(ok) > 100 && any(ah(ok))
-        cfD(s) = sum(yh(ok).*ah(ok)) / sum(ah(ok).^2); rD(s) = corr(yh(ok)', ah(ok)');
-    end
-end
+
+%--- QC after the gain: disk flux and event-triggered residual
+A1 = Hs * X80{prm.activityChannel}; % (R*C) x T, sparse rows outside support
+[cfD, rD] = diskFit(Hs, X80{prm.activityChannel}, Y1, hpf, R, C);
 etaY = zeros(1, 25); etaR = etaY; nEv = 0;
 for s = 1:nS
     x = X80{prm.activityChannel}(s, :);
@@ -321,8 +320,8 @@ writeArr(outFn, '/sources/peak_col', int32(pc(:) - c0), [], o.deflate);
 q = struct('path', DMDix, 'trial', t, 'file', outFn, 'frames', T, 'rows', Rc, 'cols', Cc, ...
     'cropOriginRC', [r0 c0] - 1, 'nSources', nS, 'validPixels', nnz(valid), ...
     'kernelDtLines', dt, 'kernelHalfWidthLines', half, 'linesPerCycle', lpc, ...
-    'shiftRC', best.shift, 'blurSigma', bestSig.sigma, ...
-    'peakSlope', bestSig.slope, 'peakR', bestSig.r, ...
+    'shiftRC', best.shift, 'blurSigma', bestSig.sigma, 'activityGain', gain, ...
+    'peakSlope', bestSig.slope / gain, 'peakR', bestSig.r, ...
     'diskSlope', median(cfD, 'omitnan'), 'diskR', median(rD, 'omitnan'), ...
     'eventResidualFraction', etaFrac, 'nEvents', nEv, 'discardedFrames', nnz(discard), ...
     'channels', chans, 'activityChannel', prm.activityChannel, 'alignHz', prm.alignHz, ...
@@ -357,6 +356,26 @@ for s = 1:nS
     ii{s} = sub2ind([R C], RR(ok), CC(ok)); jj{s} = repmat(s, nnz(ok), 1); vv{s} = patch(ok);
 end
 Hs = sparse(vertcat(ii{:}), vertcat(jj{:}), vertcat(vv{:}), R*C, nS);
+end
+
+function [cf, r] = diskFit(Hs, X80, Y1, hpf, R, C)
+%slope and correlation of the movie on the activity for the flux in a disk of
+%radius 4 px around each source's peak pixel (high-passed)
+nS = size(Hs, 2);
+[~, pk] = max(Hs, [], 1); pk = full(pk(:));
+[pr, pc] = ind2sub([R C], pk);
+[sr, sc] = find(reshape(any(Hs, 2), R, C));
+cf = nan(nS, 1); r = cf;
+for s = 1:nS
+    near = hypot(sr - pr(s), sc - pc(s)) <= 4;
+    in = sub2ind([R C], sr(near), sc(near));
+    fy = sum(double(Y1(in, :)), 1);
+    fa = full(sum(Hs(in, :), 1)) * X80;
+    yh = hpf(fy); ah = hpf(fa); ok = isfinite(yh) & isfinite(ah);
+    if nnz(ok) > 100 && any(ah(ok))
+        cf(s) = sum(yh(ok).*ah(ok)) / sum(ah(ok).^2); r(s) = corr(yh(ok)', ah(ok)');
+    end
+end
 end
 
 function [sl, r] = peakFit(Hs, X80, Y1, hpf)

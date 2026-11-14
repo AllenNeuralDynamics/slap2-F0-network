@@ -25,9 +25,9 @@ def inspect(args: argparse.Namespace) -> None:
             a = tr.attrs
             print(
                 f"{fn.relative_to(args.root)}: {tr.n_frames} frames, {tr.n_rows}x{tr.n_cols} px, "
-                f"{tr.valid.sum()} valid, {a.get('nSources')} sources | peak slope {a.get('peakSlope', np.nan):.2f} "
-                f"disk slope {a.get('diskSlope', np.nan):.2f} event residual {a.get('eventResidualFraction', np.nan):.2f} "
-                f"blur {a.get('blurSigma', np.nan):.2f}"
+                f"{tr.valid.sum()} valid, {int(a.get('nSources', 0))} sources | gain {a.get('activityGain', np.nan):.2f} "
+                f"peak slope {a.get('peakSlope', np.nan):.2f} disk slope {a.get('diskSlope', np.nan):.2f} "
+                f"event residual {a.get('eventResidualFraction', np.nan):.2f} blur {a.get('blurSigma', np.nan):.2f}"
             )
 
 

@@ -65,19 +65,20 @@ One HDF5 file per trial and imaging path, `<session>/Path<k>/trial_<NNN>.h5`. Sh
 | `frame/discard`, `frame/motion_row`, `frame/motion_col`, `frame/rec_neg_err`, `frame/onlineMotion*shift`, `frame/valid_mean` | (frame,) | |
 | `sources/peak_row`, `sources/peak_col` | (source,) | 0-based, in the crop |
 
-Root attributes hold provenance (session, path, trial, GIAnT commit, crop origin) and QC:
-- `peakSlope`, `peakR`: movie on activity at source peak pixels, high-passed;
+Root attributes hold provenance (session, path, trial, GIAnT commit, crop origin), the mapping that was used, and QC:
+- `shiftRC`, `blurSigma`, `activityGain`: the footprint offset, blur and gain applied to the activity;
+- `peakSlope`, `peakR`: movie on activity at source peak pixels, high-passed, after the gain (near 1 when the activity lines up);
 - `diskSlope`, `diskR`: the same for the flux in a 4 px disk;
-- `eventResidualFraction`: the residual's event-triggered peak relative to the movie's;
-- `shiftRC`, `blurSigma`: the footprint transform that was used.
+- `eventResidualFraction`: the residual's event-triggered peak relative to the movie's (near 0 when the activity is removed).
 
 ### How the activity is put on the movie's grid
 
-GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export maps H·X onto each trial's 80 Hz movie in three steps:
+GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export maps H·X onto each trial's 80 Hz movie in four steps:
 
 - **Time.** It uses the same kernel that made the movie: SLAP2 `getImages` weights the samples within max(3·dt, linesPerCycle) lines of a frame by exp(−|Δline|/dt), with dt = ceil(line rate / alignHz).
 - **Space.** It applies the sub-pixel trial offset that best aligns the movie with the activity.
-- **Blur.** It applies the small Gaussian blur (typically 0.5–0.75 px) that brings the movie-on-activity slope at source peaks to 1. The 80 Hz frames are slightly blurrier than the 200 Hz data the footprints were fitted to.
+- **Gain.** It scales the activity by the movie-on-activity slope of the flux in a 4 px disk around each source, which barely depends on blur or offset.
+- **Blur.** It applies the small Gaussian blur (typically 0.5–1 px) that makes the slope at source peak pixels match that gain. The 80 Hz frames are slightly blurrier than the 200 Hz data the footprints were fitted to.
 
 ## Python
 
