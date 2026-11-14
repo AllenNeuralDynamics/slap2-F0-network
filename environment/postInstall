@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -e
+
+cd /opt
+
+git clone https://github.com/m-xie/Slap2DataReader.git
+cd Slap2DataReader
+git checkout 6f458c0045a982e62eda48f7a63d9c340efcf799
+cd ..
+
+git clone https://github.com/flatironinstitute/NoRMCorre.git
+
+git clone https://github.com/rharkes/Fast_Tiff_Write.git
+cd Fast_Tiff_Write
+git checkout ddd50c3286ff5b013d1f0478e8a5bd0d60978a75
+cd ..
+
+# Full clone with every branch and tag: the run script checks out the
+# requested refs from here (after fetching newer commits when it can)
+git clone https://github.com/AllenNeuralDynamics/GIAnT-MATLAB.git
+git -C GIAnT-MATLAB fetch --tags origin

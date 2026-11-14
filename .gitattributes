@@ -1,0 +1,6 @@
+* text=auto
+code/run text eol=lf
+environment/postInstall text eol=lf
+environment/Dockerfile text eol=lf
+*.sh text eol=lf
+*.h5 binary

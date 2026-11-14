@@ -1,0 +1,13 @@
+metadata_version: 1
+name: SLAP2 F0 network - training data
+description: Runs GIAnT (registration and SiLo) on attached SLAP2 iGluSnFR4 multiROI sessions
+  and exports, per trial, the 80 Hz registered movie with GIAnT's fitted activity on the same
+  grid and timing, for training a blind-spot network that estimates the baseline (F0) and noise.
+tags:
+- GIAnT
+- SLAP2
+- iGluSnFR
+- F0
+- training data
+corresponding_contributor:
+  name: Kaspar Podgorski

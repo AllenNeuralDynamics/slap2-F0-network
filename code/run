@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Make F0-network training data from every attached SLAP2 session.
+#
+#   ./run [--giant_ref main] [--max_duration_s 600] [--datasets all]
+#         [--n_workers 0] [--channels 1] [--keep_giant_outputs summary]
+#
+# giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
+# training target. datasets is "all" or comma-separated mount names.
+# keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
+# per_trial_summary) or none. See README.md for the output format.
+set -uo pipefail
+
+giant_ref=main
+max_duration_s=600
+datasets=all
+n_workers=0
+channels=1
+keep_giant_outputs=summary
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --*=*) name="${1#--}"; value="${name#*=}"; name="${name%%=*}"; shift ;;
+        --*) name="${1#--}"; shift; value="${1-}"; [[ $# -gt 0 ]] && shift ;;
+        *) shift; continue ;;
+    esac
+    case $name in
+        giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs) printf -v "$name" '%s' "$value" ;;
+        *) echo "Ignoring unknown parameter --$name" ;;
+    esac
+done
+
+DATA=/root/capsule/data
+RESULTS=/root/capsule/results
+SCRATCH=/root/capsule/scratch
+CODE=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$RESULTS/logs" "$SCRATCH"
+
+# GIAnT checkout: the image has a full clone; fetch newer commits when possible
+dest="$SCRATCH/giant"
+rm -rf "$dest"
+git clone -q /opt/GIAnT-MATLAB "$dest"
+git -C "$dest" fetch -q /opt/GIAnT-MATLAB '+refs/remotes/origin/*:refs/remotes/origin/*' --tags
+git -C "$dest" remote set-url origin https://github.com/AllenNeuralDynamics/GIAnT-MATLAB.git
+git -C "$dest" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' --tags 2>/dev/null \
+    || echo "Could not fetch GIAnT-MATLAB; using the refs in the image"
+if git -C "$dest" rev-parse -q --verify "origin/$giant_ref^{commit}" >/dev/null; then
+    git -C "$dest" checkout -q --detach "origin/$giant_ref"
+else
+    git -C "$dest" checkout -q --detach "$giant_ref"
+fi
+echo "GIAnT: $giant_ref -> $(git -C "$dest" rev-parse HEAD)"
+
+esc() { printf '%s' "${1//\'/\'\'}"; }
+(cd "$CODE" && matlab -batch "run_export('giantDir','$dest','giantRef','$(esc "$giant_ref")','maxDuration_s','$max_duration_s','datasets','$(esc "$datasets")','nWorkers','$n_workers','channels','$(esc "$channels")','keepGiantOutputs','$(esc "$keep_giant_outputs")','dataDir','$DATA','resultsDir','$RESULTS','scratchDir','$SCRATCH')") \
+    2>&1 | tee "$RESULTS/logs/matlab.log"
+exit "${PIPESTATUS[0]}"
