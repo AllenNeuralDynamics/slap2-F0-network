@@ -31,8 +31,9 @@ SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "n_frame
 VERSION = 2  # bump when the stats change, to invalidate caches
 
 
-def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 256, block: int = 64) -> dict:
-    """One pass over the trial in chunks of frames (chunk must be a multiple of block)."""
+def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 64) -> dict:
+    """One pass over the trial in chunks of frames (chunk must be a multiple of
+    block); chunks are float32 and sums float64, to bound memory."""
     with h5py.File(fn, "r") as f:
         _, T, R, C = f["movie"].shape
         mi = f["mean_image"][channel]
@@ -50,44 +51,44 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 256, block: int =
         prev = None  # last 2 frames of the previous chunk
         for t0 in range(0, T, chunk):
             t1 = min(T, t0 + chunk)
-            m = f["movie"][channel, t0:t1].astype(np.float64)
-            a = f["activity"][channel, t0:t1].astype(np.float64)
+            m = f["movie"][channel, t0:t1].astype(np.float32)
+            a = f["activity"][channel, t0:t1].astype(np.float32)
             m[:, ~valid] = np.nan
             m[discard[t0:t1]] = np.nan
             fin = np.isfinite(m)
             m0 = np.where(fin, m, 0)
             a0 = np.where(fin, a, 0)
-            n += fin.sum(0)
-            sm += m0.sum(0)
-            sm2 += (m0 ** 2).sum(0)
-            sa += a0.sum(0)
-            sa2 += (a0 ** 2).sum(0)
+            n += fin.sum(0, dtype=np.float64)
+            sm += m0.sum(0, dtype=np.float64)
+            sm2 += (m0 ** 2).sum(0, dtype=np.float64)
+            sa += a0.sum(0, dtype=np.float64)
+            sa2 += (a0 ** 2).sum(0, dtype=np.float64)
             x = np.where(fin & bg, m - a, np.nan)
             fx = np.isfinite(x)
             x0 = np.where(fx, x, 0)
-            sx += x0.sum(0)
-            sx2 += (x0 ** 2).sum(0)
-            sx3 += (x0 ** 3).sum(0)
+            sx += x0.sum(0, dtype=np.float64)
+            sx2 += (x0 ** 2).sum(0, dtype=np.float64)
+            sx3 += (x0 ** 3).sum(0, dtype=np.float64)
             xe = x if prev is None else np.concatenate([prev, x])
             for k in (1, 2):
                 if xe.shape[0] > k:
                     p, q = xe[:-k], xe[k:]
                     ok = np.isfinite(p) & np.isfinite(q)
                     acc = lag[k]
-                    acc[0] += np.where(ok, p * q, 0).sum(0)
-                    acc[1] += np.where(ok, p, 0).sum(0)
-                    acc[2] += np.where(ok, q, 0).sum(0)
-                    acc[3] += ok.sum(0)
+                    acc[0] += np.where(ok, p * q, 0).sum(0, dtype=np.float64)
+                    acc[1] += np.where(ok, p, 0).sum(0, dtype=np.float64)
+                    acc[2] += np.where(ok, q, 0).sum(0, dtype=np.float64)
+                    acc[3] += ok.sum(0, dtype=np.float64)
             prev = x[-2:]
             for acc, p, q in ((nb_r, x[:, :-1], x[:, 1:]), (nb_c, x[:, :, :-1], x[:, :, 1:])):
                 ok = np.isfinite(p) & np.isfinite(q)
-                acc[0] += np.where(ok, p * q, 0).sum(0)
-                acc[1] += np.where(ok, p, 0).sum(0)
-                acc[2] += np.where(ok, q, 0).sum(0)
-                acc[3] += ok.sum(0)
+                acc[0] += np.where(ok, p * q, 0).sum(0, dtype=np.float64)
+                acc[1] += np.where(ok, p, 0).sum(0, dtype=np.float64)
+                acc[2] += np.where(ok, q, 0).sum(0, dtype=np.float64)
+                acc[3] += ok.sum(0, dtype=np.float64)
             for b0 in range(0, x.shape[0] - block + 1, block):
                 xb = x[b0: b0 + block]
-                cnt = np.isfinite(xb).sum(0)
+                cnt = np.isfinite(xb).sum(0, dtype=np.float64)
                 good = cnt >= 0.75 * block
                 bm = np.where(good, np.nansum(xb, 0) / np.maximum(cnt, 1), 0)
                 bsum += bm
@@ -153,7 +154,8 @@ def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0) -> 
     files = [str(f) for f in files]
     jobs = [(f, None if cache_dir is None else str(cache_dir)) for f in files]
     if workers and len(files) > 1:
-        with ProcessPoolExecutor(max_workers=min(workers, len(files), os.cpu_count() or 1)) as ex:
+        # each worker holds a few float32 chunks of a trial (up to ~1 GB for large crops)
+        with ProcessPoolExecutor(max_workers=min(workers, 6, len(files), os.cpu_count() or 1)) as ex:
             res = list(ex.map(_cached, jobs))
     else:
         res = [_cached(j) for j in jobs]
