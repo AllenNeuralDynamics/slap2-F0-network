@@ -238,3 +238,26 @@ The run did 2557 steps of simulation pretraining (1.6 h) on 52 training trials, 
   - the mix toward the window mean is unbounded;
   - the multiplicative correction is clamped only at e^±5;
   - the variance-factor input is used raw.
+
+## v3 results (2026-11-15)
+
+v3 bounds the heads (mix in ±1, baseline correction 0.5–2×, noise correction about 20×, log variance factor clamped to ±3) and picks best.pt on 8-frame MSE vs the mean image, averaged over support and background. Two oracles that know the activity are now reported: the mean image minus the trial's mean activity (the best constant) and the blind window mean of movie − activity. The run did 4000 steps of simulation pretraining (2.4 h, all planned steps), then 1700 steps of fine-tuning on real residuals (0.9 h, learning rate 1e-4). Same split and validation windows as v2: session 878030 held out, 48 fixed windows, 8-frame MSE change vs the mean image.
+
+| | support | background | all |
+|---|---|---|---|
+| held-out simulations, after pretraining | −83% | −51% | −40% |
+| simulations, oracle (best constant) | −95% | −9% | −43% |
+| simulations, oracle (blind window) | −84% | +168% | +43% |
+| real 878030, after pretraining only | −6.4% | +0.5% | −0.6% |
+| real 878030, after fine-tuning (best.pt, step 600) | −6.0% | 0.0% | −0.9% |
+| real 878030, SiLo | −5.6% | +11.1% | +8.7% |
+| real 878030, oracle (best constant) | −9.7% | −0.1% | −1.5% |
+| real 878030, oracle (blind window) | −6.8% | +2.4% | +1.0% |
+
+- **Stable.** No loss spikes in either phase, and validation moved smoothly at every checkpoint.
+- **Longer pretraining did the work.** On held-out simulations the net now matches the blind-window oracle on support and beats the best constant on background, because it follows drift without the window's noise. Real support improved alongside simulated support up to step 2500–3000 (−6.6%), then held.
+- **Pretraining alone beats SiLo on real support pixels** (−6.4% vs −5.6%) without SiLo's background penalty (+0.5% vs +11.1%). That is two thirds of the way to the best constant (−9.7%). It rests on one held-out session.
+- **The simulator overshoots the bias correction for real data.** Real support bias went from −0.32 to +0.12 (crossing 0 at step 2500), while simulated bias settled at −0.04.
+- **Fine-tuning on real data added nothing.** The selection score went from 0.9703 (pretrained start) to 0.9698 at best, a tie. Fine-tuning pulled the mix from 0.26 to about 0, brought real support bias back to −0.07, and lost much of the simulation skill (support −83% → −68%, background −51% → −1%).
+- **Calibration:** z variance 0.95–1.0 and z mean under 0.02 on both data kinds.
+- **The simulated "all" column is erratic** (+31% at step 1500, −40% at step 4000) because it includes labeled pixels outside every footprint. Those carry weight 1 in simulations and 0 on real data. After fine-tuning the net is 27% worse than the mean image on them in simulations.
