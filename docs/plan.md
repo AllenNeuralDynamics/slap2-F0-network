@@ -218,3 +218,23 @@ The context window is noisy as a baseline but fine for Z-scores. Background pixe
 | 885233 | 9.79 / 9.73 | 0.667 / 0.671 | 0.315 / 0.315 | 0.243 / 0.246 | 0.377 / 0.380 | 3.06 / 2.83 | 3.60 / 3.57 |
 
 The simulated F64 runs 2–8% low; the real background still holds some slow structure.
+
+## v2 results (2026-11-15)
+
+The run did 2557 steps of simulation pretraining (1.6 h) on 52 training trials, then 1442 steps of fine-tuning on real residuals (0.8 h, learning rate 5e-5). Session 878030 (19 trials) was held out. Numbers are 8-frame MSE change vs the mean image on 48 fixed validation windows.
+
+| | support | background | all |
+|---|---|---|---|
+| held-out simulations, after pretraining | −19% (blind window: −31%) | −21% | −8% |
+| real 878030, after pretraining only | −0.6% | +0.2% | +0.1% |
+| real 878030, after fine-tuning | −1.4% | +0.2% | 0.0% |
+| real 878030, SiLo | −5.6% | +11.1% | +8.7% |
+
+- **Calibration:** z variance 0.98 on simulations and 0.98–0.99 on real data; z mean under 0.01.
+- **Bias moved about the same in absolute terms.** On support pixels the bias went from −0.28 to −0.23 (trial-scale units) on simulations and from −0.32 to −0.28 on real data. The percentages differ because the real 8-frame target carries photon noise, which dominates its MSE.
+- **The net is not near a limit.** On held-out simulations the plain blind window beats it on support pixels (−31% vs −19%). Fine-tuning was still improving steadily when it stopped (real support bias −0.28 → −0.24).
+- **Per-frame loss can't pick checkpoints.** Real validation loss was 0.9731 at the start of fine-tuning and 0.9730 at the end, while support MSE improved by 1%.
+- **Training is unstable.** Pretraining loss spiked to about 6·10⁴ at step 250. Real validation MSE jumped to 2.4–13 (vs 1.8) at 4 of 13 checkpoints and then recovered. Three outputs have too much room:
+  - the mix toward the window mean is unbounded;
+  - the multiplicative correction is clamped only at e^±5;
+  - the variance-factor input is used raw.
