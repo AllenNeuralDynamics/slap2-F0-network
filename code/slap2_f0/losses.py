@@ -39,6 +39,13 @@ def student_t_nll(y: torch.Tensor, mu: torch.Tensor, var: torch.Tensor, w: torch
     return _wmean(nll, w)
 
 
+def gaussian_nll(y: torch.Tensor, mu: torch.Tensor, var: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Gaussian NLL; with mu detached it fits var to the mean squared residual,
+    an unbiased variance estimate whatever the shape of the noise."""
+    var = var.clamp_min(1e-8)
+    return _wmean(0.5 * (torch.log(var) + (y - mu) ** 2 / var), w)
+
+
 def _wmean(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     w = w.to(x.dtype)
     return (x * w).sum() / w.sum().clamp_min(1.0)

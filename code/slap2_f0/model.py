@@ -16,10 +16,24 @@ docs/plan.md). The full box blind spot (v2: pixels further than a radius
 visible at the same time) adds four spatial half-plane branches and is not
 implemented yet.
 
+Inputs to the branches (``make_inputs``): the movie, its validity flag and
+three whole-trial maps (mean image, SiLo's variance factor, and the trial's
+variance relative to photon noise, which marks pixels with events). The
+whole-trial maps contain every frame with weight 1/T, a negligible leak;
+being constant in time they cannot say when an event happened.
+
+At the output frame only, the fusion layers also get blind long-window
+statistics of the movie: its mean and variance over gap < |dt| <= gap +
+window_reach. They are computed inside the model (so the blind-spot test
+covers them) and are not fed to the branches, because a context frame's
+window would reach into the hidden frames.
+
 Outputs, in units of the trial scale (see ``io.TrialFile.scale``):
-    mu      baseline, as mean_image * exp(correction), positive
-    var     noise variance; in counts (gain * mu * scale + floor) * exp(correction),
-            so a single gain fits trials of different brightness
+    mu      baseline = base * exp(correction), where base = mean image +
+            mix * (window mean - mean image); correction and mix start at 0,
+            so the untrained network predicts the mean image exactly
+    var     noise variance; in counts (gain * mu * scale + floor) *
+            exp(correction), with the trial's measured gain (``stats``)
 """
 
 from __future__ import annotations
@@ -32,7 +46,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-N_INPUTS = 4  # movie, valid flag, mean image, variance factor
+N_INPUTS = 5  # movie, valid flag, mean image, variance factor, log variance ratio
+N_FEATS = 6  # output-frame features for the fusion layers (SlabBlindSpotNet._features)
 
 
 @dataclass
@@ -45,6 +60,7 @@ class ModelConfig:
     spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 1, 1, 2, 2, 4])
     spatial_kernel: int = 3  # 1 = each pixel's own trace only
     n_inputs: int = N_INPUTS
+    window_reach: int = 254  # frames beyond the gap for the blind window statistics
     # memory: the first full_res_blocks blocks of each branch run at full
     # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
     # so the blind spot in time is unaffected); checkpointing recomputes blocks
@@ -146,6 +162,24 @@ class CausalBranch(nn.Module):
         return h
 
 
+def blind_window_stats(m: torch.Tensor, v: torch.Tensor, gap: int, reach: int):
+    """Mean, variance and count of m over frames gap < |dt| <= gap + reach.
+
+    m, v: (B, T, H, W), v the validity (0/1), m zero where invalid. Returns
+    mean and variance (zero where there are no frames) and the count."""
+    T = m.shape[1]
+    m, v = m.float(), v.float()
+    cs = [F.pad(x.cumsum(1), (0, 0, 0, 0, 1, 0)) for x in (m * v, m * m * v, v)]
+    t = torch.arange(T, device=m.device)
+    a1, b1 = (t - gap - reach).clamp(0, T), (t - gap).clamp(0, T)
+    a2, b2 = (t + gap + 1).clamp(0, T), (t + gap + reach + 1).clamp(0, T)
+    s1, s2, n = [c[:, b1] - c[:, a1] + c[:, b2] - c[:, a2] for c in cs]
+    nn_ = n.clamp_min(1)
+    mean = s1 / nn_
+    var = (s2 / nn_ - mean ** 2).clamp_min(0)
+    return mean, var, n
+
+
 class SlabBlindSpotNet(nn.Module):
     """Past and future causal branches fused pointwise; see the module docstring."""
 
@@ -155,58 +189,84 @@ class SlabBlindSpotNet(nn.Module):
         w = self.cfg.width
         self.past = CausalBranch(self.cfg)
         self.future = CausalBranch(self.cfg)
-        self.fuse = nn.Sequential(nn.Conv3d(2 * w, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
+        self.fuse = nn.Sequential(nn.Conv3d(2 * w + N_FEATS, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
+        self.head_mix = nn.Conv3d(w, 1, 1)
         self.head_var = nn.Conv3d(w, 1, 1)
-        nn.init.zeros_(self.head_mu.weight)
-        nn.init.zeros_(self.head_mu.bias)
-        nn.init.zeros_(self.head_var.weight)
-        nn.init.zeros_(self.head_var.bias)
-        # noise model in movie counts: var = (gain * mu + floor) * exp(s). The
-        # movie's variance is about 6.6 x its mean on 780125 (photons times
-        # detector gain, with the 80 Hz kernel); start there.
-        self.log_gain = nn.Parameter(torch.tensor(math.log(6.6)))
-        self.log_floor = nn.Parameter(torch.tensor(0.0))
+        for head in (self.head_mu, self.head_mix, self.head_var):
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+        self.log_floor = nn.Parameter(torch.tensor(0.0))  # variance floor, counts^2
 
-    def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None,
-                region: tuple[slice, slice, slice] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _features(self, x, wm, wv, n, gs):
+        """Output-frame features, all O(1): window mean and variance relative to
+        the mean image and to photon noise, the fraction of the window with
+        data, log mean image, log variance ratio and variance factor."""
+        mi = x[:, 2].clamp_min(1e-3)
+        has = n > 0
+        f1 = torch.where(has, torch.log(wm.clamp_min(1e-3) / mi), torch.zeros_like(mi))
+        f2 = torch.where(has, torch.log((wv + 1e-6) / (gs * wm.clamp_min(1e-3))), torch.zeros_like(mi))
+        f3 = n / (2 * self.cfg.window_reach)
+        return torch.stack([f1.clamp(-3, 3), f2.clamp(-3, 5), f3, torch.log(mi), x[:, 4], x[:, 3]], 1)
+
+    def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None, gain: torch.Tensor | None = None,
+                region: tuple[slice, slice, slice] | None = None, aux: bool = False):
         """x: (B, n_inputs, T, H, W) from ``make_inputs``; scale (B,) the trial
-        scale the inputs were divided by; region (frames, rows, cols) limits the
-        output to that part of the window (training needs only the loss region,
-        and the pointwise layers then run only there). Returns mu and var, each
-        (B, T', H', W'), in units of the trial scale. The noise model is applied
-        in counts (mu * scale), so one gain fits trials of any brightness."""
+        scale the inputs were divided by; gain (B,) the trial's variance/mean
+        ratio in counts; region (frames, rows, cols) limits the output to that
+        part of the window (training needs only the loss region, and the
+        pointwise layers then run only there). Returns mu and var, each (B, T',
+        H', W'), in units of the trial scale, and with aux=True a dict with the
+        window mean, the base and the mix."""
+        B = x.shape[0]
+        s = torch.ones(B, device=x.device) if scale is None else scale.to(x.device).float()
+        g = torch.full((B,), 10.0, device=x.device) if gain is None else gain.to(x.device).float()
         hp = self.past(x)
         hf = self.future(x.flip(2)).flip(2)
+        wm, wv, n = blind_window_stats(x[:, 0], x[:, 1], self.cfg.gap, self.cfg.window_reach)
         if region is not None:
             sel = (slice(None), slice(None)) + tuple(region)
             hp, hf, x = hp[sel], hf[sel], x[sel]
-        h = self.fuse(torch.cat([hp, hf], 1))
-        mean_image = x[:, 2:3].clamp_min(1e-3)
-        mu = mean_image * torch.exp(self.head_mu(h).clamp(-5, 5))
-        s = torch.ones(x.shape[0], device=x.device, dtype=mu.dtype) if scale is None else scale.to(mu.dtype)
-        s = s.view(-1, 1, 1, 1, 1)
-        var_counts = self.log_gain.exp() * mu * s + self.log_floor.exp()
-        var = var_counts / s ** 2 * torch.exp(self.head_var(h).clamp(-4, 4))
-        return mu[:, 0], var[:, 0]
+            wm, wv, n = (a[(slice(None),) + tuple(region)] for a in (wm, wv, n))
+        gs = (g / s).view(-1, 1, 1, 1)  # gain in scale units: var = gs * mu
+        feats = self._features(x.float(), wm, wv, n, gs).to(hp.dtype)
+        h = self.fuse(torch.cat([hp, hf, feats], 1))
+        mi = x[:, 2].float()
+        wm = torch.where(n > 0, wm, mi)
+        mix = self.head_mix(h)[:, 0].float()
+        base = (mi + mix * (wm - mi)).clamp_min(1e-4)
+        mu = base * torch.exp(self.head_mu(h)[:, 0].float().clamp(-5, 5))
+        var = (gs * mu + self.log_floor.exp() / s.view(-1, 1, 1, 1) ** 2) * \
+            torch.exp(self.head_var(h)[:, 0].float().clamp(-4, 4))
+        if aux:
+            return mu, var, {"window_mean": wm, "base": base, "mix": mix}
+        return mu, var
 
 
-def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Tensor, scale: torch.Tensor,
+                var_map: torch.Tensor | None = None, gain: torch.Tensor | None = None) -> torch.Tensor:
     """Network inputs from a batch of windows.
 
-    movie (B, T, H, W) with NaN where there is no data; mean_image and varfac
-    (B, H, W); scale (B,). Returns (B, 4, T, H, W): movie / scale with missing
-    values as 0, a validity flag, mean image / scale, and the variance factor
-    relative to its median. The mean image is a whole-trial average, so it
-    contains each frame with weight 1/T; that leak through the blind spot is
-    negligible for trials of thousands of frames.
+    movie (B, T, H, W) in counts with NaN where there is no data; mean_image,
+    varfac and var_map (B, H, W), the last a whole-trial map in counts^2;
+    scale and gain (B,). Returns (B, 5, T, H, W): movie / scale with missing
+    values as 0, a validity flag, mean image / scale, the variance factor
+    relative to its median, and log(var_map / (gain * mean image)), about 0
+    where photon noise explains the variance and positive where events add to
+    it. The mean image is a whole-trial average, so it contains each frame
+    with weight 1/T; that leak through the blind spot is negligible for trials
+    of thousands of frames.
     """
+    B, T = movie.shape[:2]
     s = scale.view(-1, 1, 1, 1)
     valid = torch.isfinite(movie)
     m = torch.where(valid, movie, torch.zeros_like(movie)) / s
     mi = torch.nan_to_num(mean_image / s.squeeze(1), nan=0.0)
     vf = varfac / varfac.flatten(1).median(1).values.clamp_min(1e-6).view(-1, 1, 1)
-    T = movie.shape[1]
-    return torch.stack(
-        [m, valid.float(), mi.unsqueeze(1).expand(-1, T, -1, -1), vf.unsqueeze(1).expand(-1, T, -1, -1)], 1
-    )
+    if var_map is None:
+        vr = torch.zeros_like(mi)
+    else:
+        g = torch.full((B,), 10.0, device=movie.device) if gain is None else gain
+        ratio = var_map / (g.view(-1, 1, 1) * mean_image.clamp_min(1e-3))
+        vr = torch.nan_to_num(torch.log(ratio.clamp_min(1e-3)), nan=0.0).clamp(-3, 5)
+    return torch.stack([m, valid.float()] + [a.unsqueeze(1).expand(-1, T, -1, -1) for a in (mi, vf, vr)], 1)

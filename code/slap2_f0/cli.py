@@ -7,6 +7,7 @@ import argparse
 import numpy as np
 
 from . import ceiling as ceiling_mod
+from . import simulate as simulate_mod
 from . import train as train_mod
 from .io import TrialFile, list_trials
 
@@ -40,6 +41,9 @@ def main(argv=None) -> None:
     pc = sub.add_parser("ceiling", help="reference baselines: how much there is for the network to learn")
     ceiling_mod.add_arguments(pc)
     pc.set_defaults(func=ceiling_mod.run)
+    ps = sub.add_parser("simcheck", help="simulate trials from templates and compare their noise statistics")
+    simulate_mod.add_check_arguments(ps)
+    ps.set_defaults(func=simulate_mod.check)
     args = p.parse_args(argv)
     args.func(args)
 

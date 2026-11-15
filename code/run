@@ -17,8 +17,12 @@
 # train: train the blind-spot network on the exported trials found anywhere
 # under the attached data assets (results of export runs), on the GPU if
 # there is one.
-#   ./run --mode train [--train_args "--steps 20000 --batch 8 ..."]
-#   train_args is passed to `slap2-f0 train` (see code/slap2_f0/cli.py).
+#   ./run --mode train [--train_args "--data sim --steps 4000 ..."]
+#         [--finetune_args "--data real --steps 2000 ..."]
+#   train_args is passed to `slap2-f0 train` (see code/slap2_f0/cli.py), with
+#   results in results/train. If finetune_args is given, a second training
+#   then starts from results/train/best.pt (results in results/finetune),
+#   e.g. simulation pretraining followed by fine-tuning on real residuals.
 #
 # See README.md for the output formats.
 set -uo pipefail
@@ -31,6 +35,7 @@ n_workers=0
 channels=1
 keep_giant_outputs=summary
 train_args=""
+finetune_args=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,7 +44,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args|finetune_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -56,6 +61,14 @@ if [[ "$mode" == "train" ]]; then
     # shellcheck disable=SC2086  # train_args is a list of arguments
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
         2>&1 | tee "$RESULTS/logs/train.log"
+    status="${PIPESTATUS[0]}"
+    if [[ "$status" -ne 0 || -z "$finetune_args" ]]; then
+        exit "$status"
+    fi
+    # shellcheck disable=SC2086
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/finetune" \
+        --init "$RESULTS/train/best.pt" --stats_cache "$RESULTS/train/stats" $finetune_args \
+        2>&1 | tee "$RESULTS/logs/finetune.log"
     exit "${PIPESTATUS[0]}"
 elif [[ "$mode" == "probe" ]]; then
     # peak GPU memory and time per step over model settings; train_args here

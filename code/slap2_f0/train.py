@@ -1,14 +1,28 @@
 """Training loop for the blind-spot baseline network.
 
+Two kinds of data (``--data``):
+    sim   simulated windows built on real trials as templates, with the true,
+          noise-free baseline as the target (``simulate``): pretraining
+    real  real windows, with movie - activity as the (noisy) target:
+          fine-tuning, usually from a simulation-pretrained checkpoint
+          (``--init``)
+
+Loss (``_losses``): squared error of the baseline weighted by 1 / photon-
+noise variance, which is minimized by the mean (unbiased at any brightness),
+plus ``w_var`` times a Gaussian NLL for the noise head around the detached
+baseline.
+
 Files are split into training and validation by session when there are at
 least three sessions (so validation measures generalization to unseen
-sessions), otherwise by trial. Validation uses a fixed set of windows and
-reports the likelihood plus calibration of the predicted noise: z = (target -
-mu) / sqrt(var) should have mean 0 and variance 1 (about 95% within +-2 for a
-Gaussian), which is what Z-scoring events in SiLo relies on.
+sessions), otherwise by trial. Every validation evaluates fixed windows from
+the held-out files, both real (``real_*``) and simulated (``sim_*``), and
+from the training files (``tr_*``); see ``evaluate`` for the metrics. The
+checkpoint with the lowest held-out mean loss of the training data kind is
+kept as best.pt; the untrained network (step 0, which predicts the mean
+image) is a candidate, so best.pt is never worse than the start.
 
 Outputs in --out: config.json, metrics.csv (one row per validation),
-last.pt and best.pt (lowest validation loss).
+last.pt, best.pt and stats/ (cached whole-trial statistics).
 """
 
 from __future__ import annotations
@@ -28,8 +42,10 @@ from torch.utils.data import DataLoader
 
 from .data import WindowConfig, WindowDataset, loss_region
 from .io import TrialFile, list_trials
-from .losses import beta_nll, student_t_nll
+from .losses import gaussian_nll, student_t_nll
 from .model import ModelConfig, SlabBlindSpotNet, make_inputs
+from .simulate import SimConfig
+from .stats import load_stats
 
 
 def split_files(files: list[Path], val_fraction: float, seed: int = 0) -> tuple[list[Path], list[Path], str]:
@@ -54,19 +70,51 @@ def split_files(files: list[Path], val_fraction: float, seed: int = 0) -> tuple[
     return train, val, f"by trial ({len(groups)} session(s))"
 
 
-def _loss(args, y, mu, var, w):
-    if args.loss == "student":
-        return student_t_nll(y, mu, var, w, nu=args.nu)
-    return beta_nll(y, mu, var, w, beta=args.beta)
+def _ref_var(b, region):
+    """Photon-noise variance at the mean image (scale units), a fixed per-pixel
+    weight for the mean loss that does not depend on the model."""
+    s = b["scale"].view(-1, 1, 1)
+    mi = (b["mean_image"] / s)[(slice(None),) + region[1:]].clamp_min(1e-3)
+    gs = (b["gain"] / b["scale"]).view(-1, 1, 1)
+    return torch.nan_to_num(gs * mi + 1.0 / s ** 2, nan=1.0).unsqueeze(1)
 
 
-def _forward(model, b, device, amp_dtype, region):
+def _losses(args, b, mu, var, region):
+    """Mean loss: squared error against the target weighted by 1 / photon-noise
+    variance, which is minimized by the conditional mean, so it is unbiased at
+    any brightness (unlike a robust likelihood on skewed low counts). Noise
+    loss: Gaussian NLL of movie - activity around the detached mean, so the
+    variance head learns the actual spread around the predicted baseline."""
+    sel = (slice(None),) + region
+    w = b["weight"][sel]
+    y, yn = b["target"][sel], b["noisy"][sel]
+    mu_loss = (w * (y - mu) ** 2 / _ref_var(b, region)).sum() / w.sum().clamp_min(1.0)
+    var_loss = gaussian_nll(yn, mu.detach(), var, w)
+    return args.w_mu * mu_loss + args.w_var * var_loss, mu_loss, var_loss
+
+
+def _forward(model, b, device, amp_dtype, region, aux=False):
     """Model outputs on the loss region only (mu, var: (B, frames, rows, cols))."""
     b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
-    x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"])
+    x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"], b["var_map"], b["gain"])
     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-        mu, var = model(x, b["scale"], region)
-    return b, mu.float(), var.float()
+        out = model(x, b["scale"], b["gain"], region, aux=aux)
+    if aux:
+        return b, out[0].float(), out[1].float(), out[2]
+    return b, out[0].float(), out[1].float()
+
+
+def movmean_t(x: torch.Tensor, w: torch.Tensor, k: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+    """Weighted moving mean over k frames along dim 1 (SiLo's IMs for k = 8);
+    returns the mean and the summed weight."""
+    T = x.shape[1]
+    cs = F.pad((x * w).cumsum(1), (0, 0, 0, 0, 1, 0))
+    cw = F.pad(w.cumsum(1), (0, 0, 0, 0, 1, 0))
+    lo, hi = k // 2, k - k // 2
+    t = torch.arange(T, device=x.device)
+    a, b = (t - lo).clamp(0, T), (t + hi).clamp(0, T)
+    n = cw[:, b] - cw[:, a]
+    return (cs[:, b] - cs[:, a]) / n.clamp_min(1e-9), n
 
 
 def silo_baseline(movie: torch.Tensor, scale: torch.Tensor, region, smooth: int = 8, window: int = 321) -> torch.Tensor:
@@ -96,38 +144,87 @@ def silo_baseline(movie: torch.Tensor, scale: torch.Tensor, region, smooth: int 
 
 @torch.no_grad()
 def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]:
-    """Validation loss and calibration of the network, plus the mean squared
-    error of its baseline and of two references on the same targets: today's
-    SiLo baseline (moving median) and the trial's mean image (the network's
-    starting point). The target's photon noise adds the same amount to every
-    MSE, so differences between them are differences in baseline error."""
+    """Mean loss, noise calibration and baseline errors on fixed windows.
+
+    Baselines compared against the target (the true baseline for simulated
+    windows, movie - activity for real ones): the network, the mean image (its
+    starting point), the blind window mean (its other built-in reference) and
+    today's SiLo baseline (moving median). Errors per frame (mse_*) and on
+    8-frame averages (mse8_*, what SiLo Z-scores), on all loss pixels and
+    split into footprint support and unlabeled background. For real targets
+    the photon noise adds the same amount to every MSE; for simulated ones the
+    MSE is the baseline error itself. bias_* = mean(target - baseline).
+    Calibration: z = (movie - activity - mu) / sqrt(var) should have mean 0 and
+    variance 1; r8 is the variance of 8-frame averages of the residual over
+    the mean predicted per-frame variance (the factor that converts the
+    network's sigma to SiLo's)."""
     model.eval()
     sel = (slice(None),) + region
     tot = defaultdict(float)
     for b in loader:
-        b, m, v = _forward(model, b, device, amp_dtype, region)
-        y, w = b["target"][sel], b["weight"][sel]
-        mi = (b["mean_image"] / b["scale"].view(-1, 1, 1))[(slice(None),) + region[1:]].unsqueeze(1)
-        mb = silo_baseline(b["movie"], b["scale"], region)
-        w = w * torch.isfinite(mb) * torch.isfinite(mi)
-        n = w.sum().item()
-        if n == 0:
+        b, m, v, aux = _forward(model, b, device, amp_dtype, region, aux=True)
+        y, yn, w = b["target"][sel], b["noisy"][sel], b["weight"][sel]
+        s = b["scale"].view(-1, 1, 1)
+        mi = (b["mean_image"] / s)[(slice(None),) + region[1:]].unsqueeze(1).expand_as(y)
+        silo = silo_baseline(b["movie"], b["scale"], region)
+        w = w * torch.isfinite(silo) * torch.isfinite(mi)
+        if w.sum() == 0:
             continue
-        y0 = torch.nan_to_num(y)
-        tot["loss"] += _loss(args, y0, m, v, w).item() * n
-        z = (y0 - m) / v.sqrt()
+        preds = {"net": m, "mean_image": torch.nan_to_num(mi), "window": aux["window_mean"],
+                 "silo": torch.nan_to_num(silo)}
+        sup = b["support"][(slice(None),) + region[1:]].bool().unsqueeze(1)
+        bg = ~b["labeled"][(slice(None),) + region[1:]].bool().unsqueeze(1)
+        classes = {"": w, "sup_": w * sup, "bg_": w * bg}
+        y8, n8 = movmean_t(y, w)
+        w8 = w * (n8 >= 4)
+        for cname, cw in classes.items():
+            n = cw.sum().item()
+            if n == 0:
+                continue
+            tot[cname + "n"] += n
+            cw8 = cw * w8
+            tot[cname + "n8"] += cw8.sum().item()
+            for pname, p in preds.items():
+                d = y - p
+                tot[f"{cname}mse_{pname}"] += (cw * d ** 2).sum().item()
+                p8, _ = movmean_t(p, w)
+                tot[f"{cname}mse8_{pname}"] += (cw8 * (y8 - p8) ** 2).sum().item()
+                if cname == "" or pname == "net":
+                    tot[f"{cname}bias_{pname}"] += (cw * d).sum().item()
+        n = w.sum().item()
+        tot["loss"] += (w * (y - m) ** 2 / _ref_var(b, region)).sum().item()
+        tot["var_loss"] += gaussian_nll(yn, m, v, w).item() * n
+        z = (yn - m) / v.sqrt()
         tot["z"] += (z * w).sum().item()
         tot["z2"] += (z ** 2 * w).sum().item()
         tot["in2"] += ((z.abs() < 2).float() * w).sum().item()
-        tot["mse_net"] += (((y0 - m) ** 2) * w).sum().item()
-        tot["mse_silo"] += (((y0 - torch.nan_to_num(mb)) ** 2) * w).sum().item()
-        tot["mse_mean_image"] += (((y0 - torch.nan_to_num(mi)) ** 2) * w).sum().item()
-        tot["n"] += n
+        r8, _ = movmean_t(yn - m, w)
+        tot["r8_num"] += (w8 * r8 ** 2).sum().item()
+        tot["r8_den"] += (w8 * v).sum().item()
+        tot["mix"] += (w * aux["mix"]).sum().item()
     model.train()
     n = max(tot["n"], 1.0)
+    out = {"loss": tot["loss"] / n, "var_loss": tot["var_loss"] / n}
     zm = tot["z"] / n
-    return {"val_loss": tot["loss"] / n, "z_mean": zm, "z_var": tot["z2"] / n - zm ** 2, "within_2": tot["in2"] / n,
-            "mse_net": tot["mse_net"] / n, "mse_silo": tot["mse_silo"] / n, "mse_mean_image": tot["mse_mean_image"] / n}
+    out.update(z_mean=zm, z_var=tot["z2"] / n - zm ** 2, within_2=tot["in2"] / n,
+               r8=tot["r8_num"] / max(tot["r8_den"], 1e-9), mix=tot["mix"] / n)
+    for k, v in tot.items():
+        if "_mse" in k or k.startswith("mse") or "bias_" in k:
+            cname = k.split("mse")[0] if "mse" in k else k.split("bias_")[0]
+            denom = tot.get(cname + ("n8" if "mse8_" in k else "n"), 0.0)
+            out[k] = v / max(denom, 1.0)
+    return out
+
+
+def _model_config(args) -> ModelConfig:
+    mcfg = ModelConfig(gap=args.gap, width=args.width, spatial_kernel=args.spatial_kernel,
+                       downsample=args.downsample, full_res_blocks=args.full_res_blocks,
+                       checkpoint=not args.no_checkpoint, window_reach=args.window_reach)
+    if args.temporal_dilations:
+        mcfg.temporal_dilations = [int(d) for d in args.temporal_dilations.split(",")]
+    if args.spatial_dilations:
+        mcfg.spatial_dilations = [int(d) for d in args.spatial_dilations.split(",")]
+    return mcfg
 
 
 def train(args) -> None:
@@ -136,13 +233,9 @@ def train(args) -> None:
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
     train_files, val_files, how = split_files(files, args.val_fraction, args.seed)
-    mcfg = ModelConfig(gap=args.gap, width=args.width, spatial_kernel=args.spatial_kernel,
-                       downsample=args.downsample, full_res_blocks=args.full_res_blocks,
-                       checkpoint=not args.no_checkpoint)
-    if args.temporal_dilations:
-        mcfg.temporal_dilations = [int(d) for d in args.temporal_dilations.split(",")]
-    if args.spatial_dilations:
-        mcfg.spatial_dilations = [int(d) for d in args.spatial_dilations.split(",")]
+    mcfg = _model_config(args)
+    if mcfg.gap + mcfg.window_reach > mcfg.gap + 1 + mcfg.temporal_reach:
+        raise SystemExit("window_reach must not exceed the temporal reach + 1 (the window would run out)")
     wcfg = WindowConfig(out_frames=args.out_frames, out_px=args.out_px,
                         t_reach=mcfg.gap + 1 + mcfg.temporal_reach, s_reach=mcfg.spatial_reach,
                         w_unfitted=args.w_unfitted)
@@ -150,7 +243,18 @@ def train(args) -> None:
     amp_dtype = None
     if device.type == "cuda" and not args.no_amp:
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    stats = load_stats(files, args.stats_cache or out / "stats", workers=args.workers)
+    print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; gain "
+          + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)
+
     model = SlabBlindSpotNet(mcfg).to(device)
+    if args.init:
+        ck = torch.load(args.init, map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        print(f"initialized from {args.init} (step {ck.get('step')})")
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
@@ -158,59 +262,64 @@ def train(args) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps)))))
 
+    sim = SimConfig() if args.data == "sim" else None
     kw = dict(num_workers=args.workers, persistent_workers=args.workers > 0, pin_memory=device.type == "cuda")
-    dl = DataLoader(WindowDataset(train_files, wcfg, length=args.steps * args.batch, seed=args.seed),
-                    batch_size=args.batch, **kw)
-    vl = DataLoader(WindowDataset(val_files, wcfg, length=args.val_windows, seed=10_000 + args.seed),
-                    batch_size=args.batch, **kw) if val_files else None
-    # fixed windows from the training files: did the network learn anything at all?
-    tl = DataLoader(WindowDataset(train_files, wcfg, length=args.val_windows, seed=20_000 + args.seed),
-                    batch_size=args.batch, **kw) if val_files else None
+    mk = lambda fl, n, seed, s: DataLoader(WindowDataset(fl, wcfg, stats, length=n, seed=seed, sim=s,  # noqa: E731
+                                                         flip=seed == args.seed and not args.no_flip),
+                                           batch_size=args.batch, **kw)
+    dl = mk(train_files, args.steps * args.batch, args.seed, sim)
+    evals = {}
+    if val_files:
+        evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
+        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, SimConfig())
+    evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim)  # did it learn anything at all?
     region = loss_region(wcfg)
-    sel = (slice(None),) + region
+    sel_key = f"{args.data}_loss" if val_files else "tr_loss"
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps({
         "model": asdict(mcfg), "window": asdict(wcfg), "args": vars(args), "n_params": n_params,
-        "device": str(device), "amp": str(amp_dtype), "split": how,
+        "device": str(device), "amp": str(amp_dtype), "split": how, "sim": asdict(SimConfig()),
         "train_files": [str(f) for f in train_files], "val_files": [str(f) for f in val_files],
     }, indent=2, default=str))
-    print(f"{len(files)} trial files; split {how}: {len(train_files)} train, {len(val_files)} validation")
+    print(f"{len(files)} trial files; split {how}: {len(train_files)} train, {len(val_files)} validation; "
+          f"training on {args.data} data, selecting on {sel_key}")
     print(f"model {n_params:,} parameters on {device} (amp {amp_dtype}); window {wcfg.out_frames + 2 * wcfg.t_reach} frames x "
           f"{wcfg.out_px + 2 * wcfg.s_reach}^2 px, loss on {wcfg.out_frames} x {wcfg.out_px}^2", flush=True)
 
-    fields = ["step", "train_loss", "val_loss", "z_mean", "z_var", "within_2", "mse_net", "mse_silo",
-              "mse_mean_image", "tr_loss", "tr_z_mean", "tr_mse_net", "tr_mse_mean_image", "lr", "elapsed_s"]
-    with open(out / "metrics.csv", "w", newline="") as fh:
-        csv.writer(fh).writerow(fields)
+    fields = None
     best = math.inf
     ema = None
-    t0 = time.time()
-
-    def validate(step):
-        m = evaluate(model, vl, region, device, amp_dtype, args)
-        mt = evaluate(model, tl, region, device, amp_dtype, args)
-        m.update({"tr_loss": mt["val_loss"], "tr_z_mean": mt["z_mean"], "tr_mse_net": mt["mse_net"],
-                  "tr_mse_mean_image": mt["mse_mean_image"]})
-        row = {"step": step, "train_loss": ema if ema is not None else float("nan"), **m,
-               "lr": sched.get_last_lr()[0], "elapsed_s": time.time() - t0}
-        with open(out / "metrics.csv", "a", newline="") as fh:
-            csv.writer(fh).writerow([row[k] for k in fields])
-        print(f"validation at step {step}: " + " ".join(f"{k} {v:.4f}" for k, v in m.items()), flush=True)
-        return m
-
-    if vl is not None:
-        validate(0)  # the untrained network: mean image as baseline, Poisson-like noise
 
     def save(name, step):
         torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "config": asdict(mcfg),
                     "window": asdict(wcfg), "step": step}, out / name)
 
+    def validate(step):
+        nonlocal fields, best
+        row = {"step": step, "train_loss": ema if ema is not None else float("nan")}
+        for name, loader in evals.items():
+            for k, v in evaluate(model, loader, region, device, amp_dtype, args).items():
+                row[f"{name}_{k}"] = v
+        row.update(lr=sched.get_last_lr()[0], elapsed_s=time.time() - t0)
+        if fields is None:
+            fields = list(row)
+            with open(out / "metrics.csv", "w", newline="") as fh:
+                csv.writer(fh).writerow(fields)
+        with open(out / "metrics.csv", "a", newline="") as fh:
+            csv.writer(fh).writerow([row.get(k, float("nan")) for k in fields])
+        show = [k for k in fields if any(k.endswith(s) for s in
+                ("_loss", "_z_mean", "_z_var", "_r8", "_mix", "mse8_net", "mse8_mean_image", "mse8_window", "mse8_silo",
+                 "_bias_net"))]
+        print(f"validation at step {step}: " + " ".join(f"{k} {row[k]:.4g}" for k in show), flush=True)
+        if row.get(sel_key, math.inf) < best:  # step 0 counts: never keep a model worse than the start
+            best = row[sel_key]
+            save("best.pt", step)
+
+    validate(0)
     step = 0
     for step, b in enumerate(dl, 1):
         b, mu, var = _forward(model, b, device, amp_dtype, region)
-        loss = _loss(args, b["target"][sel], mu, var, b["weight"][sel])
+        loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
@@ -218,22 +327,19 @@ def train(args) -> None:
         scaler.step(opt)
         scaler.update()
         sched.step()
-        ema = loss.item() if ema is None else 0.98 * ema + 0.02 * loss.item()
+        ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
             mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
-            print(f"step {step} loss {loss.item():.4f} (avg {ema:.4f}) lr {sched.get_last_lr()[0]:.2e} "
-                  f"{time.time() - t0:.0f} s{mem}", flush=True)
+            print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
+                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}", flush=True)
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
-        if vl is not None and (step % args.val_every == 0 or last_step):
-            m = validate(step)
-            if m["val_loss"] < best:
-                best = m["val_loss"]
-                save("best.pt", step)
+        if step % args.val_every == 0 or last_step:
+            validate(step)
         if step % args.save_every == 0 or last_step:
             save("last.pt", step)
         if last_step:
             break
-    print(f"done after {step} steps, {time.time() - t0:.0f} s; best validation loss {best:.4f}")
+    print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
 
 
 def probe(args) -> None:
@@ -276,7 +382,7 @@ def probe(args) -> None:
                 t1 = time.time()
                 x = make_inputs(movie, mean, vf, scale)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                    mu, var = model(x, scale, region)
+                    mu, var = model(x, scale, region=region)
                 loss = student_t_nll(y, mu.float(), var.float(), w8)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
@@ -329,9 +435,14 @@ def add_arguments(p) -> None:
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--loss", choices=["beta", "student"], default="student")
-    p.add_argument("--beta", type=float, default=0.5)
-    p.add_argument("--nu", type=float, default=5.0)
+    p.add_argument("--data", choices=["sim", "real"], default="sim",
+                   help="train on simulated windows (true baseline) or real residuals")
+    p.add_argument("--init", default="", help="start from this checkpoint (e.g. a simulation-pretrained best.pt)")
+    p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
+    p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
+    p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
+    p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")
+    p.add_argument("--no_flip", action="store_true", help="no random flips of training windows")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)
     p.add_argument("--val_every", type=int, default=1000)

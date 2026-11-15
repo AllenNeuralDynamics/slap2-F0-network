@@ -2,7 +2,7 @@
 
 A blind-spot network that estimates the baseline (F0) and the noise of SLAP2 glutamate (iGluSnFR4) movies. It is meant to replace the moving-median baseline that GIAnT's SiLo uses to localize sources. The baseline it predicts at a pixel and frame never sees that pixel's own recent frames, so an event cannot push the baseline up. Its noise estimate Z-scores events.
 
-The network is trained on residuals: the 80 Hz registered movie minus the activity GIAnT fitted. It is integrated into GIAnT as a Python step after registration that writes baseline and noise files next to the registered movies.
+The network is pretrained on simulated trials with a known baseline, built on real trials as templates, then fine-tuned on residuals: the 80 Hz registered movie minus the activity GIAnT fitted. It is integrated into GIAnT as a Python step after registration that writes baseline and noise files next to the registered movies.
 
 The design, measurements and phases are in [docs/plan.md](docs/plan.md).
 
@@ -12,9 +12,9 @@ The design, measurements and phases are in [docs/plan.md](docs/plan.md).
 |---|---|
 | Training-data export (`code/matlab/exportF0TrainingData.m`) | Working. Tested on four 780125 trials: after the per-trial gain (0.83–0.97), the movie-on-activity slope is 0.98–1.03 |
 | Code Ocean data capsule ("SLAP2 F0 network - training data", `run --mode export`) | First 180 s runs in progress (780125, 885233) |
-| Code Ocean training capsule (`run --mode train`) | Code ready, tested on CPU; the GPU capsule (PyTorch starter) is not created yet (see Training) |
+| Code Ocean training capsule (`run --mode train`) | GPU capsule running. The first network (v1, Student-t loss on real residuals) lost to the plain mean image on a held-out session; see docs/plan.md "Results" |
 | Session list (`sessions/slap2_iglusnfr4_sessions.csv`) | 142 iGluSnFR4 multiROI sessions on `aind-open-data`; start with the 4 integration-test sessions |
-| Python package (`code/slap2_f0`) | Reader, slab blind-spot model (v0/v1), likelihoods, training loop with validation and calibration, tests; not trained yet |
+| Python package (`code/slap2_f0`) | v2: whole-trial stats, simulator, model with blind window statistics and a mean-image start, unbiased loss, sim/real training, ceiling analysis, tests |
 | Integration into GIAnT | Not started |
 
 ## Repository layout
@@ -27,8 +27,8 @@ code/
   run_export.m         per session: trial table -> trim -> MultiRoiRegistration -> SILo -> export
   startup.m            MATLAB path for the capsule (SLAP2 reader, NoRMCorre, Fast_Tiff_Write)
   matlab/              exportF0TrainingData.m, trimTrialTableSLAP2.m
-  slap2_f0/            Python package: io, data, model, losses, train, cli
-  tests/               pytest (blind-spot exactness, likelihoods, reader, training smoke test)
+  slap2_f0/            Python package: io, stats, simulate, data, model, losses, train, ceiling, cli
+  tests/               pytest (blind-spot exactness, simulator, likelihoods, reader, ceiling, training smoke tests)
 environment/           Dockerfile and postInstall (MATLAB R2023b, Slap2DataReader, GIAnT-MATLAB, PyTorch)
 .codeocean/            the capsule's machine (each capsule keeps its own; see below)
 metadata/              Code Ocean capsule metadata
@@ -85,12 +85,33 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 
 ## Training
 
-`slap2-f0 train <folder>` trains the slab blind-spot network on every exported trial under `<folder>`.
+`slap2-f0 train <folder>` trains the slab blind-spot network on the exported trials under `<folder>`.
 
+- **Data** (`--data`):
+  - `sim` (default): simulated windows with the true baseline as the target (`slap2_f0/simulate.py`), for pretraining.
+  - `real`: real windows with movie − activity as the target, for fine-tuning a pretrained checkpoint (`--init best.pt`).
+- **Simulation.** Each training window is a new virtual trial built on a random real trial:
+  - **Baseline:** its whole-trial mean minus its mean activity, times a slow drift (bleaching up to 5%, fluctuations up to 2%).
+  - **Events:** its own fitted activity, shifted in time and rescaled.
+  - **Noise:** photon noise matched to the trial's measured gain, temporal and spatial correlations, long-average inflation and skew (`slap2_f0/stats.py`).
+  - **Check:** `slap2-f0 simcheck <folder>` compares the simulated noise statistics with the real ones.
+- **Model.** The branches see the movie and three whole-trial maps:
+  - the mean image;
+  - SiLo's variance factor;
+  - the trial's variance relative to photon noise, which marks pixels with events.
+
+  The fusion layers also get the blind window mean and variance at the output frame. The baseline is the mean image, plus a learned mix toward the window mean and a learned correction. Both start at zero, so the untrained network predicts the mean image.
+- **Loss.** For the baseline: squared error weighted by 1 / photon variance, which is minimized by the mean, so it is unbiased at any brightness. For the noise: a Gaussian likelihood around the detached baseline, weighted by `--w_var`.
 - **Validation split:** whole sessions are held out when there are at least 3, otherwise whole trials.
-- **Every `--val_every` steps** it reports the validation loss and the calibration of the predicted noise. z = (target − μ)/σ should have mean 0 and variance 1, with about 95% of values within ±2.
-- **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt` and `last.pt`.
+- **Every `--val_every` steps** it evaluates fixed windows: real (`real_*`) and simulated (`sim_*`) from the held-out files, and simulated or real from the training files (`tr_*`).
+  - **Baselines compared:** the network, the mean image, the window mean and SiLo's moving median.
+  - **Scales:** per frame and on 8-frame averages (`mse8_*`, what SiLo Z-scores).
+  - **Pixel classes:** all, footprint support (`sup_`) and background (`bg_`).
+  - **Noise calibration:** `z_*`, and `r8`, which converts per-frame σ to SiLo's.
+- **best.pt** has the lowest held-out loss of the training data kind. The untrained network counts, so best.pt is never worse than the mean image.
+- **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt`, `last.pt` and `stats/` (cached whole-trial statistics).
 - **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
+- **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
 
 ### On Code Ocean
 
@@ -99,7 +120,7 @@ The GPU capsule can't share the data capsule's environment: Code Ocean has no st
 1. **Create the capsule from a starter, not from Git.** Use the newest PyTorch starter with GPU (CUDA 12) support. Add the pip package `h5py`, and `numpy` if the starter lacks it. Choose a GPU machine: g5.4xlarge (one A10G with 24 GB, 16 vCPUs for data loading, 64 GB of memory) is a good start.
 2. **Push the code into it.** The capsule's own git remote takes this repository's `main`, merged so that the capsule keeps its own `environment/` and `.codeocean/`. The capsule isn't linked to GitHub, so nothing flows back.
 3. **Attach the training data.** Each export run's results are saved as a data asset (`f0train_<session>`); attach those to the capsule.
-4. **Run.** Use `--mode train --train_args "--steps 20000 --batch 8 --max_hours 10"`. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`.
+4. **Run.** For example, `--mode train --train_args "--data sim --steps 4000 --batch 2 --out_frames 192 --out_px 48 --max_hours 2.5"`. Then fine-tune with `--data real --init <best.pt>`, with the pretraining results attached as a data asset. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`.
 
 ## Python
 
