@@ -99,7 +99,7 @@ class WindowDataset(Dataset):
                 tp = self._template(fn)
                 w = window(tp, draw(tp, self.sim, rng), t0, nt, r0, ns, c0, ns, rng)
                 movie, target, noisy = w["movie"], w["truth"], w["noisy"]
-                mean_image, var_map, varfac = w["mean_image"], w["var_map"], w["varfac"]
+                mean_image, var_map, varfac, mean_act = w["mean_image"], w["var_map"], w["varfac"], w["mean_act"]
                 labeled, support = w["labeled"], w["support"]
                 weight = np.isfinite(movie).astype(np.float32)
             else:
@@ -108,6 +108,7 @@ class WindowDataset(Dataset):
                 labeled, support = p.labeled, p.support
                 target = noisy = p.movie - p.activity
                 var_map = np.where(np.isfinite(mean_image), _crop(st["var_movie"], r0, ns, c0, ns), np.nan)
+                mean_act = np.where(np.isfinite(mean_image), _crop(st["mean_act"], r0, ns, c0, ns), np.nan)
                 weight = np.isfinite(target).astype(np.float32)
                 weight *= np.where(labeled & ~support, c.w_unfitted, 1.0).astype(np.float32)[None]
             if weight[sl].mean() >= c.min_valid_fraction:
@@ -118,14 +119,15 @@ class WindowDataset(Dataset):
                 f3 = lambda a: np.ascontiguousarray(np.flip(a, axes))  # noqa: E731
                 f2 = lambda a: np.ascontiguousarray(np.flip(a, [ax - 1 for ax in axes]))  # noqa: E731
                 movie, target, noisy, weight = f3(movie), f3(target), f3(noisy), f3(weight)
-                mean_image, var_map, varfac, labeled, support = (f2(a) for a in (mean_image, var_map, varfac, labeled,
-                                                                                   support))
+                mean_image, var_map, varfac, mean_act, labeled, support = (
+                    f2(a) for a in (mean_image, var_map, varfac, mean_act, labeled, support))
         s = np.float32(tr.scale)
         return {
             "movie": torch.from_numpy(movie.astype(np.float32)),
             "mean_image": torch.from_numpy(mean_image.astype(np.float32)),
             "varfac": torch.from_numpy(varfac.astype(np.float32)),
             "var_map": torch.from_numpy(var_map.astype(np.float32)),
+            "mean_act": torch.from_numpy(mean_act.astype(np.float32)),
             "scale": torch.tensor(s),
             "gain": torch.tensor(np.float32(st["gain"])),
             "target": torch.from_numpy(np.nan_to_num(target / s).astype(np.float32)),

@@ -176,7 +176,7 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     cs, ce = max(c0, 0), min(c0 + nc, C)
     out = {k: np.full((nt, nr, nc), np.nan, np.float32) for k in ("movie", "truth", "noisy")}
     out["activity"] = np.zeros((nt, nr, nc), np.float32)
-    for k in ("mean_image", "var_map"):
+    for k in ("mean_image", "mean_act", "var_map"):
         out[k] = np.full((nr, nc), np.nan, np.float32)
     out["varfac"] = np.zeros((nr, nc), np.float32)
     out["labeled"] = np.zeros((nr, nc), bool)
@@ -228,6 +228,7 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     vm = (B ** 2 * dvar + vact + tp.gain * np.maximum(M, 0)) * \
         np.maximum(1 + np.sqrt(2 * tp.Ft / tp.n_valid) * rng.standard_normal(M.shape), 0.1)
     out["mean_image"][dr, dc] = np.where(valid, mi, np.nan)
+    out["mean_act"][dr, dc] = np.where(valid, mact, np.nan)  # the virtual trial's mean activity
     out["var_map"][dr, dc] = np.where(valid, vm, np.nan)
     out["varfac"][dr, dc] = np.nan_to_num(tf.varfac[rs:re, cs:ce])
     out["labeled"][dr, dc] = tf.labeled[rs:re, cs:ce] & valid

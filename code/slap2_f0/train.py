@@ -153,10 +153,11 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     Baselines compared against the target (the true baseline for simulated
     windows, movie - activity for real ones): the network, the mean image (its
     starting point), the blind window mean (its other built-in reference) and
-    today's SiLo baseline (moving median). Two oracles that know the target: its
-    per-pixel mean over the whole window (oracle, the best constant) and its
-    blind window mean (oracle_blind, the best the window can do; they bracket
-    what tracking drift is worth). Errors per frame (mse_*) and on
+    today's SiLo baseline (moving median). Two oracles that know the activity,
+    as in ``ceiling``: the mean image minus the trial's mean activity (oracle,
+    the best constant) and the blind window mean of movie - activity
+    (oracle_blind, which also follows drift but is noisier). Errors per frame
+    (mse_*) and on
     8-frame averages (mse8_*, what SiLo Z-scores), on all loss pixels and
     split into footprint support and unlabeled background. For real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
@@ -177,10 +178,10 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
         w = w * torch.isfinite(silo) * torch.isfinite(mi)
         if w.sum() == 0:
             continue
+        oracle = torch.nan_to_num(((b["mean_image"] - b["mean_act"]) / s)[(slice(None),) + region[1:]])
+        oracle = oracle.unsqueeze(1).expand_as(y)
         wv = (b["weight"] > 0).float()
-        tw = b["target"] * wv
-        oracle = (tw.sum(1) / wv.sum(1).clamp_min(1))[(slice(None),) + region[1:]].unsqueeze(1).expand_as(y)
-        ob, _, ob_n = blind_window_stats(tw, wv, model.cfg.gap, model.cfg.window_reach)
+        ob, _, ob_n = blind_window_stats(b["noisy"] * wv, wv, model.cfg.gap, model.cfg.window_reach)
         ob = torch.where(ob_n[sel] > 0, ob[sel], oracle)
         preds = {"net": m, "mean_image": torch.nan_to_num(mi), "window": aux["window_mean"],
                  "silo": torch.nan_to_num(silo), "oracle": oracle, "oracle_blind": ob}

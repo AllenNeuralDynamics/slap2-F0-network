@@ -105,7 +105,7 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 - **Validation split:** whole sessions are held out when there are at least 3, otherwise whole trials.
 - **Every `--val_every` steps** it evaluates fixed windows: real (`real_*`) and simulated (`sim_*`) from the held-out files, and simulated or real from the training files (`tr_*`).
   - **Baselines compared:** the network, the mean image, the window mean and SiLo's moving median.
-  - **Oracles,** which know the target: its mean over the window (`oracle`) and its blind window mean (`oracle_blind`).
+  - **Oracles,** which know the activity: the mean image minus the trial's mean activity (`oracle`, the best constant) and the blind window mean of movie − activity (`oracle_blind`).
   - **Scales:** per frame and on 8-frame averages (`mse8_*`, what SiLo Z-scores).
   - **Pixel classes:** all, footprint support (`sup_`) and background (`bg_`).
   - **Noise calibration:** `z_*`, and `r8`, which converts per-frame σ to SiLo's.
