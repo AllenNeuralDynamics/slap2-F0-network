@@ -81,6 +81,24 @@ def test_untrained_network_predicts_mean_image():
     assert torch.allclose(mu.double(), x[:, 2], atol=1e-5)
 
 
+def test_outputs_are_bounded():
+    """Saturated heads move the baseline by at most the correction cap and mix at most fully toward the window."""
+    torch.manual_seed(4)
+    cfg = ModelConfig(gap=2, width=4, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6)
+    model = SlabBlindSpotNet(cfg).double()
+    x = torch.randn(1, cfg.n_inputs, 20, 6, 7, dtype=torch.float64)
+    x[:, 0] = x[:, 0].abs()
+    x[:, 1] = 1.0
+    x[:, 2] = x[:, 2].abs() + 1
+    for head in (model.head_mu, model.head_mix, model.head_var):
+        head.bias.data.fill_(100.0)
+    mu, var, aux = model(x, aux=True)
+    assert aux["mix"].max() <= 1.0
+    lo, hi = model.cfg.max_log_correction, model.cfg.max_log_var
+    assert torch.all(mu <= aux["base"] * torch.exp(torch.tensor(lo)) * (1 + 1e-6))
+    assert torch.all(var <= (10.0 * mu + model.log_floor.exp()) * torch.exp(torch.tensor(hi)) * (1 + 1e-6))
+
+
 def test_blind_window_stats_match_brute_force():
     torch.manual_seed(3)
     m = torch.rand(2, 30, 3, 4, dtype=torch.float64)

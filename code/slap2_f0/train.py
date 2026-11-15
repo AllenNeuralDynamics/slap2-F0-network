@@ -16,10 +16,14 @@ Files are split into training and validation by session when there are at
 least three sessions (so validation measures generalization to unseen
 sessions), otherwise by trial. Every validation evaluates fixed windows from
 the held-out files, both real (``real_*``) and simulated (``sim_*``), and
-from the training files (``tr_*``); see ``evaluate`` for the metrics. The
-checkpoint with the lowest held-out mean loss of the training data kind is
-kept as best.pt; the untrained network (step 0, which predicts the mean
-image) is a candidate, so best.pt is never worse than the start.
+from the training files (``tr_*``); see ``evaluate`` for the metrics.
+
+best.pt is chosen on held-out windows of the training data kind (``--select``,
+default ``balanced``): the network's 8-frame MSE relative to the mean image's,
+averaged over footprint-support and background pixels. The per-frame loss
+can't pick checkpoints on real data: photon noise buries the 1-3% that can be
+learned (v2 run). The untrained network (step 0, which predicts the mean
+image, score 1) is a candidate, so best.pt is never worse than the start.
 
 Outputs in --out: config.json, metrics.csv (one row per validation),
 last.pt, best.pt and stats/ (cached whole-trial statistics).
@@ -43,7 +47,7 @@ from torch.utils.data import DataLoader
 from .data import WindowConfig, WindowDataset, loss_region
 from .io import TrialFile, list_trials
 from .losses import gaussian_nll, student_t_nll
-from .model import ModelConfig, SlabBlindSpotNet, make_inputs
+from .model import ModelConfig, SlabBlindSpotNet, blind_window_stats, make_inputs
 from .simulate import SimConfig
 from .stats import load_stats
 
@@ -149,7 +153,10 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     Baselines compared against the target (the true baseline for simulated
     windows, movie - activity for real ones): the network, the mean image (its
     starting point), the blind window mean (its other built-in reference) and
-    today's SiLo baseline (moving median). Errors per frame (mse_*) and on
+    today's SiLo baseline (moving median). Two oracles that know the target: its
+    per-pixel mean over the whole window (oracle, the best constant) and its
+    blind window mean (oracle_blind, the best the window can do; they bracket
+    what tracking drift is worth). Errors per frame (mse_*) and on
     8-frame averages (mse8_*, what SiLo Z-scores), on all loss pixels and
     split into footprint support and unlabeled background. For real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
@@ -170,8 +177,13 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
         w = w * torch.isfinite(silo) * torch.isfinite(mi)
         if w.sum() == 0:
             continue
+        wv = (b["weight"] > 0).float()
+        tw = b["target"] * wv
+        oracle = (tw.sum(1) / wv.sum(1).clamp_min(1))[(slice(None),) + region[1:]].unsqueeze(1).expand_as(y)
+        ob, _, ob_n = blind_window_stats(tw, wv, model.cfg.gap, model.cfg.window_reach)
+        ob = torch.where(ob_n[sel] > 0, ob[sel], oracle)
         preds = {"net": m, "mean_image": torch.nan_to_num(mi), "window": aux["window_mean"],
-                 "silo": torch.nan_to_num(silo)}
+                 "silo": torch.nan_to_num(silo), "oracle": oracle, "oracle_blind": ob}
         sup = b["support"][(slice(None),) + region[1:]].bool().unsqueeze(1)
         bg = ~b["labeled"][(slice(None),) + region[1:]].bool().unsqueeze(1)
         classes = {"": w, "sup_": w * sup, "bg_": w * bg}
@@ -216,10 +228,31 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     return out
 
 
+def selection_score(row: dict, prefix: str, how: str) -> float:
+    """Checkpoint score (lower is better) from a validation row: the loss, the
+    8-frame MSE relative to the mean image's, or that ratio averaged over
+    footprint-support and background pixels (balanced; the overall ratio
+    when neither class has pixels)."""
+    if how == "loss":
+        return row.get(f"{prefix}_loss", math.inf)
+
+    def ratio(c):
+        a, b = row.get(f"{prefix}_{c}mse8_net", math.nan), row.get(f"{prefix}_{c}mse8_mean_image", math.nan)
+        return a / b if b > 0 and math.isfinite(a) else math.nan
+
+    if how == "balanced":
+        r = [x for x in (ratio("sup_"), ratio("bg_")) if math.isfinite(x)]
+        if r:
+            return float(np.mean(r))
+    r = ratio("")
+    return r if math.isfinite(r) else math.inf
+
+
 def _model_config(args) -> ModelConfig:
     mcfg = ModelConfig(gap=args.gap, width=args.width, spatial_kernel=args.spatial_kernel,
                        downsample=args.downsample, full_res_blocks=args.full_res_blocks,
-                       checkpoint=not args.no_checkpoint, window_reach=args.window_reach)
+                       checkpoint=not args.no_checkpoint, window_reach=args.window_reach,
+                       max_log_correction=args.max_log_correction)
     if args.temporal_dilations:
         mcfg.temporal_dilations = [int(d) for d in args.temporal_dilations.split(",")]
     if args.spatial_dilations:
@@ -274,7 +307,8 @@ def train(args) -> None:
         evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, SimConfig())
     evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim)  # did it learn anything at all?
     region = loss_region(wcfg)
-    sel_key = f"{args.data}_loss" if val_files else "tr_loss"
+    sel_prefix = args.data if val_files else "tr"
+    sel_key = f"{sel_prefix}_{args.select}"
 
     (out / "config.json").write_text(json.dumps({
         "model": asdict(mcfg), "window": asdict(wcfg), "args": vars(args), "n_params": n_params,
@@ -300,6 +334,7 @@ def train(args) -> None:
         for name, loader in evals.items():
             for k, v in evaluate(model, loader, region, device, amp_dtype, args).items():
                 row[f"{name}_{k}"] = v
+        row[sel_key] = selection_score(row, sel_prefix, args.select)
         row.update(lr=sched.get_last_lr()[0], elapsed_s=time.time() - t0)
         if fields is None:
             fields = list(row)
@@ -309,9 +344,9 @@ def train(args) -> None:
             csv.writer(fh).writerow([row.get(k, float("nan")) for k in fields])
         show = [k for k in fields if any(k.endswith(s) for s in
                 ("_loss", "_z_mean", "_z_var", "_r8", "_mix", "mse8_net", "mse8_mean_image", "mse8_window", "mse8_silo",
-                 "_bias_net"))]
+                 "mse8_oracle", "mse8_oracle_blind", "_bias_net", f"_{args.select}"))]
         print(f"validation at step {step}: " + " ".join(f"{k} {row[k]:.4g}" for k in show), flush=True)
-        if row.get(sel_key, math.inf) < best:  # step 0 counts: never keep a model worse than the start
+        if row[sel_key] < best:  # step 0 counts: never keep a model worse than the start
             best = row[sel_key]
             save("best.pt", step)
 
@@ -442,6 +477,10 @@ def add_arguments(p) -> None:
     p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
     p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
     p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")
+    p.add_argument("--max_log_correction", type=float, default=0.7, help="soft cap of |log| of the baseline correction")
+    p.add_argument("--select", choices=["balanced", "mse8", "loss"], default="balanced",
+                   help="best.pt criterion on held-out windows: 8-frame MSE vs the mean image, averaged over "
+                        "support and background (balanced) or over all pixels (mse8), or the mean loss")
     p.add_argument("--no_flip", action="store_true", help="no random flips of training windows")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)

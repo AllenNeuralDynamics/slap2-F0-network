@@ -100,15 +100,16 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
   - SiLo's variance factor;
   - the trial's variance relative to photon noise, which marks pixels with events.
 
-  The fusion layers also get the blind window mean and variance at the output frame. The baseline is the mean image, plus a learned mix toward the window mean and a learned correction. Both start at zero, so the untrained network predicts the mean image.
+  The fusion layers also get the blind window mean and variance at the output frame. The baseline is the mean image, plus a learned mix toward the window mean (bounded to ±1) and a learned correction (a factor of 0.5–2). Both start at zero, so the untrained network predicts the mean image.
 - **Loss.** For the baseline: squared error weighted by 1 / photon variance, which is minimized by the mean, so it is unbiased at any brightness. For the noise: a Gaussian likelihood around the detached baseline, weighted by `--w_var`.
 - **Validation split:** whole sessions are held out when there are at least 3, otherwise whole trials.
 - **Every `--val_every` steps** it evaluates fixed windows: real (`real_*`) and simulated (`sim_*`) from the held-out files, and simulated or real from the training files (`tr_*`).
   - **Baselines compared:** the network, the mean image, the window mean and SiLo's moving median.
+  - **Oracles,** which know the target: its mean over the window (`oracle`) and its blind window mean (`oracle_blind`).
   - **Scales:** per frame and on 8-frame averages (`mse8_*`, what SiLo Z-scores).
   - **Pixel classes:** all, footprint support (`sup_`) and background (`bg_`).
   - **Noise calibration:** `z_*`, and `r8`, which converts per-frame σ to SiLo's.
-- **best.pt** has the lowest held-out loss of the training data kind. The untrained network counts, so best.pt is never worse than the mean image.
+- **best.pt** is picked on held-out windows of the training data kind (`--select`). The default, `balanced`, is the network's 8-frame MSE relative to the mean image's, averaged over support and background pixels. The per-frame loss is too noisy to pick checkpoints on real data. The untrained network counts (score 1), so best.pt is never worse than the mean image.
 - **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt`, `last.pt` and `stats/` (cached whole-trial statistics).
 - **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.

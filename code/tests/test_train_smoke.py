@@ -48,11 +48,13 @@ def test_train_smoke(tmp_path, data):
     rows = list(csv.DictReader(open(out / "metrics.csv")))
     assert [r["step"] for r in rows] == ["0", "2", "3"]  # untrained, then every 2 steps and the last
     for name in ("real", "sim", "tr"):
-        for k in ("loss", "mse_net", "mse_silo", "mse_mean_image", "mse8_net", "z_mean", "r8"):
+        for k in ("loss", "mse_net", "mse_silo", "mse_mean_image", "mse8_net", "mse8_oracle", "mse8_oracle_blind",
+                  "z_mean", "r8"):
             assert all(np.isfinite(float(r[f"{name}_{k}"])) for r in rows), (name, k)
     # the untrained network predicts the mean image exactly
     r0 = rows[0]
     assert abs(float(r0["real_mse_net"]) - float(r0["real_mse_mean_image"])) < 1e-6
+    assert abs(float(r0[f"{data}_balanced"]) - 1.0) < 1e-5  # the checkpoint score starts at 1
     # init from a checkpoint (fine-tuning)
     out2 = tmp_path / "out2"
     main(["train", str(tmp_path / "data"), "--out", str(out2), "--data", "real", "--init", str(out / "best.pt"),

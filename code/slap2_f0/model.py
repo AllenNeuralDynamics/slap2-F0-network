@@ -34,6 +34,10 @@ Outputs, in units of the trial scale (see ``io.TrialFile.scale``):
             so the untrained network predicts the mean image exactly
     var     noise variance; in counts (gain * mu * scale + floor) *
             exp(correction), with the trial's measured gain (``stats``)
+
+The mix is tanh-bounded to (-1, 1) and both corrections are soft-capped
+(``max_log_correction``, ``max_log_var``): with unbounded heads, single
+windows occasionally produced baselines tens of times too large (v2 run).
 """
 
 from __future__ import annotations
@@ -61,6 +65,8 @@ class ModelConfig:
     spatial_kernel: int = 3  # 1 = each pixel's own trace only
     n_inputs: int = N_INPUTS
     window_reach: int = 254  # frames beyond the gap for the blind window statistics
+    max_log_correction: float = 0.7  # soft cap of |log| of the baseline correction (factor 0.5-2)
+    max_log_var: float = 3.0  # soft cap of |log| of the noise correction
     # memory: the first full_res_blocks blocks of each branch run at full
     # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
     # so the blind spot in time is unaffected); checkpointing recomputes blocks
@@ -162,6 +168,11 @@ class CausalBranch(nn.Module):
         return h
 
 
+def soft_cap(x: torch.Tensor, cap: float) -> torch.Tensor:
+    """cap * tanh(x / cap): the identity near 0, smoothly bounded by +-cap."""
+    return cap * torch.tanh(x / cap)
+
+
 def blind_window_stats(m: torch.Tensor, v: torch.Tensor, gap: int, reach: int):
     """Mean, variance and count of m over frames gap < |dt| <= gap + reach.
 
@@ -201,7 +212,7 @@ class SlabBlindSpotNet(nn.Module):
     def _features(self, x, wm, wv, n, gs):
         """Output-frame features, all O(1): window mean and variance relative to
         the mean image and to photon noise, the fraction of the window with
-        data, log mean image, log variance ratio and variance factor."""
+        data, log mean image, log variance ratio and log variance factor."""
         mi = x[:, 2].clamp_min(1e-3)
         has = n > 0
         f1 = torch.where(has, torch.log(wm.clamp_min(1e-3) / mi), torch.zeros_like(mi))
@@ -233,11 +244,11 @@ class SlabBlindSpotNet(nn.Module):
         h = self.fuse(torch.cat([hp, hf, feats], 1))
         mi = x[:, 2].float()
         wm = torch.where(n > 0, wm, mi)
-        mix = self.head_mix(h)[:, 0].float()
+        mix = torch.tanh(self.head_mix(h)[:, 0].float())
         base = (mi + mix * (wm - mi)).clamp_min(1e-4)
-        mu = base * torch.exp(self.head_mu(h)[:, 0].float().clamp(-5, 5))
+        mu = base * torch.exp(soft_cap(self.head_mu(h)[:, 0].float(), self.cfg.max_log_correction))
         var = (gs * mu + self.log_floor.exp() / s.view(-1, 1, 1, 1) ** 2) * \
-            torch.exp(self.head_var(h)[:, 0].float().clamp(-4, 4))
+            torch.exp(soft_cap(self.head_var(h)[:, 0].float(), self.cfg.max_log_var))
         if aux:
             return mu, var, {"window_mean": wm, "base": base, "mix": mix}
         return mu, var
@@ -250,8 +261,8 @@ def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Ten
     movie (B, T, H, W) in counts with NaN where there is no data; mean_image,
     varfac and var_map (B, H, W), the last a whole-trial map in counts^2;
     scale and gain (B,). Returns (B, 5, T, H, W): movie / scale with missing
-    values as 0, a validity flag, mean image / scale, the variance factor
-    relative to its median, and log(var_map / (gain * mean image)), about 0
+    values as 0, a validity flag, mean image / scale, the log variance factor
+    relative to its median (clamped to +-3), and log(var_map / (gain * mean image)), about 0
     where photon noise explains the variance and positive where events add to
     it. The mean image is a whole-trial average, so it contains each frame
     with weight 1/T; that leak through the blind spot is negligible for trials
@@ -263,6 +274,7 @@ def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Ten
     m = torch.where(valid, movie, torch.zeros_like(movie)) / s
     mi = torch.nan_to_num(mean_image / s.squeeze(1), nan=0.0)
     vf = varfac / varfac.flatten(1).median(1).values.clamp_min(1e-6).view(-1, 1, 1)
+    vf = torch.nan_to_num(torch.log(vf.clamp_min(1e-3)), nan=0.0).clamp(-3, 3)
     if var_map is None:
         vr = torch.zeros_like(mi)
     else:
