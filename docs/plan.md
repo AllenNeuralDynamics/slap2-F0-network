@@ -162,3 +162,30 @@ Yes: the σ² head trained by NLL is exactly that.
    - The list and the criteria are in `sessions/`.
 3. **GIAnT version:** #40 (penalized-spline baseline) is merged, so targets come from GIAnT main at or after d2fb85c.
 4. **Integration:** a Python step that writes baseline and noise files next to the registered movies.
+
+## Results: first training run and the ceiling (2026-11-14)
+
+**Training run c9f8664e** (4 sessions, 878030 held out, 4000 steps, Student-t loss): negative.
+- On the held-out session the network's baseline is worse than the mean image it starts from: MSE 6.40 vs 5.50. SiLo's moving median scores 5.65.
+- Validation NLL rose from 1.85 (untrained) to 2.01. The network predicts too low, z mean +0.3.
+- Training loss was flat at about 1.8 the whole time; the early "rise" is the running average warming up from the first batch. `train.py` now also evaluates fixed training windows (`tr_*` columns), to tell "learns nothing" from "doesn't generalize".
+
+**How much is there to learn?** `slap2-f0 ceiling` (`code/slap2_f0/ceiling.py`) compares reference baselines against the target on one trial per session (1493–2254 frames each). The numbers are MSE change vs the mean image, on 8-frame averages of the target (what SiLo Z-scores):
+
+| session (scale) | pixels | oracle constant | oracle blind temporal | blind movie average | SiLo |
+|---|---|---|---|---|---|
+| 780125 (5.5) | support | −9.4% | −12.8% | −2.2% | −12.0% |
+| | background | −0.4% | +1.6% | +2.0% | +7.7% |
+| 803121 (9.1) | support | −7.4% | −8.2% | +0.2% | −7.6% |
+| | background | −0.1% | +2.2% | +2.3% | +1.7% |
+| 878030 (2.2) | support | −8.1% | −6.7% | +2.2% | −1.9% |
+| | background | −0.1% | +2.5% | +2.5% | +12.1% |
+| 885233 (3.9) | support | −11.0% | −9.7% | +1.5% | −6.1% |
+| | background | −0.5% | +1.9% | +2.5% | +6.1% |
+
+- **Oracle constant:** mean image minus mean activity. **Oracle blind temporal:** a blind-spot average of the residual itself. **Blind movie average:** the same average of the movie, events included.
+- **Per frame** (the training loss), all of these shrink 3–4×: the oracle constant gains only 0.4–3.2% on loss pixels. Photon noise (under 1 photon per pixel per frame) dominates.
+- **What can be learned:** excluding events on footprint pixels, worth 7–11% at the localization scale. Temporal drift adds little on these short trials. On background pixels the mean image is already optimal.
+- **What SiLo loses:** the moving median reads low at low counts (by 0.09–0.49 of the trial scale), costing 2–12% on background, worst on the dimmest session.
+- **Why the run failed:** a per-frame loss sees only a 1–3% effect. The Student-t likelihood pulls the location below the mean on skewed low-count data, the same failure as `splitFreq` and the median.
+- **Naive event clipping fails the same way.** Leaving out frames 2σ above a whole-trial mean is biased low on background pixels by 0.15–0.45 (+11–16% MSE): it removes noise tails along with events. A replacement for the median has to be mean-unbiased at low counts.

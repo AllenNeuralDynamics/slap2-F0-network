@@ -6,6 +6,7 @@ import argparse
 
 import numpy as np
 
+from . import ceiling as ceiling_mod
 from . import train as train_mod
 from .io import TrialFile, list_trials
 
@@ -36,6 +37,9 @@ def main(argv=None) -> None:
     pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
     train_mod.add_probe_arguments(pp)
     pp.set_defaults(func=train_mod.probe)
+    pc = sub.add_parser("ceiling", help="reference baselines: how much there is for the network to learn")
+    ceiling_mod.add_arguments(pc)
+    pc.set_defaults(func=ceiling_mod.run)
     args = p.parse_args(argv)
     args.func(args)
 

@@ -163,6 +163,9 @@ def train(args) -> None:
                     batch_size=args.batch, **kw)
     vl = DataLoader(WindowDataset(val_files, wcfg, length=args.val_windows, seed=10_000 + args.seed),
                     batch_size=args.batch, **kw) if val_files else None
+    # fixed windows from the training files: did the network learn anything at all?
+    tl = DataLoader(WindowDataset(train_files, wcfg, length=args.val_windows, seed=20_000 + args.seed),
+                    batch_size=args.batch, **kw) if val_files else None
     region = loss_region(wcfg)
     sel = (slice(None),) + region
 
@@ -178,7 +181,7 @@ def train(args) -> None:
           f"{wcfg.out_px + 2 * wcfg.s_reach}^2 px, loss on {wcfg.out_frames} x {wcfg.out_px}^2", flush=True)
 
     fields = ["step", "train_loss", "val_loss", "z_mean", "z_var", "within_2", "mse_net", "mse_silo",
-              "mse_mean_image", "lr", "elapsed_s"]
+              "mse_mean_image", "tr_loss", "tr_z_mean", "tr_mse_net", "tr_mse_mean_image", "lr", "elapsed_s"]
     with open(out / "metrics.csv", "w", newline="") as fh:
         csv.writer(fh).writerow(fields)
     best = math.inf
@@ -187,6 +190,9 @@ def train(args) -> None:
 
     def validate(step):
         m = evaluate(model, vl, region, device, amp_dtype, args)
+        mt = evaluate(model, tl, region, device, amp_dtype, args)
+        m.update({"tr_loss": mt["val_loss"], "tr_z_mean": mt["z_mean"], "tr_mse_net": mt["mse_net"],
+                  "tr_mse_mean_image": mt["mse_mean_image"]})
         row = {"step": step, "train_loss": ema if ema is not None else float("nan"), **m,
                "lr": sched.get_last_lr()[0], "elapsed_s": time.time() - t0}
         with open(out / "metrics.csv", "a", newline="") as fh:
