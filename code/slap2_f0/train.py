@@ -34,6 +34,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import shutil
 import time
 from collections import defaultdict
 from dataclasses import asdict
@@ -52,12 +53,18 @@ from .simulate import SimConfig
 from .stats import load_stats
 
 
-def split_files(files: list[Path], val_fraction: float, seed: int = 0) -> tuple[list[Path], list[Path], str]:
-    """Hold out whole sessions if there are at least 3, else whole trials."""
+def session_groups(files: list[Path]) -> dict[str, list[Path]]:
+    """Trial files by session label, in the order given."""
     groups: dict[str, list[Path]] = defaultdict(list)
     for f in files:
         with TrialFile(f) as tr:
             groups[str(tr.attrs.get("label", f.parent.parent.name))].append(f)
+    return dict(groups)
+
+
+def split_files(files: list[Path], val_fraction: float, seed: int = 0) -> tuple[list[Path], list[Path], str]:
+    """Hold out whole sessions if there are at least 3, else whole trials."""
+    groups = session_groups(files)
     rng = np.random.default_rng(seed)
     if len(groups) >= 3:
         names = sorted(groups)
@@ -202,8 +209,7 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
                 tot[f"{cname}mse_{pname}"] += (cw * d ** 2).sum().item()
                 p8, _ = movmean_t(p, w)
                 tot[f"{cname}mse8_{pname}"] += (cw8 * (y8 - p8) ** 2).sum().item()
-                if cname == "" or pname == "net":
-                    tot[f"{cname}bias_{pname}"] += (cw * d).sum().item()
+                tot[f"{cname}bias_{pname}"] += (cw * d).sum().item()
         n = w.sum().item()
         tot["loss"] += (w * (y - m) ** 2 / _ref_var(b, region)).sum().item()
         tot["var_loss"] += gaussian_nll(yn, m, v, w).item() * n
@@ -376,6 +382,87 @@ def train(args) -> None:
         if last_step:
             break
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
+
+
+def evaluate_checkpoints(args) -> None:
+    """Scores of saved checkpoints on each session's windows, real and
+    simulated (see ``evaluate``): one row per checkpoint, session and data
+    kind in <out>/eval.csv. The windows depend only on the seed and the
+    session's files, so every checkpoint is scored on the same ones; with the
+    training seed, the first ``val_windows`` of a held-out session are the
+    ones its training validation used."""
+    files = list_trials(args.root)
+    if not files:
+        raise SystemExit(f"no trial files under {args.root}")
+    groups = session_groups(files)
+    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    amp_dtype = None
+    if device.type == "cuda" and not args.no_amp:
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    cache = Path(args.stats_cache) if args.stats_cache else out / "stats"
+    if args.stats_from:  # e.g. a training run's stats/ on a read-only mount
+        cache.mkdir(parents=True, exist_ok=True)
+        for p in Path(args.stats_from).glob("*.npz"):
+            if not (cache / p.name).exists():
+                shutil.copy2(p, cache / p.name)
+    t0 = time.time()
+    stats = load_stats(files, cache, workers=args.workers)
+    print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; sessions: "
+          + ", ".join(f"{s} ({len(f)} trials)" for s, f in sorted(groups.items())), flush=True)
+    rows = []
+    for spec in args.ckpt:
+        name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
+        ck = torch.load(path, map_location=device, weights_only=False)
+        model = SlabBlindSpotNet(ModelConfig(**ck["config"])).to(device)
+        model.load_state_dict(ck["model"])
+        wcfg = WindowConfig(**ck["window"])
+        region = loss_region(wcfg)
+        print(f"{name}: {path} (step {ck.get('step')})", flush=True)
+        for sess in sorted(groups):
+            for kind in args.kinds.split(","):
+                sim = SimConfig() if kind == "sim" else None
+                ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows,
+                                   seed=(20_000 if sim else 10_000) + args.seed, sim=sim, flip=False)
+                loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
+                                    pin_memory=device.type == "cuda")
+                t1 = time.time()
+                r = evaluate(model, loader, region, device, amp_dtype, args)
+                rows.append({"checkpoint": name, "step": ck.get("step"), "session": sess, "kind": kind,
+                             "trials": len(groups[sess]), "windows": args.windows, **r})
+                fields = list(dict.fromkeys(k for row in rows for k in row))
+                with open(out / "eval.csv", "w", newline="") as fh:
+                    wr = csv.DictWriter(fh, fieldnames=fields, restval=float("nan"))
+                    wr.writeheader()
+                    wr.writerows(rows)
+
+                def rel(c, p):
+                    a, b = r.get(f"{c}mse8_{p}", math.nan), r.get(f"{c}mse8_mean_image", math.nan)
+                    return f"{100 * (a / b - 1):+.1f}%" if b > 0 else "nan"
+
+                print(f"  {sess} {kind} ({time.time() - t1:.0f} s): "
+                      + "; ".join(f"{c or 'all_'}[net {rel(c, 'net')} silo {rel(c, 'silo')} oracle {rel(c, 'oracle')} "
+                                  f"bias net {r.get(f'{c}bias_net', math.nan):+.3f} "
+                                  f"mean image {r.get(f'{c}bias_mean_image', math.nan):+.3f}]"
+                                  for c in ("sup_", "bg_", ""))
+                      + f"; z_var {r['z_var']:.3f} mix {r['mix']:.3f}", flush=True)
+    print(f"done in {time.time() - t0:.0f} s")
+
+
+def add_eval_arguments(p) -> None:
+    p.add_argument("root", help="folder with exported trial files (searched recursively)")
+    p.add_argument("--ckpt", nargs="+", required=True, help="checkpoints to score, each path or name=path")
+    p.add_argument("--out", default="results/eval")
+    p.add_argument("--kinds", default="real,sim", help="comma-separated: real, sim")
+    p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
+    p.add_argument("--batch", type=int, default=2)
+    p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
+    p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. a training run's)")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--device", default="auto")
+    p.add_argument("--no_amp", action="store_true")
+    p.add_argument("--seed", type=int, default=0, help="the training seed reproduces its validation windows")
 
 
 def probe(args) -> None:

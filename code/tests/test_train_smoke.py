@@ -1,6 +1,7 @@
 """Training runs end to end on small synthetic trials, on simulated and real windows."""
 
 import csv
+import json
 
 import h5py
 import numpy as np
@@ -62,3 +63,28 @@ def test_train_smoke(tmp_path, data):
           "--gap", "2", "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0",
           "--val_windows", "2", "--stats_cache", str(out / "stats")])
     assert (out2 / "best.pt").exists()
+
+
+def test_evaluate_reproduces_validation(tmp_path):
+    for k, label in enumerate(["sessA", "sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "2", "--batch", "2",
+          "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_every", "2",
+          "--val_windows", "2", "--save_every", "2"])
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", f"last={out / 'last.pt'}", "--out", str(ev),
+          "--windows", "2", "--workers", "0", "--stats_from", str(out / "stats")])
+    rows = list(csv.DictReader(open(ev / "eval.csv")))
+    assert sorted((r["session"], r["kind"]) for r in rows) == sorted(
+        (s, k) for s in ("sessA", "sessB", "sessC") for k in ("real", "sim"))
+    # the held-out session's windows are the ones the training validation used
+    val = json.loads((out / "config.json").read_text())["split"].split("validation: ")[1].rstrip(")")
+    last = list(csv.DictReader(open(out / "metrics.csv")))[-1]
+    for kind in ("real", "sim"):
+        r = next(r for r in rows if r["session"] == val and r["kind"] == kind)
+        for k in ("mse8_net", "mse8_mean_image", "bias_net"):
+            assert float(r[k]) == pytest.approx(float(last[f"{kind}_{k}"]), rel=1e-5, abs=1e-7), (kind, k)

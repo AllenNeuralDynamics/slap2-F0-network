@@ -1,4 +1,4 @@
-"""Command line: ``slap2-f0 inspect <folder>`` and ``slap2-f0 train <folder> ...``."""
+"""Command line: ``slap2-f0 inspect|train|evaluate|probe|ceiling|simcheck ...``."""
 
 from __future__ import annotations
 
@@ -35,6 +35,9 @@ def main(argv=None) -> None:
     pt = sub.add_parser("train", help="train the slab blind-spot network")
     train_mod.add_arguments(pt)
     pt.set_defaults(func=train_mod.train)
+    pe = sub.add_parser("evaluate", help="score saved checkpoints on each session's windows (real and simulated)")
+    train_mod.add_eval_arguments(pe)
+    pe.set_defaults(func=train_mod.evaluate_checkpoints)
     pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
     train_mod.add_probe_arguments(pp)
     pp.set_defaults(func=train_mod.probe)
