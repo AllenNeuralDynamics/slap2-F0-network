@@ -10,7 +10,9 @@ Real windows (``sim=None``): the target is the residual movie - activity.
 Loss weights (see docs/plan.md): valid pixels and frames only; footprint-
 support pixels and unlabeled (off-dendrite) pixels weight 1; labeled pixels
 outside every footprint weight ``w_unfitted`` (default 0), because their
-residual still holds activity GIAnT did not fit.
+residual still holds activity GIAnT did not fit. In a trial without sources
+(``nSources`` 0, e.g. a GFP control without an activity sensor) the activity
+is known to be zero, so every valid pixel weighs 1.
 
 Simulated windows (``sim=SimConfig()``): each item is a new virtual trial
 built on a random template (see ``simulate``); the target is the noise-free
@@ -110,7 +112,8 @@ class WindowDataset(Dataset):
                 var_map = np.where(np.isfinite(mean_image), _crop(st["var_movie"], r0, ns, c0, ns), np.nan)
                 mean_act = np.where(np.isfinite(mean_image), _crop(st["mean_act"], r0, ns, c0, ns), np.nan)
                 weight = np.isfinite(target).astype(np.float32)
-                weight *= np.where(labeled & ~support, c.w_unfitted, 1.0).astype(np.float32)[None]
+                w_unf = c.w_unfitted if tr.attrs.get("nSources", 1) else 1.0  # no sources: no activity
+                weight *= np.where(labeled & ~support, w_unf, 1.0).astype(np.float32)[None]
             if weight[sl].mean() >= c.min_valid_fraction:
                 break
         if self.flip:

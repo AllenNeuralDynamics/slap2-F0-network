@@ -166,7 +166,10 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     (oracle_blind, which also follows drift but is noisier). Errors per frame
     (mse_*) and on
     8-frame averages (mse8_*, what SiLo Z-scores), on all loss pixels and
-    split into footprint support and unlabeled background. For real targets
+    split into footprint support, unlabeled background and labeled pixels
+    outside every footprint (lab_; these have loss weight only with
+    w_unfitted > 0 or in a trial without sources, such as a GFP control). For
+    real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
     MSE is the baseline error itself. bias_* = mean(target - baseline).
     Calibration: z = (movie - activity - mu) / sqrt(var) should have mean 0 and
@@ -194,7 +197,7 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
                  "silo": torch.nan_to_num(silo), "oracle": oracle, "oracle_blind": ob}
         sup = b["support"][(slice(None),) + region[1:]].bool().unsqueeze(1)
         bg = ~b["labeled"][(slice(None),) + region[1:]].bool().unsqueeze(1)
-        classes = {"": w, "sup_": w * sup, "bg_": w * bg}
+        classes = {"": w, "sup_": w * sup, "bg_": w * bg, "lab_": w * (~bg & ~sup)}
         y8, n8 = movmean_t(y, w)
         w8 = w * (n8 >= 4)
         for cname, cw in classes.items():
@@ -465,7 +468,7 @@ def excess_report(groups: dict, stats: dict, path: Path) -> None:
         wr.writeheader()
         wr.writerows(rows)
     print("residual variance over photon noise (session medians of trials), valid pixels / brightest 10% / "
-          "support; 1, 8, 64-frame means:")
+          "labeled / support; 1, 8, 64-frame means:")
     for sess in sorted(groups):
         rs = [r for r in rows if r["session"] == sess and "all_r1" in r]
         if not rs:
@@ -474,6 +477,7 @@ def excess_report(groups: dict, stats: dict, path: Path) -> None:
         med = lambda k: float(np.nanmedian([r.get(k, math.nan) for r in rs]))  # noqa: E731
         print(f"  {sess}: all " + "/".join(f"{med(f'all_r{n}'):.2f}" for n in (1, 8, 64))
               + "  top10% " + "/".join(f"{med(f'all_top10_r{n}'):.2f}" for n in (1, 8, 64))
+              + "  labeled " + "/".join(f"{med(f'lab_r{n}'):.2f}" for n in (1, 8, 64))
               + "  support " + "/".join(f"{med(f'sup_r{n}'):.2f}" for n in (1, 8, 64))
               + f"  | top10% fast {med('top10_fast'):+.2f}, slow SD/mean {med('top10_slow_sd_rel'):.3f}, "
               + f"brightness {med('top10_mean_over_scale'):.1f}x scale; support px {med('support_px'):.0f}", flush=True)

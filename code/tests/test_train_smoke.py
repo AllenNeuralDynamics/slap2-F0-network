@@ -10,17 +10,18 @@ import pytest
 from slap2_f0.cli import main
 
 
-def _trial(fn, label, seed, T=160, R=20, C=24):
+def _trial(fn, label, seed, T=160, R=20, C=24, sources=True):
     rng = np.random.default_rng(seed)
     base = 5.0 + rng.random((R, C)).astype(np.float32) * 5
     movie = rng.poisson(np.broadcast_to(base, (T, R, C))).astype(np.float32)[None]
     act = np.zeros_like(movie)
-    act[0, 50:55, 8:11, 8:11] = 4.0
-    movie += act
     lab = np.zeros((R, C), np.uint8)
     lab[5:14, 5:14] = 1
     sup = np.zeros((R, C), np.uint8)
-    sup[6:13, 6:13] = 1
+    if sources:  # else a GFP control: no activity, no footprints
+        act[0, 50:55, 8:11, 8:11] = 4.0
+        sup[6:13, 6:13] = 1
+    movie += act
     with h5py.File(fn, "w") as f:
         f["movie"] = movie
         f["activity"] = act
@@ -31,7 +32,7 @@ def _trial(fn, label, seed, T=160, R=20, C=24):
         f["mask/footprint_support"] = sup
         f["frame/discard"] = np.zeros(T, np.uint8)
         f.attrs["label"] = label
-        f.attrs["nSources"] = 1
+        f.attrs["nSources"] = int(sources)
 
 
 @pytest.mark.parametrize("data", ["sim", "real"])
@@ -90,3 +91,28 @@ def test_evaluate_reproduces_validation(tmp_path):
         r = next(r for r in rows if r["session"] == val and r["kind"] == kind)
         for k in ("mse8_net", "mse8_mean_image", "bias_net"):
             assert float(r[k]) == pytest.approx(float(last[f"{kind}_{k}"]), rel=1e-5, abs=1e-7), (kind, k)
+
+
+def test_evaluate_sourceless_session(tmp_path):
+    """A session without sources (a GFP control) trains and scores; its
+    labeled pixels are scored (lab_), since its activity is known to be zero,
+    while labeled pixels outside footprints elsewhere keep weight 0."""
+    for k, label in enumerate(["sessA", "sessB", "sessC", "gfp"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k, sources=label != "gfp")
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "1", "--batch", "2",
+          "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_windows", "2"])
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", str(out / "best.pt"), "--out", str(ev),
+          "--windows", "4", "--workers", "0", "--stats_from", str(out / "stats")])
+    rows = {(r["session"], r["kind"]): r for r in csv.DictReader(open(ev / "eval.csv"))}
+    g = rows[("gfp", "real")]
+    for k in ("lab_mse8_net", "lab_mse8_mean_image", "lab_bias_net", "bg_mse8_net"):
+        assert np.isfinite(float(g[k])), k
+    assert not np.isfinite(float(g.get("sup_mse8_net") or "nan"))  # no support pixels
+    assert not np.isfinite(float(rows[("sessA", "real")].get("lab_mse8_net") or "nan"))  # w_unfitted 0
+    ex = {r["session"]: r for r in csv.DictReader(open(ev / "excess.csv"))}
+    assert np.isfinite(float(ex["gfp"]["lab_r1"])) and np.isfinite(float(ex["gfp"]["all_r1"]))

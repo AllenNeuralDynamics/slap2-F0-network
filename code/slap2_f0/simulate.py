@@ -413,8 +413,8 @@ def excess_summary(tf: TrialFile, st: dict) -> dict[str, float]:
     """How much more the trial's residual (movie - activity) varies than photon
     noise: the measured variance of single frames and of 8- and 64-frame means
     over the photon-noise prediction (gain * mean, through the trial's noise
-    kernel), median over pixel classes (all valid, background, footprint
-    support) and over all or the brightest 10% of valid pixels; plus the
+    kernel), median over pixel classes (all valid, background, labeled,
+    footprint support) and over all or the brightest 10% of valid pixels; plus the
     simulator's fast and slow excess on the brightest 10% (slow as SD over the
     mean). NaN without the residual maps (older stats caches)."""
     out: dict[str, float] = {}
@@ -427,7 +427,7 @@ def excess_summary(tf: TrialFile, st: dict) -> dict[str, float]:
     if not valid.any():
         return out
     top = valid & (mm >= np.quantile(mm[valid], 0.9))
-    classes = {"all": valid, "bg": valid & ~tf.labeled, "sup": valid & tf.support}
+    classes = {"all": valid, "bg": valid & ~tf.labeled, "lab": valid & tf.labeled, "sup": valid & tf.support}
     with np.errstate(invalid="ignore", divide="ignore"):
         for n, key in ((1, "var_res"), (8, "var8_res"), (64, "var64_res")):
             ratio = st[key] / (ph * kernel_var(kt, n))
