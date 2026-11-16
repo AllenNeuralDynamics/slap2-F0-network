@@ -195,6 +195,10 @@ def test_predict_and_view(tmp_path):
         body, h = _get(f"{base}/api/trace?key={key}&r={r}&c={c}&rad=0")
         tr_ = np.frombuffer(body, np.float32).reshape(5, 160)
         assert h["X-Pixels"] == "1" and np.allclose(tr_[0], movie[:, 100], equal_nan=True)
+        from slap2_f0.view import Store
+        st2 = Store(tmp_path, order=["other", "silo"])
+        assert st2.meta[0]["models"] == ["other", "silo", "boxnet"]
+        assert st2.trial(key).layers == ["movie", "activity", "other", "silo", "boxnet"]
         page, _ = _get(base + "/")
         assert b"SLAP2 F0 viewer" in page
     finally:

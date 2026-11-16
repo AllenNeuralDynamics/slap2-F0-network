@@ -49,6 +49,7 @@ def main(argv=None) -> None:
     pv.add_argument("--host", default="127.0.0.1")
     pv.add_argument("--no_browser", action="store_true", help="do not open a browser tab")
     pv.add_argument("--cache_trials", type=int, default=2, help="trials kept in memory")
+    pv.add_argument("--models", default="", help="comma-separated models to list first, in this order (best first)")
     pv.set_defaults(func=view_mod.serve)
     pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
     train_mod.add_probe_arguments(pp)

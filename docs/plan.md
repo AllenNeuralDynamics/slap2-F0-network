@@ -494,3 +494,29 @@ Same evaluation as v5 (192 held-out windows per session and kind). Support: mean
 - **Simulated windows improve too, also without fast changes.** On activity-free labeled pixels it is about the same as v4 pretrained, slightly worse in 780125 and 878030.
 - **Training:** 2.8 s per step (2 windows), peak 12.5 GB. best.pt is the last checkpoint (step 3000). Validation on fast simulations was still improving slowly; real support had been flat for the last 1000 steps.
 - **A check for fine-tuning.** The real target is movie − GIAnT activity, and a source's footprint can reach past the box when the output pixel sits at its edge, so on real windows the visible pixels carry a little of the target's estimation noise. The pretrained network never saw real windows, so it cannot use this. After fine-tuning, the GFP session (no sources) and simulated windows are the clean comparison.
+
+## v6 fine-tuning results (2026-11-16)
+
+v6 pretrained, fine-tuned with v5b's recipe: half the windows real, half simulated with the fast brightness changes, GFP excluded, 1700 steps (best.pt at step 1200). Same evaluation as above.
+
+| checkpoint | real support | real support bias | real background | GFP dendrites (real), bias | fast-brightness simulations, support | simulated background |
+|---|---|---|---|---|---|---|
+| v4 fine-tuned | −6.7% | −0.06 to +0.04 | −0.3 to +0.1% | +0.191 | | +16 to +36% |
+| v5b | −5.9% | −0.07 to −0.15 | +0.1 to +0.4% | +0.041 | −39 to −50% | −16 to −21% |
+| v6 pretrained | −7.0% | −0.06 to −0.11 | +0.2 to +0.7% | +0.015 | −52 to −62% | −28 to −32% |
+| **v6 fine-tuned** | **−7.8%** | −0.05 to −0.11 | −0.2 to +0.4% | +0.033 | −57 to −69% | −23 to −28% |
+
+- **Best on real support in every session:** −9.9% (780125), −8.9% (803121), −5.3% (878030, tied with v4 fine-tuned) and −7.2% (885233). The largest step from fine-tuning is in 803121 (−7.1% → −8.9%), the session where same-frame context explained the most residual.
+- **Background now matches v4 fine-tuned** (−0.2 to +0.4%), and the GFP bias stays small (+0.033, against +0.19 for v4 fine-tuned).
+- **No sign of a target leak.** On real windows the target is movie − GIAnT activity, and a footprint can reach past the box (see v6 pretraining). The GFP session has no sources, so its target is the movie itself: there v6 fine-tuned scores −0.2% against v6 pretrained's +0.0%, no gain from a leak. On simulated support, where the target is exact, fine-tuning also improves (−57 to −61% against −51 to −59%).
+- **Costs:** simulated background loses a few points against v6 pretrained (still better than v5b). Activity-free labeled pixels of 780125 simulations get worse (−13% against −45%, bias −0.24), as they did for v5b.
+- **v6 fine-tuned is the best network so far.**
+
+## Viewer, and a flaw in an input (2026-11-16)
+
+`slap2-f0 predict` runs checkpoints over whole trials in their training geometry, and `slap2-f0 view` shows data, data − activity, and each model's baseline and residual frame by frame, with zoom and pixel traces (README, "Viewing baselines"). What it showed on one trial per session:
+
+- **Discarded frames.** 780125's trial loses long stretches to motion (up to a third of the frames in places). On discarded frames the movie has no data and the networks' outputs mean nothing (v6 swings by ±500 counts); no loss ever covered them. The viewer blanks them.
+- **Fast tracking.** On a soma pixel in 780125, between the gaps, v6 follows part of the fast (0.1–0.3 s) swings of data − activity, by ±100–150 counts, where v5b and SiLo stay flat.
+
+**The variance-factor input saturates.** `make_inputs` divides SiLo's variance factor by its median over the window, and unimaged pixels are 0 there. When less than half of the window is imaged, the median is 0, and the input clamps at its maximum on every imaged pixel. That happens in 34% (780125), 94% (803121), 78% (878030) and 100% (885233, GFP) of 94 × 94 training windows, so for most windows this input carries nothing. Every checkpoint so far was trained this way, so predictions with the training geometry reproduce it. The fix is a median over imaged pixels only, which needs retraining.

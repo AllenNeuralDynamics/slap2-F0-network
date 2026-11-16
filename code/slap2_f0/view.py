@@ -12,7 +12,7 @@ them use real frames only.
 
 Trials are read from every predict file under DIR; files for the same trial
 are merged (models in file order, a later file's copy of a model replacing an
-earlier one). A trial's arrays are held in memory while it is shown
+earlier one; ``--models`` puts the named ones first, in that order). A trial's arrays are held in memory while it is shown
 (``--cache_trials`` trials at once), as float16: about 7 x frames x valid
 pixels x 2 bytes, 1.1 GB for 2254 frames x 36k pixels.
 
@@ -54,6 +54,12 @@ def _names(v) -> list[str]:
     return [v] if isinstance(v, str) else list(v or [])
 
 
+def _ordered(names: list[str], order: list[str] | None) -> list[str]:
+    """The names in ``order`` first (those present), then the rest as they were."""
+    order = [m for m in (order or []) if m in names]
+    return order + [m for m in names if m not in order]
+
+
 def _attr(v):
     a = np.asarray(v)
     if a.dtype.kind in "SO":
@@ -65,7 +71,7 @@ def _attr(v):
 class Trial:
     """One trial's arrays (valid pixels only), merged from its files."""
 
-    def __init__(self, files: list[Path]):
+    def __init__(self, files: list[Path], order: list[str] | None = None):
         self.baselines: dict[str, np.ndarray] = {}
         self.movie = self.activity = None
         for fn in files:
@@ -86,6 +92,7 @@ class Trial:
         if self.movie is None:
             raise ValueError(f"no movie in {[str(f) for f in files]} (run predict without --no_movie once)")
         self.T, self.N = self.movie.shape
+        self.baselines = {m: self.baselines[m] for m in _ordered(list(self.baselines), order)}
         for b in self.baselines.values():  # no data, never trained on: a baseline there means nothing
             b[self.discard] = np.nan
         self.index = np.full((self.R, self.C), -1, np.int64)
@@ -137,8 +144,9 @@ class _quiet:
 class Store:
     """The predict files under a folder, grouped by trial; trials loaded on demand."""
 
-    def __init__(self, root: str | Path, cache_trials: int = 2):
+    def __init__(self, root: str | Path, cache_trials: int = 2, order: list[str] | None = None):
         self.root = Path(root)
+        self.order = order
         self.cache_trials = max(1, cache_trials)
         groups: dict[str, list[tuple[float, Path, dict]]] = {}
         for fn in sorted(self.root.rglob("*.h5")):
@@ -169,7 +177,7 @@ class Store:
                               "trial": a0.get("trial", ""), "n_frames": a0["n_frames"], "n_rows": a0["n_rows"],
                               "n_cols": a0["n_cols"], "n_valid": a0["n_valid"], "frame_rate": a0.get("frame_rate", 80.0),
                               "scale": a0.get("scale"), "gain": a0.get("gain"), "n_sources": a0.get("n_sources", 0),
-                              "has_movie": any(a["has_movie"] for _, _, a in g), "models": models})
+                              "has_movie": any(a["has_movie"] for _, _, a in g), "models": _ordered(models, order)})
         self._cache: OrderedDict[str, Trial] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -181,7 +189,7 @@ class Store:
             if key not in self.files:
                 raise KeyError(key)
             t0 = time.time()
-            tr = Trial(self.files[key])
+            tr = Trial(self.files[key], self.order)
             print(f"loaded {key}: {tr.T} frames x {tr.N} px, {len(tr.baselines)} baselines in {time.time() - t0:.1f} s",
                   flush=True)
             self._cache[key] = tr
@@ -241,13 +249,15 @@ def make_handler(store: Store):
     return Handler
 
 
-def make_server(root: str | Path, host: str = "127.0.0.1", port: int = 8765, cache_trials: int = 2):
-    store = Store(root, cache_trials)
+def make_server(root: str | Path, host: str = "127.0.0.1", port: int = 8765, cache_trials: int = 2,
+                order: list[str] | None = None):
+    store = Store(root, cache_trials, order)
     return ThreadingHTTPServer((host, port), make_handler(store)), store
 
 
 def serve(args) -> None:
-    server, store = make_server(args.root, args.host, args.port, args.cache_trials)
+    order = [m.strip() for m in (getattr(args, "models", "") or "").split(",") if m.strip()]
+    server, store = make_server(args.root, args.host, args.port, args.cache_trials, order)
     if not store.meta:
         raise SystemExit(f"no predict output under {args.root} (see slap2-f0 predict)")
     url = f"http://{args.host}:{server.server_address[1]}/"
