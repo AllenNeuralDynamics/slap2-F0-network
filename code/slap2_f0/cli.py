@@ -1,4 +1,4 @@
-"""Command line: ``slap2-f0 inspect|train|evaluate|probe|ceiling|simcheck ...``."""
+"""Command line: ``slap2-f0 inspect|train|evaluate|predict|view|probe|ceiling|simcheck ...``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import argparse
 import numpy as np
 
 from . import ceiling as ceiling_mod
+from . import predict as predict_mod
 from . import simulate as simulate_mod
 from . import train as train_mod
+from . import view as view_mod
 from .io import TrialFile, list_trials
 
 
@@ -38,6 +40,16 @@ def main(argv=None) -> None:
     pe = sub.add_parser("evaluate", help="score saved checkpoints on each session's windows (real and simulated)")
     train_mod.add_eval_arguments(pe)
     pe.set_defaults(func=train_mod.evaluate_checkpoints)
+    pr = sub.add_parser("predict", help="full-trial baselines of saved checkpoints and SiLo, for viewing")
+    predict_mod.add_arguments(pr)
+    pr.set_defaults(func=predict_mod.run)
+    pv = sub.add_parser("view", help="browser viewer of predict output: data, baselines and residuals over time")
+    pv.add_argument("root", help="folder with predict output (any depth)")
+    pv.add_argument("--port", type=int, default=8765)
+    pv.add_argument("--host", default="127.0.0.1")
+    pv.add_argument("--no_browser", action="store_true", help="do not open a browser tab")
+    pv.add_argument("--cache_trials", type=int, default=2, help="trials kept in memory")
+    pv.set_defaults(func=view_mod.serve)
     pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
     train_mod.add_probe_arguments(pp)
     pp.set_defaults(func=train_mod.probe)

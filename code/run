@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capsule entry point. Four modes:
+# Capsule entry point. Five modes:
 #
 # export (default): make F0-network training data from every attached SLAP2
 # session (GIAnT registration and SiLo, then exportF0TrainingData).
@@ -26,6 +26,11 @@
 #   If eval_args is given (e.g. "--windows 192"), the best checkpoints are
 #   then scored on every session (results/eval, see eval below).
 #
+# predict: full-trial baselines of saved checkpoints and SiLo for `slap2-f0 view`
+#   ./run --mode predict --predict_args "--ckpt v6=/root/capsule/data/<run>/train/best.pt
+#         --files <session>/Path1/trial_002"
+#   predict_args is passed to `slap2-f0 predict`, with results in results/predict.
+#
 # eval: score saved checkpoints on each session's windows, real and simulated
 # (e.g. a training run's results attached as a data asset).
 #   ./run --mode eval --eval_args "--ckpt pre=/root/capsule/data/<run>/train/best.pt
@@ -45,6 +50,7 @@ keep_giant_outputs=summary
 train_args=""
 finetune_args=""
 eval_args=""
+predict_args=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -53,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args|finetune_args|eval_args) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -95,6 +101,11 @@ elif [[ "$mode" == "eval" ]]; then
     PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli evaluate "$DATA" --out "$RESULTS/eval" $eval_args \
         2>&1 | tee "$RESULTS/logs/eval.log"
     exit "${PIPESTATUS[0]}"
+elif [[ "$mode" == "predict" ]]; then
+    nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
+    # shellcheck disable=SC2086  # predict_args is a list of arguments
+    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli predict "$DATA" --out "$RESULTS/predict" $predict_args         2>&1 | tee "$RESULTS/logs/predict.log"
+    exit "${PIPESTATUS[0]}"
 elif [[ "$mode" == "probe" ]]; then
     # peak GPU memory and time per step over model settings; train_args here
     # are probe options (see `slap2-f0 probe --help`)
@@ -104,7 +115,7 @@ elif [[ "$mode" == "probe" ]]; then
         2>&1 | tee "$RESULTS/logs/probe.log"
     exit "${PIPESTATUS[0]}"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, train, eval or probe)"
+    echo "Unknown mode: $mode (use export, train, eval, predict or probe)"
     exit 2
 fi
 
