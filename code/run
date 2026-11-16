@@ -104,7 +104,7 @@ elif [[ "$mode" == "eval" ]]; then
 elif [[ "$mode" == "predict" ]]; then
     nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
     # shellcheck disable=SC2086  # predict_args is a list of arguments
-    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli predict "$DATA" --out "$RESULTS/predict" $predict_args         2>&1 | tee "$RESULTS/logs/predict.log"
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli predict "$DATA" --out "$RESULTS/predict" $predict_args         2>&1 | tee "$RESULTS/logs/predict.log"
     exit "${PIPESTATUS[0]}"
 elif [[ "$mode" == "probe" ]]; then
     # peak GPU memory and time per step over model settings; train_args here

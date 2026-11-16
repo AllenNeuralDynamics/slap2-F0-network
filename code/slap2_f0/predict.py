@@ -135,22 +135,33 @@ def predict_trial(model: SlabBlindSpotNet, wcfg: WindowConfig, tr: TrialFile, st
         band[pt0:pt0 + T, rs - (r0 - sR): re - (r0 - sR), pc0:pc0 + C] = m
         del m
         tiles = [(t0, c0) for c0 in cs for t0 in range(0, T, out_frames)]
+        def infer(chunk):
+            """mu and var of a list of tiles; halves the list when the GPU runs out of memory."""
+            # padded coordinates: frame t0 - tR -> t0, column c0 - sR -> c0, row r0 - sR -> r0
+            sp = lambda a, c0: a[r0:r0 + ns, c0:c0 + ns]  # noqa: E731
+            try:
+                movie = np.stack([band[t0:t0 + nt, :, c0:c0 + ns] for t0, c0 in chunk])
+                scale = torch.full((len(chunk),), float(s), device=device)
+                gain = torch.full((len(chunk),), float(st["gain"]), device=device)
+                x = make_inputs(torch.from_numpy(movie).to(device),
+                                torch.from_numpy(np.stack([sp(mean_p, c0) for _, c0 in chunk])).to(device),
+                                torch.from_numpy(np.stack([sp(vf_p, c0) for _, c0 in chunk])).to(device), scale,
+                                torch.from_numpy(np.stack([sp(var_p, c0) for _, c0 in chunk])).to(device), gain)
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                    mu, var = model(x, scale, gain, region)
+                return (mu.float() * s).cpu().numpy(), (var.float() * s * s).cpu().numpy()
+            except torch.OutOfMemoryError:
+                if len(chunk) == 1:
+                    raise SystemExit("out of GPU memory with one tile per pass; try a smaller --out_frames")
+                x = mu = var = None
+                torch.cuda.empty_cache()
+                h = len(chunk) // 2
+                (m1, v1), (m2, v2) = infer(chunk[:h]), infer(chunk[h:])
+                return np.concatenate([m1, m2]), np.concatenate([v1, v2])
+
         for i in range(0, len(tiles), batch):
             chunk = tiles[i:i + batch]
-            # padded coordinates: frame t0 - tR -> t0, column c0 - sR -> c0, row r0 - sR -> r0
-            movie = np.stack([band[t0:t0 + nt, :, c0:c0 + ns] for t0, c0 in chunk])
-            sp = lambda a, c0: a[r0:r0 + ns, c0:c0 + ns]  # noqa: E731
-            mean_image = np.stack([sp(mean_p, c0) for _, c0 in chunk])
-            vf = np.stack([sp(vf_p, c0) for _, c0 in chunk])
-            vm = np.stack([sp(var_p, c0) for _, c0 in chunk])
-            scale = torch.full((len(chunk),), float(s), device=device)
-            gain = torch.full((len(chunk),), float(st["gain"]), device=device)
-            x = make_inputs(torch.from_numpy(movie).to(device), torch.from_numpy(mean_image).to(device),
-                            torch.from_numpy(vf).to(device), scale, torch.from_numpy(vm).to(device), gain)
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                mu, var = model(x, scale, gain, region)
-            mu = (mu.float() * s).cpu().numpy()
-            var = (var.float() * s * s).cpu().numpy()
+            mu, var = infer(chunk)
             for k, (t0, c0) in enumerate(chunk):
                 t1 = min(t0 + out_frames, T)
                 idx = index[r0:r0 + op, c0:c0 + op]
@@ -266,7 +277,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                                                "(e.g. 780125_2025-03-14_09-30-06/Path1/trial_002); default all")
     p.add_argument("--out_frames", type=int, default=512, help="output frames per tile")
     p.add_argument("--out_px", type=int, default=0, help="output pixels per tile side; 0 = the checkpoint's training size")
-    p.add_argument("--batch", type=int, default=4, help="tiles per forward pass")
+    p.add_argument("--batch", type=int, default=1, help="tiles per forward pass (halved when the GPU runs out of memory)")
     p.add_argument("--no_silo", action="store_true", help="skip SiLo's baseline")
     p.add_argument("--no_movie", action="store_true", help="skip the movie and activity (when adding checkpoints)")
     p.add_argument("--sd", action="store_true", help="also save each network's noise SD")
