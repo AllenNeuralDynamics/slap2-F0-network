@@ -94,6 +94,7 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
   - **Baseline:** its whole-trial mean minus its mean activity, times a slow drift (bleaching up to 5%, fluctuations up to 2%).
   - **Events:** its own fitted activity, shifted in time and rescaled.
   - **Noise:** photon noise matched to the trial's measured gain, temporal and spatial correlations, long-average inflation and skew (`slap2_f0/stats.py`).
+  - **Excess:** bright pixels of real trials vary more than photon noise explains, frame to frame and over seconds. The simulator matches each pixel's residual variance of single frames and of 64-frame means: a fast part scales the photon noise, and a slow part is added to the baseline as smooth fluctuations over 1–20 s (`SimConfig.excess = 0` turns it off). Without it, the pretrained network over-subtracted on the brightest sessions.
   - **Check:** `slap2-f0 simcheck <folder>` compares the simulated noise statistics with the real ones.
 - **Model.** The branches see the movie and three whole-trial maps:
   - the mean image;
@@ -112,6 +113,7 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 - **best.pt** is picked on held-out windows of the training data kind (`--select`). The default, `balanced`, is the network's 8-frame MSE relative to the mean image's, averaged over support and background pixels. The per-frame loss is too noisy to pick checkpoints on real data. The untrained network counts (score 1), so best.pt is never worse than the mean image.
 - **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt`, `last.pt` and `stats/` (cached whole-trial statistics).
 - **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
+- **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). With the training seed, a held-out session gets the windows its training validation used.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
 
 ### On Code Ocean
@@ -121,7 +123,7 @@ The GPU capsule can't share the data capsule's environment: Code Ocean has no st
 1. **Create the capsule from a starter, not from Git.** Use the newest PyTorch starter with GPU (CUDA 12) support. Add the pip package `h5py`, and `numpy` if the starter lacks it. Choose a GPU machine: g5.4xlarge (one A10G with 24 GB, 16 vCPUs for data loading, 64 GB of memory) is a good start.
 2. **Push the code into it.** The capsule's own git remote takes this repository's `main`, merged so that the capsule keeps its own `environment/` and `.codeocean/`. The capsule isn't linked to GitHub, so nothing flows back.
 3. **Attach the training data.** Each export run's results are saved as a data asset (`f0train_<session>`); attach those to the capsule.
-4. **Run.** For example, `--mode train --train_args "--data sim --steps 4000 --batch 2 --out_frames 192 --out_px 48 --max_hours 2.5"`. Then fine-tune with `--data real --init <best.pt>`, with the pretraining results attached as a data asset. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`.
+4. **Run.** For example, `--mode train --train_args "--data sim --steps 4000 --batch 2 --out_frames 192 --out_px 48 --max_hours 2.5"`. Then fine-tune with `--data real --init <best.pt>`, with the pretraining results attached as a data asset. Checkpoints and metrics go to `/results/train`, and the log to `/results/logs/train.log`. With `--finetune_args`, fine-tuning follows in the same run (`/results/finetune`); with `--eval_args "--windows 192"`, the best checkpoints are then scored on every session (`/results/eval`). `--mode eval --eval_args "--ckpt name=<path> ..."` scores checkpoints from earlier runs attached as data assets.
 
 ## Python
 

@@ -261,3 +261,46 @@ v3 bounds the heads (mix in ±1, baseline correction 0.5–2×, noise correction
 - **Fine-tuning on real data added nothing.** The selection score went from 0.9703 (pretrained start) to 0.9698 at best, a tie. Fine-tuning pulled the mix from 0.26 to about 0, brought real support bias back to −0.07, and lost much of the simulation skill (support −83% → −68%, background −51% → −1%).
 - **Calibration:** z variance 0.95–1.0 and z mean under 0.02 on both data kinds.
 - **The simulated "all" column is erratic** (+31% at step 1500, −40% at step 4000) because it includes labeled pixels outside every footprint. Those carry weight 1 in simulations and 0 on real data. After fine-tuning the net is 27% worse than the mean image on them in simulations.
+
+## v3 on all four sessions (2026-11-15)
+
+`slap2-f0 evaluate` scored both v3 checkpoints on 192 fixed windows per session. The pretrained network never saw real residuals, so every session is new to it (the trials of 780125, 803121 and 885233 served as simulation templates). The fine-tuned network trained on real residuals of 780125, 803121 and 885233; only 878030 is held out for it. Numbers are 8-frame MSE change vs the mean image, support / background.
+
+| session | pretrained only | fine-tuned | SiLo | oracle (best constant) |
+|---|---|---|---|---|
+| 780125 | +15.9% / +3.7% | −6.9% / 0.0% | −9.0% / +8.6% | −11.7% / −0.4% |
+| 803121 | +6.2% / +11.3% | −4.6% / +0.1% | −8.0% / +2.1% | −6.6% / 0.0% |
+| 878030 | −5.0% / +0.6% | −5.2% / 0.0% | −4.6% / +10.9% | −8.2% / −0.1% |
+| 885233 | −5.8% / +0.4% | −6.0% / −0.2% | −5.8% / +5.5% | −10.7% / −0.5% |
+
+- **Pretraining alone does not carry over.** In 780125 and 803121 the pretrained network over-subtracts (support bias +0.25 and +0.12) and is worse than the mean image. Its noise is too low there too: z variance 1.24 and 1.23, against about 1.0 in the other two sessions and on simulations. The v3 conclusion that pretraining alone beats SiLo rested on 878030, one of the two sessions where it works.
+- **Fine-tuning fixes it.** The fine-tuned network is never worse than the mean image on background and is 4.6–6.9% better on support. SiLo does better on support in 780125 and 803121, by 2–3 points, but costs 2–11% on background.
+- **Cause: real residuals vary more than the simulator's photon noise, on bright pixels and at two time scales** (one trial per session, real vs simulated residual on bright labeled pixels):
+  - fast: 10–30% more variance per frame, with the photon noise's time structure;
+  - slow: means over 256 frames (3.2 s) vary 2–15× more than in simulations (15× in 780125), so the baseline itself moves over seconds.
+
+  The excess is largest in the two brightest sessions, 780125 and 803121. It is not motion: it hardly depends on the mean image's gradient. Nor is it one shared factor: removing the frame-wide mean fluctuation leaves it unchanged. A network trained on photon-only simulations reads the extra spread as activity.
+- **Confirmed by adding the measured excess to simulated windows.** The test used windows centred on support pixels of one trial per session, with the excess per-frame variance added to the movie as AR(1) noise. The pretrained network then over-subtracts on simulations too:
+
+  | session | simulated | simulated + excess | real |
+  |---|---|---|---|
+  | 780125 | −0.02 | +0.19 | +0.10 |
+  | 803121 | −0.02 | +0.35 | +0.30 |
+  | 878030 | −0.02 | +0.37 | +0.26 |
+  | 885233 | −0.08 | +0.13 | +0.00 |
+
+  Values are support bias. Its correction below the mean image grows from 0.14–0.31 to 0.35–0.71, against 0.26–0.59 on real data.
+
+## v4: the simulator adds the measured excess (2026-11-15)
+
+- **Stats** add per-pixel residual variance of single frames and of 8- and 64-frame means.
+- **The simulator splits each pixel's excess into two parts** (3×3-smoothed): a fast part that scales the photon noise, and a slow part added to the baseline as smooth fluctuations with time constants of 1–20 s.
+- **Check on one trial per session:** real/simulated variance of 1-, 8- and 64-frame means on the brightest 10% of support pixels:
+
+  | session | photon-only simulator | with the excess |
+  |---|---|---|
+  | 780125 | 1.25 / 1.37 / 2.23 | 1.07 / 1.10 / 1.25 |
+  | 885233 | 1.13 / 1.24 / 1.44 | 1.04 / 1.11 / 1.17 |
+
+  It is within about 10–20% elsewhere. Some variance at the 8-frame scale is still missing.
+- **The run** repeats v3 (same split, steps and seed) with the new simulator, fine-tunes, and scores both checkpoints on all four sessions.

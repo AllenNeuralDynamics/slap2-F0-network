@@ -16,7 +16,15 @@ geometry, brightness, events and noise statistics:
   axis) fitted to the template's measured correlations at 1 and 2 frames and
   1 pixel and to the inflation of long averages. Photon events are drawn at
   the rate that gives the right variance after the kernel, with their size
-  raised (and rate lowered) to match the template's measured skew.
+  raised (and rate lowered) to match the template's measured skew;
+* **excess** = how much more the template's residual (movie - activity)
+  varies than that photon noise, per pixel, fitted to its variance of single
+  frames and of 64-frame means (``stats``: var_res, var64_res). A fast part
+  scales the photon noise (it has the same time structure); a slow part is
+  added to the baseline as spatially smooth fluctuations over 1-20 s. Bright
+  pixels of real trials vary more than photon noise explains, at both time
+  scales; a network trained without this read the extra spread as activity
+  and over-subtracted on real data (v3 run, worst in the brightest sessions).
 
 Each draw is a new virtual trial; the window generator returns everything the
 training windows of real data have (movie, activity, mean image, variance map,
@@ -49,6 +57,10 @@ class SimConfig:
     field_px: tuple[float, float] = (15.0, 40.0)  # spatial scale of the fields
     field_tau_s: tuple[float, float] = (0.5, 5.0)
     rate_hz: float = 80.0
+    excess: float = 1.0  # scale of the template's excess variance (0 = photon noise and the drift above only)
+    n_slow: int = 6  # slow baseline processes that carry the excess's slow part
+    slow_tau_s: tuple[float, float] = (1.0, 20.0)  # their time constants, log-uniform
+    slow_px: tuple[float, float] = (2.0, 6.0)  # spatial scale of their fields
 
 
 def _spatial_tap(rho: float) -> float:
@@ -73,6 +85,7 @@ def noise_kernels(st: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     err = (r1 / r0 - t1) ** 2 + (r2 / r0 - t2) ** 2
     if np.isfinite(F) and F > 1:
         err = err + 0.05 * (((1 + 2 * (k1 + k2 + k3)) ** 2 / r0 - F) / F) ** 2
+    err = err + 1e-6 * (k1 ** 2 + k2 ** 2 + k3 ** 2)  # prefer short kernels when the lags leave k3 free (white noise)
     i = np.unravel_index(np.argmin(err), err.shape)
     a1, a2, a3 = k1.flat[i[0]], k2.flat[i[1]], k3.flat[i[2]]
     kt = np.array([a3, a2, a1, 1.0, a1, a2, a3])
@@ -102,6 +115,58 @@ def _ou(n: int, tau_frames: np.ndarray, sd: np.ndarray, rng) -> np.ndarray:
     for t in range(1, n):
         x[:, t] = phi * x[:, t - 1] + e[:, t]
     return x
+
+
+def kernel_var(kt: np.ndarray, n: int) -> float:
+    """Variance of n-frame means of white noise filtered by kt, relative to the
+    single-frame variance."""
+    ac = np.correlate(kt, kt, "full") / (kt ** 2).sum()
+    lags = np.arange(-(len(kt) - 1), len(kt))
+    return float((np.maximum(n - np.abs(lags), 0) * ac).sum() / n ** 2)
+
+
+def ou_var(tau: float, n: int) -> float:
+    """Variance of n-frame means of a unit stationary OU process (tau in frames)."""
+    x = n / tau
+    return float(2 / x * (1 - (1 - np.exp(-x)) / x))
+
+
+def _smooth_valid(a: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Mean over the valid pixels of each 3x3 neighbourhood."""
+    v = valid.astype(np.float64)
+    x = np.pad(np.where(valid, a, 0.0), 1)
+    w = np.pad(v, 1)
+    R, C = a.shape
+    num = sum(x[i:i + R, j:j + C] for i in range(3) for j in range(3))
+    den = sum(w[i:i + R, j:j + C] for i in range(3) for j in range(3))
+    return np.where(valid, num / np.maximum(den, 1), 0.0)
+
+
+def excess_maps(st: dict, kt: np.ndarray, valid: np.ndarray, cfg: "SimConfig | None" = None):
+    """Per-pixel excess of the residual over the simulated photon noise
+    (variance p = gain * mean): a factor on the photon noise variance (fast)
+    and the variance of a slow baseline fluctuation (slow), from
+        var_res   = (1 + fast) * p        + slow
+        var64_res = (1 + fast) * p * k64  + slow * c64
+    with k64 the photon kernel's and c64 the slow processes' variance of
+    64-frame means. Each pixel's 64-frame variance rests on ~25 blocks, so both
+    maps are averaged over 3x3 valid neighbours. Zeros if the stats lack the
+    maps (older caches)."""
+    z = np.zeros(valid.shape, np.float32)
+    if "var_res" not in st or "var64_res" not in st:
+        return z, z
+    cfg = cfg or SimConfig()
+    taus = np.exp(np.linspace(*np.log(cfg.slow_tau_s), 9)) * cfg.rate_hz
+    c64 = float(np.mean([ou_var(t, 64) for t in taus]))
+    k64 = kernel_var(kt, 64)
+    ph = st["gain"] * np.maximum(np.nan_to_num(st["mean_movie"]), 0)
+    v1, v64 = np.nan_to_num(st["var_res"]), np.nan_to_num(st["var64_res"])
+    ok = valid & np.isfinite(st["var_res"]) & np.isfinite(st["var64_res"]) & (ph > 0)
+    slow = (v64 - k64 * v1) / (c64 - k64)
+    fast = np.where(ph > 0, (v1 - slow) / np.maximum(ph, 1e-9) - 1, 0)
+    slow = np.maximum(_smooth_valid(slow, ok), 0)
+    fast = np.clip(_smooth_valid(fast, ok), -0.3, 3.0)
+    return np.where(ok, fast, 0).astype(np.float32), np.where(ok, slow, 0).astype(np.float32)
 
 
 def _field(R: int, C: int, spacing: float, rng) -> np.ndarray:
@@ -138,6 +203,7 @@ class Template:
         self.var_act = np.maximum(np.nan_to_num(st["mean_act2"]) - self.mean_act ** 2, 0).astype(np.float32)
         self.n_valid = max(1.0, float(np.nanmedian(np.where(tf.valid, st["n_valid"], np.nan))))
         self.gain = float(st["gain"])
+        self.fast, self.slow = excess_maps(st, self.kt, tf.valid)
 
 
 def draw(tp: Template, cfg: SimConfig, rng) -> dict:
@@ -154,8 +220,17 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
     fields = np.stack([_field(tp.R, tp.C, rng.uniform(*cfg.field_px), rng) for _ in range(K)]) if K else \
         np.zeros((0, tp.R, tp.C), np.float32)
     cov = np.atleast_2d(np.cov(proc))
-    return {"shift": int(rng.integers(T)), "amp": float(rng.uniform(*cfg.amp)), "proc": proc, "fields": fields,
-            "proc_mean": proc.mean(1), "proc_cov": cov}
+    r = {"shift": int(rng.integers(T)), "amp": float(rng.uniform(*cfg.amp)), "proc": proc, "fields": fields,
+         "proc_mean": proc.mean(1), "proc_cov": cov, "excess": float(cfg.excess)}
+    if cfg.excess > 0 and cfg.n_slow > 0 and tp.slow.any():
+        # slow processes with unit variance per pixel: fields normalized so that sum_k field_k^2 = 1
+        ks = cfg.n_slow
+        taus_s = np.exp(rng.uniform(*np.log(cfg.slow_tau_s), ks)) * fps
+        sp = _ou(T, taus_s, np.ones(ks), rng).astype(np.float32)
+        sf = np.stack([_field(tp.R, tp.C, rng.uniform(*cfg.slow_px), rng) for _ in range(ks)])
+        sf /= np.sqrt((sf ** 2).sum(0)) + 1e-6
+        r.update(slow_proc=sp, slow_fields=sf, slow_mean=sp.mean(1), slow_cov=np.atleast_2d(np.cov(sp)))
+    return r
 
 
 def _drift_maps(r: dict, rows, cols) -> tuple[np.ndarray, np.ndarray]:
@@ -192,6 +267,11 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     p = r["proc"][:, ts:te]
     d = 1.0 + p[0][:, None, None] + (np.tensordot(p[1:].T, f, 1) if len(f) else 0.0)
     truth = B[None] * d
+    # the excess's slow part: baseline fluctuations with the template's per-pixel variance
+    sa = np.sqrt(tp.slow[rs:re, cs:ce] * r.get("excess", 0.0))
+    if "slow_fields" in r:
+        sg = r["slow_fields"][:, rs:re, cs:ce] * sa[None]
+        truth = truth + np.tensordot(r["slow_proc"][:, ts:te].T, sg, 1)
     # activity, shifted circularly in time
     src = (np.arange(ts, te) - r["shift"]) % T
     act = np.empty((te - ts, re - rs, ce - cs), np.float32)
@@ -209,7 +289,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     gp = tp.gain * tp.q / tp.ksum2  # event size; variance gp^2 * lam * ksum2 = gain * S
     lam = np.maximum(Se, 0) * tp.ksum2 / (tp.gain * tp.q ** 2)
     noise = _filter((gp * (rng.poisson(lam) - lam)).astype(np.float32), tp.kt, tp.kr, tp.kc)
-    movie = S + noise
+    fac = np.maximum(1 + tp.fast[rs:re, cs:ce] * r.get("excess", 0.0), 0.05)  # the excess's fast part
+    movie = S + noise * np.sqrt(fac)[None]
     movie[:, ~valid] = np.nan
     movie[tf.discard[ts:te]] = np.nan
     truth = np.where(valid[None], truth, np.nan)
@@ -221,11 +302,15 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     dmean, dvar = _drift_maps(r, rows, cols)
     mact, vact = tp.mean_act[rs:re, cs:ce] * r["amp"], tp.var_act[rs:re, cs:ce] * r["amp"] ** 2
     M = B * (1 + dmean) + mact
-    var_mean = tp.gain * np.maximum(M, 0) * tp.Ft / tp.n_valid
+    svar = np.zeros_like(M)
+    if "slow_fields" in r:
+        M = M + np.tensordot(r["slow_mean"], sg, 1)
+        svar = np.maximum(np.einsum("kl,kij,lij->ij", r["slow_cov"], sg, sg), 0)
+    var_mean = tp.gain * np.maximum(M, 0) * fac * tp.Ft / tp.n_valid
     g = rng.standard_normal((re - rs + 2 * ps_r, ce - cs + 2 * ps_c)).astype(np.float32)[None]
     g = _filter(g, np.ones(1), tp.kr, tp.kc)[0] / np.sqrt((tp.kr ** 2).sum() * (tp.kc ** 2).sum())
     mi = M + np.sqrt(var_mean) * g
-    vm = (B ** 2 * dvar + vact + tp.gain * np.maximum(M, 0)) * \
+    vm = (B ** 2 * dvar + svar + vact + tp.gain * np.maximum(M, 0) * fac) * \
         np.maximum(1 + np.sqrt(2 * tp.Ft / tp.n_valid) * rng.standard_normal(M.shape), 0.1)
     out["mean_image"][dr, dc] = np.where(valid, mi, np.nan)
     out["mean_act"][dr, dc] = np.where(valid, mact, np.nan)  # the virtual trial's mean activity

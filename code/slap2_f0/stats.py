@@ -1,8 +1,12 @@
 """Whole-trial statistics of exported trials, computed once and cached.
 
 Per pixel: mean and variance of the movie (the variance map is a network
-input: pixels with events have more variance than photon noise explains), and
-mean and mean square of the activity (the simulator's event statistics).
+input: pixels with events have more variance than photon noise explains),
+mean and mean square of the activity (the simulator's event statistics), and
+mean and variance of the residual movie - activity, of single frames and of
+8- and 64-frame means (mean_res, var_res, var8_res, var64_res: on bright
+pixels the residual varies more than photon noise explains, both frame to
+frame and over seconds, and the simulator adds that excess).
 
 Per trial, measured on background pixels (valid and unlabeled, where there is
 no fitted activity), on the residual movie - activity:
@@ -26,9 +30,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid")
+MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res", "var_res", "var8_res", "var64_res")
 SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "n_frames")
-VERSION = 2  # bump when the stats change, to invalidate caches
+VERSION = 4  # bump when the stats change, to invalidate caches
 
 
 def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 64) -> dict:
@@ -48,6 +52,8 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         nb_r = [z(R - 1, C) for _ in range(4)]
         nb_c = [z(R, C - 1) for _ in range(4)]
         bsum, bsum2, bn = z(), z(), z()
+        rs, rs2, b8s, b8s2, b8n = z(), z(), z(), z(), z()  # residual on all valid pixels; 8-frame block means
+        b64s, b64s2, b64n = z(), z(), z()  # and 64-frame block means
         prev = None  # last 2 frames of the previous chunk
         for t0 in range(0, T, chunk):
             t1 = min(T, t0 + chunk)
@@ -63,6 +69,23 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
             sm2 += (m0 ** 2).sum(0, dtype=np.float64)
             sa += a0.sum(0, dtype=np.float64)
             sa2 += (a0 ** 2).sum(0, dtype=np.float64)
+            xr = m0 - a0
+            rs += xr.sum(0, dtype=np.float64)
+            rs2 += (xr ** 2).sum(0, dtype=np.float64)
+            for b0 in range(0, xr.shape[0] - 7, 8):
+                cnt = fin[b0: b0 + 8].sum(0)
+                good = cnt >= 6
+                bm = np.where(good, xr[b0: b0 + 8].sum(0) / np.maximum(cnt, 1), 0)
+                b8s += bm
+                b8s2 += bm ** 2
+                b8n += good
+            for b0 in range(0, xr.shape[0] - block + 1, block):
+                cnt = fin[b0: b0 + block].sum(0)
+                good = cnt >= 0.75 * block
+                bm = np.where(good, xr[b0: b0 + block].sum(0) / np.maximum(cnt, 1), 0)
+                b64s += bm
+                b64s2 += bm ** 2
+                b64n += good
             x = np.where(fin & bg, m - a, np.nan)
             fx = np.isfinite(x)
             x0 = np.where(fx, x, 0)
@@ -99,6 +122,12 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         var_movie = sm2 / n - mean_movie ** 2
         mean_act = sa / n
         mean_act2 = sa2 / n
+        mean_res = rs / n
+        var_res = rs2 / n - mean_res ** 2
+        var8_res = b8s2 / np.maximum(b8n, 1) - (b8s / np.maximum(b8n, 1)) ** 2
+        var8_res[b8n < 8] = np.nan
+        var64_res = b64s2 / np.maximum(b64n, 1) - (b64s / np.maximum(b64n, 1)) ** 2
+        var64_res[b64n < 8] = np.nan
         cnt_x = np.maximum(n * bg, 1)
         mx = sx / cnt_x
         vx = sx2 / cnt_x - mx ** 2
@@ -124,7 +153,8 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         m3 = sx3 / cnt_x - 3 * mx * (sx2 / cnt_x) + 2 * mx ** 3
         skew = float(np.median(m3[use] / vx[use] ** 1.5)) if use.any() else float("nan")
     out = {k: v.astype(np.float32) for k, v in
-           dict(mean_movie=mean_movie, var_movie=var_movie, mean_act=mean_act, mean_act2=mean_act2, n_valid=n).items()}
+           dict(mean_movie=mean_movie, var_movie=var_movie, mean_act=mean_act, mean_act2=mean_act2, n_valid=n,
+                mean_res=mean_res, var_res=var_res, var8_res=var8_res, var64_res=var64_res).items()}
     out.update(gain=gain, rho_t1=corr_t(1), rho_t2=corr_t(2), rho_r=rho_r, rho_c=rho_c, F64=F64, skew=skew, n_frames=float(T))
     return out
 

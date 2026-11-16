@@ -23,6 +23,8 @@
 #   results in results/train. If finetune_args is given, a second training
 #   then starts from results/train/best.pt (results in results/finetune),
 #   e.g. simulation pretraining followed by fine-tuning on real residuals.
+#   If eval_args is given (e.g. "--windows 192"), the best checkpoints are
+#   then scored on every session (results/eval, see eval below).
 #
 # eval: score saved checkpoints on each session's windows, real and simulated
 # (e.g. a training run's results attached as a data asset).
@@ -69,14 +71,24 @@ if [[ "$mode" == "train" ]]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/train" $train_args \
         2>&1 | tee "$RESULTS/logs/train.log"
     status="${PIPESTATUS[0]}"
-    if [[ "$status" -ne 0 || -z "$finetune_args" ]]; then
-        exit "$status"
+    [[ "$status" -ne 0 ]] && exit "$status"
+    ckpts="pretrained=$RESULTS/train/best.pt"
+    if [[ -n "$finetune_args" ]]; then
+        # shellcheck disable=SC2086
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/finetune" \
+            --init "$RESULTS/train/best.pt" --stats_cache "$RESULTS/train/stats" $finetune_args \
+            2>&1 | tee "$RESULTS/logs/finetune.log"
+        status="${PIPESTATUS[0]}"
+        [[ "$status" -ne 0 ]] && exit "$status"
+        ckpts="$ckpts finetuned=$RESULTS/finetune/best.pt"
     fi
-    # shellcheck disable=SC2086
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli train "$DATA" --out "$RESULTS/finetune" \
-        --init "$RESULTS/train/best.pt" --stats_cache "$RESULTS/train/stats" $finetune_args \
-        2>&1 | tee "$RESULTS/logs/finetune.log"
-    exit "${PIPESTATUS[0]}"
+    if [[ -n "$eval_args" ]]; then  # then score the best checkpoints on every session
+        # shellcheck disable=SC2086
+        PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli evaluate "$DATA" --out "$RESULTS/eval" --ckpt $ckpts \
+            --stats_cache "$RESULTS/train/stats" $eval_args 2>&1 | tee "$RESULTS/logs/eval.log"
+        status="${PIPESTATUS[0]}"
+    fi
+    exit "$status"
 elif [[ "$mode" == "eval" ]]; then
     nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
     # shellcheck disable=SC2086  # eval_args is a list of arguments

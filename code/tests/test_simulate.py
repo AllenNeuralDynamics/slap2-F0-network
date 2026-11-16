@@ -65,3 +65,55 @@ def test_window_noise_and_truth(tmp_path):
     mi = w["mean_image"]
     avg = np.nanmean(w["movie"], 0)
     assert np.nanmean(np.abs(mi - avg)) < 0.1 * np.nanmean(avg)
+
+
+def test_excess_matches_template(tmp_path):
+    """Extra fast noise and slow baseline fluctuations on bright template pixels are
+    measured (stats), split into the two parts, and reproduced by the simulation."""
+    fn = tmp_path / "trial_001.h5"
+    T, R, C = 3200, 24, 24
+    rng = np.random.default_rng(3)
+    base = np.full((R, C), 4.0, np.float32)
+    base[:, 12:] = 40.0  # bright half
+    bright = base > 10
+    photon = 9.0 * rng.poisson(np.broadcast_to(base / 9.0, (T, R, C))).astype(np.float32) - base
+    photon *= np.where(bright, np.sqrt(1.3), 1.0)  # fast excess: 30% more noise variance
+    slow = np.zeros((T, 1, 1), np.float32)  # slow excess: a shared OU process (tau 400 frames), SD 3 counts
+    a = np.exp(-1 / 400)
+    e = rng.standard_normal(T) * np.sqrt(1 - a ** 2)
+    for t in range(1, T):
+        slow[t] = a * slow[t - 1] + e[t]
+    movie = base + photon + 3.0 * slow * bright
+    with h5py.File(fn, "w") as f:
+        f["movie"] = movie[None]
+        f["activity"] = np.zeros((1, T, R, C), np.float32)
+        f["mean_image"] = movie.mean(0)[None]
+        f["varfac"] = np.ones((R, C), np.float32)
+        f["mask/valid"] = np.ones((R, C), np.uint8)
+        f["mask/labeled"] = bright.astype(np.uint8)  # the gain is measured on the dim background
+        f["mask/footprint_support"] = bright.astype(np.uint8)
+        f["frame/discard"] = np.zeros(T, np.uint8)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    assert abs(np.median(tp.fast[:, 13:-1]) - 0.3) < 0.12
+    assert abs(np.median(tp.slow[:, 13:-1]) - 9.0) < 3.0
+    assert np.median(np.abs(tp.fast[:, 1:10])) < 0.08 and np.median(tp.slow[:, 1:10]) < 1.0
+    cfg = SimConfig(bleach=0, global_sd=0, field_sd=0)
+    sims = [window(tp, draw(tp, cfg, rng), 0, T, 0, R, 0, C, rng) for _ in range(3)]
+    noisy = np.stack([w["noisy"] for w in sims])
+
+    def v(x, n):  # variance of n-frame means, per pixel, averaged over virtual trials
+        m = x[:, : (T // n) * n].reshape(x.shape[0], -1, n, R, C).mean(2)
+        return m.var(1).mean(0)
+
+    for n, key in ((1, "var_res"), (64, "var64_res")):
+        for cols in (slice(13, -1), slice(1, 10)):
+            assert np.allclose(np.median(v(noisy, n)[:, cols]), np.median(st[key][:, cols]), rtol=0.3), (n, cols)
+    # the slow part is baseline (in the truth), the fast part is noise
+    assert np.median(np.var(sims[0]["truth"], 0)[:, 13:-1]) > 3.0
+    # whole-trial variance input includes both
+    assert np.allclose(np.median(sims[0]["var_map"][:, 13:-1]), np.median(st["var_res"][:, 13:-1]), rtol=0.3)
+    # without the excess, the bright half has photon noise only
+    r0 = dict(draw(tp, SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0), rng))
+    v0 = np.var(window(tp, r0, 0, T, 0, R, 0, C, rng)["noisy"], 0)
+    assert np.median(v0[:, 13:-1]) < 0.85 * np.median(st["var_res"][:, 13:-1])
