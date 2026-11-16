@@ -421,6 +421,25 @@ Validation adds held-out activity-free simulations (`--val_free`, `free_*`). bes
 - **Noise anisotropy at 1 px.** Neighbouring pixels in the same row correlate more than neighbours in the same column (0.40–0.45 vs 0.24–0.31, background included). That is noise structure, which the simulator already models with separate row and column taps.
 - **So the context stays isotropic.** If a line-profile mode appears in other sessions, it would argue for a long, thin context along the scan direction. With the slab blind spot, only its slow part (beyond 8 frames) could be predicted at all. Using same-frame pixels far along the line needs the box blind spot (v2 design above).
 
+## v5 results (2026-11-16)
+
+Evaluated on held-out windows of all five sessions (192 per session and kind). Support: mse8 against the true baseline, relative to the mean image: the mean over the four sensor sessions for real support, their range otherwise. Bias in scale units, positive = baseline too low.
+
+| checkpoint | real support | real support bias | real background | GFP dendrites (real), bias | GFP dendrites, mse8 | simulated background |
+|---|---|---|---|---|---|---|
+| v4 pretrained | −4.7% | −0.08 to −0.18 | +0.3 to +0.7% | +0.049 | +0.3% | −23 to −26% |
+| v4 fine-tuned | **−6.7%** | −0.06 to +0.04 | −0.3 to +0.1% | +0.191 | +3.8% | +16 to +36% |
+| v5a, mix + silent regions | −5.5% | −0.09 to −0.18 | +0.1 to +0.3% | +0.034 | +0.1% | −18 to −22% |
+| v5b, mix | −5.9% | −0.07 to −0.15 | +0.1 to +0.4% | +0.041 | +0.2% | −16 to −21% |
+| v5c, activity-subtracted real | −4.7% | −0.11 to −0.23 | −0.2 to +0.0% | +0.029 | −0.0% | −2 to +15% |
+
+- **All three remove the GFP bias.** It drops from +0.19 to +0.03–0.04, below the pretrained network's +0.05.
+- **They keep only part of the fine-tuning gain on real support.** v5b keeps about 60% of it (−5.9% vs −4.7% pretrained and −6.7% fine-tuned), v5a about 40%, v5c none.
+- **Support bias goes back to the pretrained level.** It is −0.07 to −0.15 again, where fine-tuning had brought it to about 0. With pixels hidden for 17 frames, the network cannot tell from its inputs which bright pixels have events under the gap. Lowering every bright pixel's baseline fixes support and biases event-free pixels. Simulated windows in the mix make it stop doing that.
+- **Silent regions add nothing.** v5a matches v5b on GFP (+0.034 vs +0.041) and is slightly worse on support.
+- **Activity-subtracted real windows break simulated windows.** v5c does best on real background and GFP, but on simulated background it falls to around the mean image (−2 to +15%), and in 780125 simulated labeled pixels get worse than the mean image (+65%, bias −0.51).
+- **v6 fine-tunes with v5b's recipe:** half the windows simulated, no silent regions.
+
 ## v6: box blind spot (2026-11-16)
 
 **Why.** Real frames carry fast brightness changes shared across the field, and a slab blind spot cannot see them: it hides every pixel of the 17 frames around the output. Measured on one local trial per session, X = movie − activity:
@@ -439,7 +458,7 @@ Validation adds held-out activity-free simulations (`--val_free`, `free_*`). bes
 - **It is not activity.** The GFP control has it too.
 - **Most of it is faster than the slab's reach.** In 803121 and GFP, autocorrelation is about 0.2 by 8 frames.
 - **It matters for ΔF/F.** A 2–4% change shared by every synapse in a frame is a coherent ΔF/F error. A pixel's own photon noise is larger, but independent.
-- **What same-frame context could gain.** Take the 8-frame residual that a pixel's own blind window cannot predict. The brightness change of the surrounding pixels at the same frames (a square minus the 9 × 9 box, any size from 8 px to the whole frame, coefficient about 1, fitted on half the pixels and scored on the other half) explains 6–7% of it in 780125 and 17% in 803121. In 803121 that is about all of its excess over photon noise.
+- **What same-frame context could gain.** Take the 8-frame residual that a pixel's own blind window cannot predict. The brightness change of the surrounding pixels at the same frames (a square minus the 9 × 9 box, any size from 8 px to the whole frame, coefficient about 1, fitted on half the pixels and scored on the other half) explains 6–7% of it in 780125 and 13–17% in 803121. In 803121 that is about all of its excess over photon noise. In the dimmer sessions it is small: 1–2% in 885233 and under 0.5% in 878030 and GFP, where photon noise dominates each pixel's residual.
 
 **Model** (`box_radius`, see `model.py`). Hidden: |dt| ≤ 8, |dr| ≤ 4, |dc| ≤ 4, the 9 × 9 box of the original design (footprint radius 3.5 px, noise correlation ≤ 2 px). Visible: everything else, including the output frame beyond the box. Two parts are added to the slab model:
 
@@ -455,4 +474,6 @@ Checks:
 
 **Simulator.** `fast_global_sd` and `fast_field_sd` add fast multiplicative brightness changes to the drift factor: one field-wide process and 3 regional fields (15–60 px), with SDs drawn up to 6% and 4% and time constants of 1.5–20 frames. `evaluate --kinds fast` scores simulated windows with them.
 
-**Training.** The GPU has 22 GB, and v4 already peaked at 18.3 GB with batch 2, so `--accum` runs 2 micro-batches of 1 window per optimizer step.
+**Training.** The GPU has 22 GB, and v4 already peaked at 18.3 GB with batch 2, so `--accum` runs 2 micro-batches of 1 window per optimizer step. On the CPU, one step of 1 window takes 65 s with the box, against 45 s without.
+
+**Runs.** Pretraining starts from v4 pretrained, on simulations with the fast brightness changes (3000 steps, best.pt chosen on fast simulations). Fine-tuning then follows v5b (mix, half simulated with the fast changes, GFP excluded, 1700 steps).
