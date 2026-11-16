@@ -24,7 +24,14 @@ geometry, brightness, events and noise statistics:
   added to the baseline as spatially smooth fluctuations over 1-20 s. Bright
   pixels of real trials vary more than photon noise explains, at both time
   scales; a network trained without this read the extra spread as activity
-  and over-subtracted on real data (v3 run, worst in the brightest sessions).
+  and over-subtracted on real data (v3 run, worst in the brightest sessions);
+* **silent regions** (optional, ``silent_trial`` and ``silent_frac``): no
+  activity in random smooth patches of the field, or anywhere in the virtual
+  trial. Bright labeled pixels then vary (the excess) without any events, as
+  in a GFP control, so the template's footprint geometry no longer says which
+  pixels are active and only the events themselves do. Without them, a
+  network fine-tuned on sensor sessions (where every bright pixel in the loss
+  has activity) set the baseline of GFP dendrites too low (v4 run).
 
 Each draw is a new virtual trial; the window generator returns everything the
 training windows of real data have (movie, activity, mean image, variance map,
@@ -61,6 +68,12 @@ class SimConfig:
     n_slow: int = 6  # slow baseline processes that carry the excess's slow part
     slow_tau_s: tuple[float, float] = (1.0, 20.0)  # their time constants, log-uniform
     slow_px: tuple[float, float] = (2.0, 6.0)  # spatial scale of their fields
+    # activity-free regions: with probability silent_trial a virtual trial has no
+    # activity at all; otherwise a fraction (uniform in silent_frac) of its valid
+    # pixels, in smooth patches of silent_px, has none (the defaults keep all)
+    silent_trial: float = 0.0
+    silent_frac: tuple[float, float] = (0.0, 0.0)
+    silent_px: tuple[float, float] = (20.0, 60.0)
 
 
 def _spatial_tap(rho: float) -> float:
@@ -230,6 +243,15 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
         sf = np.stack([_field(tp.R, tp.C, rng.uniform(*cfg.slow_px), rng) for _ in range(ks)])
         sf /= np.sqrt((sf ** 2).sum(0)) + 1e-6
         r.update(slow_proc=sp, slow_fields=sf, slow_mean=sp.mean(1), slow_cov=np.atleast_2d(np.cov(sp)))
+    if cfg.silent_trial > 0 or cfg.silent_frac[1] > 0:  # drawn last, so the draws above stay as they were
+        if rng.random() < cfg.silent_trial:
+            r["act_mask"] = np.zeros((tp.R, tp.C), np.float32)
+        else:
+            frac = rng.uniform(*cfg.silent_frac)
+            fld = _field(tp.R, tp.C, rng.uniform(*cfg.silent_px), rng)
+            v = tp.tf.valid
+            thr = np.quantile(fld[v], frac) if v.any() and frac > 0 else -np.inf
+            r["act_mask"] = (fld > thr).astype(np.float32)
     return r
 
 
@@ -280,7 +302,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     for idx in pieces:
         a, b = src[idx[0]], src[idx[-1]] + 1
         act[idx] = tf._f["activity"][tf.channel, a:b, rs:re, cs:ce]
-    act *= r["amp"]
+    amask = r["act_mask"][rs:re, cs:ce] if "act_mask" in r else np.float32(1.0)  # 0 in silent regions
+    act *= r["amp"] * amask
     act[:, ~valid] = 0
     S = np.where(valid[None], truth + act, 0).astype(np.float32)
     # photon noise through the kernel; the signal itself is not blurred
@@ -300,7 +323,7 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     out["activity"][dt, dr, dc] = act
     # whole-trial inputs from the virtual trial's statistics plus sampling noise
     dmean, dvar = _drift_maps(r, rows, cols)
-    mact, vact = tp.mean_act[rs:re, cs:ce] * r["amp"], tp.var_act[rs:re, cs:ce] * r["amp"] ** 2
+    mact, vact = tp.mean_act[rs:re, cs:ce] * r["amp"] * amask, tp.var_act[rs:re, cs:ce] * (r["amp"] * amask) ** 2
     M = B * (1 + dmean) + mact
     svar = np.zeros_like(M)
     if "slow_fields" in r:

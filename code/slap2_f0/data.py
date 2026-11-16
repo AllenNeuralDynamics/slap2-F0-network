@@ -18,6 +18,19 @@ Simulated windows (``sim=SimConfig()``): each item is a new virtual trial
 built on a random template (see ``simulate``); the target is the noise-free
 baseline, and every valid pixel and frame has weight 1.
 
+Activity-subtracted real windows (``subtract_frac``): with this
+probability a real window's input is movie - activity too, with the
+whole-trial inputs of that residual (its mean and variance maps), so bright
+dendrites show their real noise and excess but no fitted events; the target
+is unchanged. In sensor sessions every bright pixel in the loss carries
+activity, and a network fine-tuned on them alone learned to set the baseline
+of bright dendrites low even without events (v4 run, GFP control).
+
+Mixed windows (``sim`` and ``sim_frac`` < 1): each item is simulated with
+probability ``sim_frac`` and real otherwise, so one batch can hold both
+(e.g. fine-tuning on real residuals with simulated activity-free regions
+as counterexamples to "bright labeled pixels always carry activity").
+
 Every item also carries ``noisy`` (movie - activity, for the noise head), the
 whole-trial variance map and the trial's gain (``stats``), and the support and
 labeled masks for evaluation. With ``flip`` the window is flipped at random
@@ -59,7 +72,8 @@ class WindowDataset(Dataset):
     """Each item is a random window from a random trial (real or simulated)."""
 
     def __init__(self, files, cfg: WindowConfig, stats: dict, length: int = 10000, seed: int = 0,
-                 sim: SimConfig | None = None, flip: bool = True):
+                 sim: SimConfig | None = None, flip: bool = True, sim_frac: float = 1.0,
+                 subtract_frac: float = 0.0):
         self.files = [str(f) for f in files]
         self.cfg = cfg
         self.stats = {str(k): v for k, v in stats.items()}
@@ -67,6 +81,8 @@ class WindowDataset(Dataset):
         self.seed = seed
         self.sim = sim
         self.flip = flip
+        self.sim_frac = sim_frac
+        self.subtract_frac = subtract_frac
         self._open: dict[str, TrialFile] = {}
         self._tpl: dict[str, Template] = {}
 
@@ -89,6 +105,8 @@ class WindowDataset(Dataset):
         nt, ns = c.out_frames + 2 * c.t_reach, c.out_px + 2 * c.s_reach
         sl = (slice(c.t_reach, c.t_reach + c.out_frames), slice(c.s_reach, c.s_reach + c.out_px),
               slice(c.s_reach, c.s_reach + c.out_px))
+        use_sim = self.sim is not None and (self.sim_frac >= 1 or rng.random() < self.sim_frac)
+        use_sub = not use_sim and self.subtract_frac > 0 and rng.random() < self.subtract_frac
         for _ in range(50):
             fn = self.files[rng.integers(len(self.files))]
             tr, st = self._trial(fn), self.stats[fn]
@@ -97,7 +115,7 @@ class WindowDataset(Dataset):
             k = rng.integers(len(vr))
             r0, c0 = int(vr[k]) - c.out_px // 2 - c.s_reach, int(vc[k]) - c.out_px // 2 - c.s_reach
             t0 -= c.t_reach
-            if self.sim is not None:
+            if use_sim:
                 tp = self._template(fn)
                 w = window(tp, draw(tp, self.sim, rng), t0, nt, r0, ns, c0, ns, rng)
                 movie, target, noisy = w["movie"], w["truth"], w["noisy"]
@@ -111,6 +129,12 @@ class WindowDataset(Dataset):
                 target = noisy = p.movie - p.activity
                 var_map = np.where(np.isfinite(mean_image), _crop(st["var_movie"], r0, ns, c0, ns), np.nan)
                 mean_act = np.where(np.isfinite(mean_image), _crop(st["mean_act"], r0, ns, c0, ns), np.nan)
+                if use_sub:  # the residual as input, with its own whole-trial maps; no events left to see
+                    movie = target
+                    inside = np.isfinite(mean_image)
+                    mean_image = np.where(inside, _crop(st["mean_res"], r0, ns, c0, ns), np.nan)
+                    var_map = np.where(inside, _crop(st["var_res"], r0, ns, c0, ns), np.nan)
+                    mean_act = np.where(inside, 0.0, np.nan).astype(np.float32)
                 weight = np.isfinite(target).astype(np.float32)
                 w_unf = c.w_unfitted if tr.attrs.get("nSources", 1) else 1.0  # no sources: no activity
                 weight *= np.where(labeled & ~support, w_unf, 1.0).astype(np.float32)[None]

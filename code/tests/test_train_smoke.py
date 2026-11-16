@@ -116,3 +116,60 @@ def test_evaluate_sourceless_session(tmp_path):
     assert not np.isfinite(float(rows[("sessA", "real")].get("lab_mse8_net") or "nan"))  # w_unfitted 0
     ex = {r["session"]: r for r in csv.DictReader(open(ev / "excess.csv"))}
     assert np.isfinite(float(ex["gfp"]["lab_r1"])) and np.isfinite(float(ex["gfp"]["all_r1"]))
+
+
+def test_mixed_finetuning_with_activity_free_sims(tmp_path):
+    """Mixed real and simulated windows (partly activity-free), a session kept
+    out of training, validation on activity-free simulations, and their score
+    in evaluate (kind free)."""
+    for k, label in enumerate(["sessA", "sessB", "sessC", "sessD", "gfp"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k, sources=label != "gfp")
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "mix", "--sim_frac", "0.5",
+          "--silent_trial", "0.3", "--silent_frac", "0,0.8", "--exclude", "gfp", "--val_free",
+          "--select", "balanced_free", "--steps", "2", "--batch", "2", "--width", "4", "--temporal_dilations", "1,2",
+          "--spatial_dilations", "1,1", "--gap", "2", "--window_reach", "6", "--out_frames", "16", "--out_px", "8",
+          "--workers", "0", "--val_windows", "2", "--val_every", "2"])
+    cfg = json.loads((out / "config.json").read_text())
+    assert not any("gfp" in f for f in cfg["train_files"] + cfg["val_files"])
+    assert cfg["sim"]["silent_trial"] == 0.3 and cfg["sim"]["silent_frac"] == [0.0, 0.8]
+    rows = list(csv.DictReader(open(out / "metrics.csv")))
+    for k in ("free_lab_mse8_net", "free_lab_bias_net", "real_balanced_free"):
+        assert all(np.isfinite(float(r[k])) for r in rows), k
+    assert abs(float(rows[0]["real_balanced_free"]) - 1.0) < 1e-5  # the untrained network scores 1
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", str(out / "best.pt"), "--out", str(ev), "--kinds",
+          "real,free", "--windows", "2", "--workers", "0", "--stats_from", str(out / "stats")])
+    ev_rows = {(r["session"], r["kind"]): r for r in csv.DictReader(open(ev / "eval.csv"))}
+    assert ("gfp", "real") in ev_rows and ("sessA", "free") in ev_rows
+    assert np.isfinite(float(ev_rows[("sessA", "free")]["lab_bias_net"]))
+
+
+def test_activity_subtracted_windows(tmp_path):
+    """With subtract_frac 1, a real window's input is movie - activity (the
+    target itself) and its whole-trial maps are the residual's."""
+    import torch
+
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    _trial(fn, "sessA", 0)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    st = stats[str(fn)]
+    cfg = WindowConfig(out_frames=60, out_px=12, t_reach=50, s_reach=6, w_unfitted=1.0)
+    sub = WindowDataset([fn], cfg, stats, length=4, seed=1, flip=False, subtract_frac=1.0)
+    for i in range(4):
+        b = sub[i]
+        s_ = float(b["scale"])
+        ok = torch.isfinite(b["movie"])
+        assert torch.allclose(b["movie"][ok] / s_, b["noisy"][ok], atol=1e-5)
+        assert torch.equal(b["target"], b["noisy"])
+        fin = torch.isfinite(b["mean_image"])
+        assert float(b["mean_act"][fin].abs().max()) == 0
+        mi = b["mean_image"][fin].numpy()  # values of the residual's mean map
+        assert np.isin(np.round(mi, 4), np.round(st["mean_res"].astype(np.float32), 4)).all()

@@ -1,11 +1,16 @@
 """Training loop for the blind-spot baseline network.
 
-Two kinds of data (``--data``):
+Three kinds of data (``--data``):
     sim   simulated windows built on real trials as templates, with the true,
           noise-free baseline as the target (``simulate``): pretraining
     real  real windows, with movie - activity as the (noisy) target:
           fine-tuning, usually from a simulation-pretrained checkpoint
           (``--init``)
+    mix   each window simulated with probability ``--sim_frac``, else real
+``--silent_trial`` and ``--silent_frac`` make simulated windows partly or
+wholly activity-free (``SimConfig``); ``--subtract_frac`` feeds real windows
+with movie - activity as the input (``data``); ``--exclude`` keeps sessions (e.g. a
+GFP control kept for testing) out of training and validation.
 
 Loss (``_losses``): squared error of the baseline weighted by 1 / photon-
 noise variance, which is minimized by the mean (unbiased at any brightness),
@@ -15,8 +20,10 @@ baseline.
 Files are split into training and validation by session when there are at
 least three sessions (so validation measures generalization to unseen
 sessions), otherwise by trial. Every validation evaluates fixed windows from
-the held-out files, both real (``real_*``) and simulated (``sim_*``), and
-from the training files (``tr_*``); see ``evaluate`` for the metrics.
+the held-out files, both real (``real_*``) and simulated (``sim_*``, and
+with ``--val_free`` ``free_*``: simulated without any activity, where every
+bias is spurious), and from the training files (``tr_*``); see ``evaluate``
+for the metrics.
 
 best.pt is chosen on held-out windows of the training data kind (``--select``,
 default ``balanced``): the network's 8-frame MSE relative to the mean image's,
@@ -254,6 +261,11 @@ def selection_score(row: dict, prefix: str, how: str) -> float:
         r = [x for x in (ratio("sup_"), ratio("bg_")) if math.isfinite(x)]
         if r:
             return float(np.mean(r))
+    if how == "balanced_free":  # real support and background, and labeled pixels without activity
+        a, b = row.get("free_lab_mse8_net", math.nan), row.get("free_lab_mse8_mean_image", math.nan)
+        r = [x for x in (ratio("sup_"), ratio("bg_"), a / b if b > 0 else math.nan) if math.isfinite(x)]
+        if r:
+            return float(np.mean(r))
     r = ratio("")
     return r if math.isfinite(r) else math.inf
 
@@ -270,9 +282,35 @@ def _model_config(args) -> ModelConfig:
     return mcfg
 
 
+def stats_cache(args, out: Path) -> Path:
+    """The stats cache folder (--stats_cache, default <out>/stats), first
+    seeded with the cached stats in --stats_from (e.g. an earlier run's stats/
+    on a read-only mount)."""
+    cache = Path(args.stats_cache) if args.stats_cache else out / "stats"
+    if args.stats_from:
+        cache.mkdir(parents=True, exist_ok=True)
+        for p in Path(args.stats_from).glob("*.npz"):
+            if not (cache / p.name).exists():
+                shutil.copy2(p, cache / p.name)
+    return cache
+
+
+def sim_config(args, free: bool = False) -> SimConfig:
+    """Simulation settings from the arguments; free: no activity anywhere."""
+    if free:
+        return SimConfig(silent_trial=1.0)
+    lo, hi = (float(v) for v in args.silent_frac.split(","))
+    return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi))
+
+
 def train(args) -> None:
     torch.manual_seed(args.seed)
     files = list_trials(args.root)
+    if args.exclude:
+        skip = set(args.exclude.split(","))
+        groups = session_groups(files)
+        print("excluded from training: " + ", ".join(f"{s} ({len(groups[s])} trials)" for s in sorted(skip & set(groups))))
+        files = [f for s, fl in groups.items() if s not in skip for f in fl]
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
     train_files, val_files, how = split_files(files, args.val_fraction, args.seed)
@@ -289,7 +327,7 @@ def train(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    stats = load_stats(files, args.stats_cache or out / "stats", workers=args.workers)
+    stats = load_stats(files, stats_cache(args, out), workers=args.workers)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; gain "
           + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)
 
@@ -305,24 +343,28 @@ def train(args) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps)))))
 
-    sim = SimConfig() if args.data == "sim" else None
+    sim = sim_config(args) if args.data in ("sim", "mix") else None
+    frac = args.sim_frac if args.data == "mix" else 1.0
     kw = dict(num_workers=args.workers, persistent_workers=args.workers > 0, pin_memory=device.type == "cuda")
-    mk = lambda fl, n, seed, s: DataLoader(WindowDataset(fl, wcfg, stats, length=n, seed=seed, sim=s,  # noqa: E731
-                                                         flip=seed == args.seed and not args.no_flip),
-                                           batch_size=args.batch, **kw)
-    dl = mk(train_files, args.steps * args.batch, args.seed, sim)
+    mk = lambda fl, n, seed, s, fr=1.0: DataLoader(  # noqa: E731
+        WindowDataset(fl, wcfg, stats, length=n, seed=seed, sim=s, flip=seed == args.seed and not args.no_flip,
+                      sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
+        batch_size=args.batch, **kw)
+    dl = mk(train_files, args.steps * args.batch, args.seed, sim, frac)
     evals = {}
     if val_files:
         evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
         evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, SimConfig())
-    evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim)  # did it learn anything at all?
+        if args.val_free:
+            evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
+    evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
     region = loss_region(wcfg)
-    sel_prefix = args.data if val_files else "tr"
+    sel_prefix = ("real" if args.data == "mix" else args.data) if val_files else "tr"
     sel_key = f"{sel_prefix}_{args.select}"
 
     (out / "config.json").write_text(json.dumps({
         "model": asdict(mcfg), "window": asdict(wcfg), "args": vars(args), "n_params": n_params,
-        "device": str(device), "amp": str(amp_dtype), "split": how, "sim": asdict(SimConfig()),
+        "device": str(device), "amp": str(amp_dtype), "split": how, "sim": asdict(sim or SimConfig()),
         "train_files": [str(f) for f in train_files], "val_files": [str(f) for f in val_files],
     }, indent=2, default=str))
     print(f"{len(files)} trial files; split {how}: {len(train_files)} train, {len(val_files)} validation; "
@@ -404,12 +446,7 @@ def evaluate_checkpoints(args) -> None:
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    cache = Path(args.stats_cache) if args.stats_cache else out / "stats"
-    if args.stats_from:  # e.g. a training run's stats/ on a read-only mount
-        cache.mkdir(parents=True, exist_ok=True)
-        for p in Path(args.stats_from).glob("*.npz"):
-            if not (cache / p.name).exists():
-                shutil.copy2(p, cache / p.name)
+    cache = stats_cache(args, out)
     t0 = time.time()
     stats = load_stats(files, cache, workers=args.workers)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; sessions: "
@@ -426,9 +463,9 @@ def evaluate_checkpoints(args) -> None:
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
         for sess in sorted(groups):
             for kind in args.kinds.split(","):
-                sim = SimConfig() if kind == "sim" else None
-                ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows,
-                                   seed=(20_000 if sim else 10_000) + args.seed, sim=sim, flip=False)
+                sim = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0)}.get(kind)
+                seed = {"real": 10_000, "sim": 20_000, "free": 40_000}[kind] + args.seed
+                ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows, seed=seed, sim=sim, flip=False)
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                     pin_memory=device.type == "cuda")
                 t1 = time.time()
@@ -487,7 +524,7 @@ def add_eval_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
     p.add_argument("--ckpt", nargs="+", required=True, help="checkpoints to score, each path or name=path")
     p.add_argument("--out", default="results/eval")
-    p.add_argument("--kinds", default="real,sim", help="comma-separated: real, sim")
+    p.add_argument("--kinds", default="real,sim", help="comma-separated: real, sim, free (simulated without activity)")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
@@ -591,17 +628,29 @@ def add_arguments(p) -> None:
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--data", choices=["sim", "real"], default="sim",
-                   help="train on simulated windows (true baseline) or real residuals")
+    p.add_argument("--data", choices=["sim", "real", "mix"], default="sim",
+                   help="train on simulated windows (true baseline), real residuals or a mix (--sim_frac)")
+    p.add_argument("--sim_frac", type=float, default=0.5, help="with --data mix: fraction of simulated windows")
+    p.add_argument("--silent_trial", type=float, default=0.0,
+                   help="probability that a simulated trial has no activity at all")
+    p.add_argument("--silent_frac", default="0,0",
+                   help="lo,hi: otherwise this fraction (uniform) of a simulated trial has no activity")
+    p.add_argument("--subtract_frac", type=float, default=0.0,
+                   help="fraction of real training windows whose input is movie - activity (no fitted events)")
+    p.add_argument("--exclude", default="", help="comma-separated sessions to leave out of training and validation")
+    p.add_argument("--val_free", action="store_true",
+                   help="also validate on held-out windows simulated without activity (free_*)")
     p.add_argument("--init", default="", help="start from this checkpoint (e.g. a simulation-pretrained best.pt)")
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
+    p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. an earlier run's)")
     p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
     p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
     p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")
     p.add_argument("--max_log_correction", type=float, default=0.7, help="soft cap of |log| of the baseline correction")
-    p.add_argument("--select", choices=["balanced", "mse8", "loss"], default="balanced",
+    p.add_argument("--select", choices=["balanced", "balanced_free", "mse8", "loss"], default="balanced",
                    help="best.pt criterion on held-out windows: 8-frame MSE vs the mean image, averaged over "
-                        "support and background (balanced) or over all pixels (mse8), or the mean loss")
+                        "support and background (balanced; balanced_free adds labeled pixels of the activity-free "
+                        "simulation, needs --val_free) or over all pixels (mse8), or the mean loss")
     p.add_argument("--no_flip", action="store_true", help="no random flips of training windows")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)

@@ -117,3 +117,28 @@ def test_excess_matches_template(tmp_path):
     r0 = dict(draw(tp, SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0), rng))
     v0 = np.var(window(tp, r0, 0, T, 0, R, 0, C, rng)["noisy"], 0)
     assert np.median(v0[:, 13:-1]) < 0.85 * np.median(st["var_res"][:, 13:-1])
+
+
+def test_silent_regions(tmp_path):
+    """Silent regions have no activity, in the movie and in the whole-trial
+    inputs; the default settings draw exactly what they drew before."""
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    a, b = draw(tp, SimConfig(), np.random.default_rng(5)), draw(tp, SimConfig(silent_px=(5, 9)), np.random.default_rng(5))
+    assert "act_mask" not in a and "act_mask" not in b and a["shift"] == b["shift"] and a["amp"] == b["amp"]
+    rng = np.random.default_rng(2)
+    r = draw(tp, SimConfig(silent_trial=1.0), rng)
+    w = window(tp, r, 0, tp.T, 0, tp.R, 0, tp.C, rng)
+    assert not w["activity"].any() and np.nanmax(w["mean_act"]) == 0
+    assert np.allclose(w["noisy"], w["movie"], equal_nan=True)
+    fr = []
+    for _ in range(20):
+        r = draw(tp, SimConfig(silent_frac=(0.5, 0.5), silent_px=(5, 9)), rng)
+        m = r["act_mask"]
+        fr.append(1 - m.mean())
+        w = window(tp, r, 0, tp.T, 0, tp.R, 0, tp.C, rng)
+        assert not w["activity"][:, m == 0].any() and np.nanmax(w["mean_act"][m == 0], initial=0) == 0
+        assert np.allclose(w["mean_act"][m == 1], tp.mean_act[m == 1] * r["amp"], atol=1e-5)
+    assert abs(np.mean(fr) - 0.5) < 0.02  # the fraction of valid pixels silenced
