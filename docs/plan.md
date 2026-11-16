@@ -380,3 +380,79 @@ v3 bounds the heads (mix in ±1, baseline correction 0.5–2×, noise correction
   - **Fine-tuning on the sensor sessions brings the bias back** (+0.19 for v4). On those sessions bright footprint pixels always carry activity, so the network learns to subtract a typical amount even where none is visible. That prior helps the average sensor-session score but biases quiet synapses.
   - **Remedies:** fine-tune with activity-free data in the mix (GFP sessions, where every pixel is an exact target), or with sims whose activity is randomly silenced per region. Keep a second GFP session held out to test it.
   - **On real GFP dendrites SiLo beats the mean image by 2.4% at 8 frames**, while v4 pretrained ties. Real dendrites carry slow fluctuations that a running median follows (motion and brightness modes, above), and the network does not yet track them on real data.
+
+## v5: activity-free data in fine-tuning (2026-11-16)
+
+**Where v4's GFP bias comes from.** Real fine-tuning windows weigh labeled pixels outside every footprint 0 (their residual holds activity GIAnT did not fit), so every bright pixel in the loss carries activity. The v4 evaluation on simulated windows of the sensor sessions shows the trade-off this sets up:
+
+| v4 checkpoint | support bias, simulated | labeled outside footprints (no activity), simulated | GFP dendrites, real |
+|---|---|---|---|
+| pretrained | −0.11 to −0.17 (baseline too high) | +0.06 to +0.19 | +0.05 |
+| fine-tuned | −0.05 to +0.00 | +0.19 to +0.37 (one session −0.17) | +0.19 |
+
+Fine-tuning fixes the support pixels and moves every bright pixel's baseline down, including the ones without events.
+
+**No second GFP session.** DocDB has one GFP session among its 310 SLAP2 records (847983, 2026-02-24). On the scratch share, 531 session folders from 2025 onward have metadata files, and only the same session mentions GFP; the `EGFP` folders there are from 2024. So GFP stays out of training, and is the test.
+
+**Three fine-tuning variants**, each from the v4 pretrained checkpoint with v4's fine-tuning settings (1700 steps, lr 1e-4), GFP excluded (`--exclude`):
+
+- **v5a, mix with silent regions:** half the windows simulated. 20% of virtual trials have no activity, and the rest lose it in 0–80% of the field, in smooth patches of 20–60 px (`--silent_trial 0.2 --silent_frac 0,0.8`). The footprint geometry then no longer says which pixels are active; only the events do.
+- **v5b, mix without silent regions:** the control for v5a. Does simply keeping simulated windows in the mix (where unfitted labeled pixels weigh 1) undo the prior?
+- **v5c, activity-subtracted real windows:** half the real windows get movie − activity as input, with the residual's mean and variance maps (`--subtract_frac 0.5`). This is real noise and excess on bright dendrites with no fitted events, and needs no simulator.
+
+Validation adds held-out activity-free simulations (`--val_free`, `free_*`). best.pt is chosen on real support, real background and activity-free labeled pixels (`--select balanced_free`). The evaluation scores real, simulated and activity-free simulated windows of all five sessions (`--kinds real,sim,free`).
+
+**Spatial context.** v1–v5 use the same model. Each output sees ±23 px (a 47 × 47 square, an upper bound; the effective field is concentrated near the centre) in frames more than 8 frames away. It sees ±254 frames beyond that gap in time, plus each pixel's own blind window mean and variance. Nothing from the 17 hidden frames reaches it, at any distance.
+
+**Excitation-line profile check.** A change in the excitation line's intensity profile scales every pixel at the same position along the line by the same factor. It should therefore show up as residual correlation that stays flat along the scan direction and decays across it. Test: the spatial correlation of the standardized residual (movie − activity) after removing each frame's global mean, on labeled pixels (brightest 75%) of one local trial per session, along image rows and along image columns:
+
+| session | 8-frame means, along rows: 16 / 32 / 64 px | along columns | 64-frame means, along rows | along columns |
+|---|---|---|---|---|
+| 780125 | 0.025 / 0.015 / −0.003 | 0.031 / 0.018 / 0.012 | 0.065 / 0.039 / 0.005 | 0.081 / 0.047 / 0.025 |
+| 803121 | 0.065 / 0.058 / 0.002 | 0.046 / −0.004 / 0.034 | 0.095 / 0.070 / −0.110 | 0.080 / −0.020 / 0.124 |
+| GFP 847983 | 0.000 / −0.001 / −0.009 | 0.001 / −0.008 / 0.005 | −0.004 / 0.002 / −0.021 | 0.005 / −0.016 / 0.019 |
+| 878030 | 0.003 / −0.004 / 0.002 | −0.006 / 0.004 / −0.089 | −0.005 / −0.012 / −0.011 | 0.012 / 0.065 / −0.250 |
+| 885233 | 0.024 / 0.002 / 0.009 | −0.010 / 0.057 / 0.000 | 0.056 / 0.035 / 0.004 | −0.058 / 0.091 / 0.000 |
+
+- **No axis keeps its correlation.** Along both axes it falls to about 0 by 64 px; in GFP it is about 0 beyond 2 px.
+- **Size limit.** A line-profile mode is at most about 1–2% of the residual variance of single frames, and of 64-frame means, along rows (where there are many pixel pairs).
+- **The column values at 64 px are noisy.** The trials are only 223–573 rows tall, so few labeled pairs are 64 rows apart.
+- **What remains is isotropic.** It is the shared slow component of the sensor sessions, about 0.05–0.1 at 16–32 px for 64-frame means, and it is smaller in GFP.
+- **Noise anisotropy at 1 px.** Neighbouring pixels in the same row correlate more than neighbours in the same column (0.40–0.45 vs 0.24–0.31, background included). That is noise structure, which the simulator already models with separate row and column taps.
+- **So the context stays isotropic.** If a line-profile mode appears in other sessions, it would argue for a long, thin context along the scan direction. With the slab blind spot, only its slow part (beyond 8 frames) could be predicted at all. Using same-frame pixels far along the line needs the box blind spot (v2 design above).
+
+## v6: box blind spot (2026-11-16)
+
+**Why.** Real frames carry fast brightness changes shared across the field, and a slab blind spot cannot see them: it hides every pixel of the 17 frames around the output. Measured on one local trial per session, X = movie − activity:
+
+- **Shared fractional brightness** g(t) = Σ(X − M) / ΣM over bright pixels (M the trial mean). Its SD is noise-free: the covariance of left- and right-half pools cancels photon noise.
+- **"Unseen by the slab"** = the 8-frame mean minus the blind window mean (8 < |dt| ≤ 254), which is what a pixel's own trace beyond the gap can predict.
+
+| session | field-wide, per frame | field-wide, unseen by the slab | regional (48-px block minus field), per frame | regional, unseen | field-wide autocorrelation at 8 frames |
+|---|---|---|---|---|---|
+| 780125 | 4.7% | 2.7% | 3.8% | 2.2% | 0.73 |
+| 803121 | 3.6% | 3.1% | 3.2% | 2.5% | 0.16 |
+| GFP 847983 | 2.0% | 1.4% | 2.4% | 1.8% | 0.23 |
+| 878030 | 4.1% | 3.7% | 2.7% | 2.8% | 0.54 |
+| 885233 | 3.5% | 3.2% | 3.7% | 2.8% | 0.45 |
+
+- **It is not activity.** The GFP control has it too.
+- **Most of it is faster than the slab's reach.** In 803121 and GFP, autocorrelation is about 0.2 by 8 frames.
+- **It matters for ΔF/F.** A 2–4% change shared by every synapse in a frame is a coherent ΔF/F error. A pixel's own photon noise is larger, but independent.
+- **What same-frame context could gain.** Take the 8-frame residual that a pixel's own blind window cannot predict. The brightness change of the surrounding pixels at the same frames (a square minus the 9 × 9 box, any size from 8 px to the whole frame, coefficient about 1, fitted on half the pixels and scored on the other half) explains 6–7% of it in 780125 and 17% in 803121. In 803121 that is about all of its excess over photon noise.
+
+**Model** (`box_radius`, see `model.py`). Hidden: |dt| ≤ 8, |dr| ≤ 4, |dc| ≤ 4, the 9 × 9 box of the original design (footprint radius 3.5 px, noise correlation ≤ 2 px). Visible: everything else, including the output frame beyond the box. Two parts are added to the slab model:
+
+- **Half-plane branches** (Laine et al. 2019). Convolutions see rows ≤ r only: kernel 2 × 3 with top padding, and an aligned half-resolution path. The output is shifted down 5 rows. Four 90° rotations of the input share one trunk (24 channels, 5 blocks, spatial reach 22 px toward the half-plane), and the fusion layer gets each direction separately. In time they are symmetric with ±31 frames of reach, and run only on the output frames plus that reach. Slow changes stay the slab branches' job.
+- **Pooled same-frame features.** For squares of half-width 8, 16, 32 and the whole window, minus the box: Σ valid·(movie − mean image) / Σ valid·mean image, in the output frame and over the 8 frames around it. They are computed with integral images, are exact, and cost little.
+
+Checks:
+
+- **Blindness:** a gradient test at every position of a small window confirms nothing inside the box reaches the output, and that the nearest pixels outside it, in the output frame, do.
+- **Region crop:** cropping to the loss region gives the same outputs as the full window.
+- **Warm start:** `load_compatible` loads a slab checkpoint with zero weights on the new fusion inputs, so the box model starts out computing exactly what the slab model did.
+- **Window size:** the window stays 94 × 94 px (reach 23).
+
+**Simulator.** `fast_global_sd` and `fast_field_sd` add fast multiplicative brightness changes to the drift factor: one field-wide process and 3 regional fields (15–60 px), with SDs drawn up to 6% and 4% and time constants of 1.5–20 frames. `evaluate --kinds fast` scores simulated windows with them.
+
+**Training.** The GPU has 22 GB, and v4 already peaked at 18.3 GB with batch 2, so `--accum` runs 2 micro-batches of 1 window per optimizer step.

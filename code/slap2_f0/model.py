@@ -12,9 +12,26 @@ not trained in, so one forward pass predicts every pixel and frame:
 * the branches meet in 1x1x1 layers only.
 
 With ``spatial_kernel=1`` the network sees only each pixel's own trace (v0 in
-docs/plan.md). The full box blind spot (v2: pixels further than a radius
-visible at the same time) adds four spatial half-plane branches and is not
-implemented yet.
+docs/plan.md).
+
+**Box blind spot** (``box_radius`` >= 0, v6): the hidden set shrinks from the
+slab to the box |dt| <= gap, |dr| <= box_radius, |dc| <= box_radius. Pixels
+further away in row or column are visible at every frame, the output frame
+included, so fast changes shared across the field (brightness, residual
+motion, defocus) can be followed. Two additions see them:
+
+* four **half-plane branches** (Laine et al. 2019): convolutions whose
+  receptive field stays in rows <= r (kernel 2 x 3 with top padding, and an
+  aligned half-resolution path), shifted down by box_radius + 1 rows; the
+  four 90-degree rotations of the input share one trunk and together see
+  everything outside the box. In time they are symmetric and short (fast
+  changes; the slow ones are the slab branches' job), and they run only on
+  the output frames plus their temporal reach;
+* **pooled same-frame features**: for squares of half-width ``pool_scales``
+  around each pixel minus the box, the fractional deviation of the movie from
+  the mean image, sum(valid * (movie - mean image)) / sum(valid * mean image),
+  in the output frame and averaged over the 8 frames around it (integral
+  images, exact and cheap; 0 = the whole window).
 
 Inputs to the branches (``make_inputs``): the movie, its validity flag and
 three whole-trial maps (mean image, SiLo's variance factor, and the trial's
@@ -67,6 +84,13 @@ class ModelConfig:
     window_reach: int = 254  # frames beyond the gap for the blind window statistics
     max_log_correction: float = 0.7  # soft cap of |log| of the baseline correction (factor 0.5-2)
     max_log_var: float = 3.0  # soft cap of |log| of the noise correction
+    # box blind spot (see the module docstring); -1 keeps the slab (v1-v5)
+    box_radius: int = -1
+    hp_width: int = 24
+    hp_temporal_dilations: list[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])
+    hp_spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 1, 2, 4])
+    hp_full_res_blocks: int = 2  # the rest at half resolution
+    pool_scales: list[int] = field(default_factory=lambda: [8, 16, 32, 0])
     # memory: the first full_res_blocks blocks of each branch run at full
     # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
     # so the blind spot in time is unaffected); checkpointing recomputes blocks
@@ -86,16 +110,42 @@ class ModelConfig:
         return 2 * sum(self.temporal_dilations)
 
     @property
+    def box(self) -> bool:
+        return self.box_radius >= 0
+
+    @property
+    def hp_temporal_reach(self) -> int:
+        """Frames of context on each side of the half-plane branches."""
+        return sum(self.hp_temporal_dilations)
+
+    @property
+    def hp_reach(self) -> int:
+        """Pixels from an output to the furthest input of a half-plane branch
+        (towards its half-plane; the other axis reaches less)."""
+        d = self.hp_spatial_dilations
+        nf = min(self.hp_full_res_blocks, len(d))
+        low = d[nf:]
+        return self.box_radius + 1 + sum(d[:nf]) + 2 * sum(low) + (1 if low else 0)
+
+    @property
     def spatial_reach(self) -> int:
-        """Pixels of context on each side (an upper bound)."""
+        """Pixels of context on each side (an upper bound) that a window must
+        carry around its output region; the pooled features use whatever the
+        window holds."""
         if self.spatial_kernel == 1:
-            return 0
-        k = self.spatial_kernel // 2
-        s = self.spatial_dilations
-        reach = 0
-        for i in range(len(self.temporal_dilations)):
-            reach += k * s[min(i, len(s) - 1)] * (1 if i < self.full_res_blocks else self.spatial_factor)
-        return reach + (self.spatial_factor - 1)
+            reach = 0
+        else:
+            k = self.spatial_kernel // 2
+            s = self.spatial_dilations
+            reach = 0
+            for i in range(len(self.temporal_dilations)):
+                reach += k * s[min(i, len(s) - 1)] * (1 if i < self.full_res_blocks else self.spatial_factor)
+            reach += self.spatial_factor - 1
+        return max(reach, self.hp_reach) if self.box else reach
+
+    @property
+    def n_pool(self) -> int:
+        return 2 * len(self.pool_scales) if self.box else 0
 
 
 class CausalBlock(nn.Module):
@@ -168,6 +218,104 @@ class CausalBranch(nn.Module):
         return h
 
 
+class HalfPlaneBlock(nn.Module):
+    """Spatial conv that sees rows r - dil and r only (kernel 2 x 3, top
+    padding; columns symmetric), then a symmetric dilated temporal conv,
+    residual with a ReZero scale."""
+
+    def __init__(self, width: int, t_dil: int, s_dil: int):
+        super().__init__()
+        self.t_dil, self.s_dil = t_dil, s_dil
+        self.spatial = nn.Conv3d(width, width, (1, 2, 3), dilation=(1, s_dil, s_dil))
+        self.temporal = nn.Conv3d(width, width, (3, 1, 1), dilation=(t_dil, 1, 1))
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T, H, W)
+        d = self.s_dil
+        h = F.gelu(self.spatial(F.pad(x, (d, d, d, 0))))  # cols d | d, rows d on top only
+        h = F.pad(h, (0, 0, 0, 0, self.t_dil, self.t_dil))
+        return x + self.alpha * F.gelu(self.temporal(h))
+
+
+class HalfPlaneBranch(nn.Module):
+    """Output at row r depends on inputs at rows <= r - (box_radius + 1) only,
+    any column, frames within the temporal reach.
+
+    Half resolution keeps the half-plane exact: a strided 2 x 2 conv makes low
+    row i from rows 2i and 2i + 1; after the low blocks (which see low rows
+    <= i), nearest upsampling and a one-row shift give full row r the low row
+    (r - 1) // 2, which saw rows <= r only. The input height must be even."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        w = cfg.hp_width
+        self.inp = nn.Conv3d(cfg.n_inputs, w, 1)
+        blocks = [HalfPlaneBlock(w, td, sd) for td, sd in zip(cfg.hp_temporal_dilations, cfg.hp_spatial_dilations)]
+        nf = min(cfg.hp_full_res_blocks, len(blocks))
+        self.full = nn.ModuleList(blocks[:nf])
+        self.low = nn.ModuleList(blocks[nf:])
+        self.down = nn.Conv3d(w, w, (1, 2, 2), stride=(1, 2, 2)) if len(self.low) else None
+        self.shift = cfg.box_radius + 1
+
+    def _run(self, block: nn.Module, h: torch.Tensor) -> torch.Tensor:
+        if self.cfg.checkpoint and self.training and h.requires_grad:
+            return torch.utils.checkpoint.checkpoint(block, h, use_reentrant=False)
+        return block(h)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        H, W = x.shape[3:]
+        h = self.inp(x)
+        for b in self.full:
+            h = self._run(b, h)
+        if self.down is not None:
+            low = self.down(h)
+            for b in self.low:
+                low = self._run(b, low)
+            up = F.interpolate(low, size=h.shape[2:], mode="nearest")
+            h = h + F.pad(up, (0, 0, 1, 0))[..., :H, :]  # row r <- low row (r - 1) // 2
+        return F.pad(h, (0, 0, self.shift, 0))[..., :H, :]  # out[r] = h[r - shift]
+
+
+def _box_sums(a: torch.Tensor, half: int) -> torch.Tensor:
+    """Sums of a (N, H, W) over squares of half-width `half` around every
+    pixel (clipped at the edges), from an integral image."""
+    N, H, W = a.shape
+    I = F.pad(a.cumsum(1).cumsum(2), (1, 0, 1, 0))
+    r = torch.arange(H, device=a.device)
+    c = torch.arange(W, device=a.device)
+    r0, r1 = (r - half).clamp(0, H), (r + half + 1).clamp(0, H)
+    c0, c1 = (c - half).clamp(0, W), (c + half + 1).clamp(0, W)
+    return I[:, r1][:, :, c1] - I[:, r0][:, :, c1] - I[:, r1][:, :, c0] + I[:, r0][:, :, c0]
+
+
+def pooled_features(x: torch.Tensor, t0: int, t1: int, radius: int, scales: list[int]) -> torch.Tensor:
+    """Same-frame fractional deviation of the movie from the mean image over
+    squares around each pixel minus its box (|dr|, |dc| <= radius), for frames
+    t0..t1-1: (B, 2 * len(scales), t1 - t0, H, W), the single frame and the
+    mean of frames t-3..t+4, each clamped to +-1. x as from ``make_inputs``."""
+    B, _, T, H, W = x.shape
+    a, b = max(0, t0 - 3), min(T, t1 + 4)
+    m, v, mi = x[:, 0, a:b].float(), x[:, 1, a:b].float(), x[:, 2, a:b].float()
+    num = (v * (m - mi)).reshape(-1, H, W)
+    den = (v * mi.clamp_min(0)).reshape(-1, H, W)
+    bn, bd = _box_sums(num, radius), _box_sums(den, radius)
+    out = []
+    for s in scales:
+        half = s if s > 0 else max(H, W)
+        sn = (_box_sums(num, half) - bn).view(B, b - a, H, W)
+        sd = (_box_sums(den, half) - bd).view(B, b - a, H, W)
+        r1 = torch.where(sd > 1e-6, sn / sd.clamp_min(1e-6), torch.zeros_like(sn))
+        cn = F.pad(sn.cumsum(1), (0, 0, 0, 0, 1, 0))
+        cd = F.pad(sd.cumsum(1), (0, 0, 0, 0, 1, 0))
+        t = torch.arange(t0, t1, device=x.device)
+        lo, hi = (t - 3).clamp(a, b) - a, (t + 5).clamp(a, b) - a
+        n8, d8 = cn[:, hi] - cn[:, lo], cd[:, hi] - cd[:, lo]
+        r8 = torch.where(d8 > 1e-6, n8 / d8.clamp_min(1e-6), torch.zeros_like(n8))
+        out += [r1[:, t0 - a: t1 - a].clamp(-1, 1), r8.clamp(-1, 1)]
+    return torch.stack(out, 1)
+
+
 def soft_cap(x: torch.Tensor, cap: float) -> torch.Tensor:
     """cap * tanh(x / cap): the identity near 0, smoothly bounded by +-cap."""
     return cap * torch.tanh(x / cap)
@@ -200,7 +348,9 @@ class SlabBlindSpotNet(nn.Module):
         w = self.cfg.width
         self.past = CausalBranch(self.cfg)
         self.future = CausalBranch(self.cfg)
-        self.fuse = nn.Sequential(nn.Conv3d(2 * w + N_FEATS, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
+        self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box else None
+        n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool if self.cfg.box else 0)
+        self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
         self.head_mix = nn.Conv3d(w, 1, 1)
         self.head_var = nn.Conv3d(w, 1, 1)
@@ -220,6 +370,19 @@ class SlabBlindSpotNet(nn.Module):
         f3 = n / (2 * self.cfg.window_reach)
         return torch.stack([f1.clamp(-3, 3), f2.clamp(-3, 5), f3, torch.log(mi), x[:, 4], x[:, 3]], 1)
 
+    def _half_planes(self, x: torch.Tensor) -> torch.Tensor:
+        """The four half-plane views: (B, 4 * hp_width, T, H, W). The input is
+        padded to even size, so the half-resolution grids of all rotations
+        line up (row pairs 2i, 2i + 1 in the window's own coordinates)."""
+        H, W = x.shape[3:]
+        xp = F.pad(x, (0, W % 2, 0, H % 2))
+        if xp.shape[3] == xp.shape[4]:  # square: one batched pass over the rotations
+            h = self.hp(torch.cat([torch.rot90(xp, k, (3, 4)) for k in range(4)], 0))
+            outs = [torch.rot90(hk, -k, (3, 4)) for k, hk in enumerate(h.chunk(4, 0))]
+        else:
+            outs = [torch.rot90(self.hp(torch.rot90(xp, k, (3, 4))), -k, (3, 4)) for k in range(4)]
+        return torch.cat(outs, 1)[..., :H, :W]
+
     def forward(self, x: torch.Tensor, scale: torch.Tensor | None = None, gain: torch.Tensor | None = None,
                 region: tuple[slice, slice, slice] | None = None, aux: bool = False):
         """x: (B, n_inputs, T, H, W) from ``make_inputs``; scale (B,) the trial
@@ -232,16 +395,29 @@ class SlabBlindSpotNet(nn.Module):
         B = x.shape[0]
         s = torch.ones(B, device=x.device) if scale is None else scale.to(x.device).float()
         g = torch.full((B,), 10.0, device=x.device) if gain is None else gain.to(x.device).float()
+        T = x.shape[2]
         hp = self.past(x)
         hf = self.future(x.flip(2)).flip(2)
         wm, wv, n = blind_window_stats(x[:, 0], x[:, 1], self.cfg.gap, self.cfg.window_reach)
+        extra = []
+        if self.hp is not None:  # box blind spot: same-frame context outside the box
+            t0 = 0 if region is None or region[0].start is None else region[0].start
+            t1 = T if region is None or region[0].stop is None else region[0].stop
+            R = self.cfg.hp_temporal_reach
+            a, b = max(0, t0 - R), min(T, t1 + R)
+            hh = self._half_planes(x[:, :, a:b])[:, :, t0 - a: t1 - a]
+            pf = pooled_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales)
+            if region is not None:
+                sp = (slice(None), slice(None), slice(None)) + tuple(region[1:])
+                hh, pf = hh[sp], pf[sp]
+            extra = [hh, pf.to(hh.dtype)]
         if region is not None:
             sel = (slice(None), slice(None)) + tuple(region)
             hp, hf, x = hp[sel], hf[sel], x[sel]
             wm, wv, n = (a[(slice(None),) + tuple(region)] for a in (wm, wv, n))
         gs = (g / s).view(-1, 1, 1, 1)  # gain in scale units: var = gs * mu
         feats = self._features(x.float(), wm, wv, n, gs).to(hp.dtype)
-        h = self.fuse(torch.cat([hp, hf, feats], 1))
+        h = self.fuse(torch.cat([hp, hf, feats] + [e.to(hp.dtype) for e in extra], 1))
         mi = x[:, 2].float()
         wm = torch.where(n > 0, wm, mi)
         mix = torch.tanh(self.head_mix(h)[:, 0].float())

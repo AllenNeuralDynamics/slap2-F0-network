@@ -142,3 +142,37 @@ def test_silent_regions(tmp_path):
         assert not w["activity"][:, m == 0].any() and np.nanmax(w["mean_act"][m == 0], initial=0) == 0
         assert np.allclose(w["mean_act"][m == 1], tp.mean_act[m == 1] * r["amp"], atol=1e-5)
     assert abs(np.mean(fr) - 0.5) < 0.02  # the fraction of valid pixels silenced
+
+
+def test_fast_shared_brightness(tmp_path):
+    """Fast global brightness changes move every pixel's truth together, by
+    the drawn fraction, with a short time constant; whole-trial inputs know
+    their variance; defaults draw exactly what they drew before."""
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn, T=2000)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    base = SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0)
+    a = draw(tp, base, np.random.default_rng(4))
+    b = draw(tp, SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0, fast_tau_frames=(2, 3)), np.random.default_rng(4))
+    assert np.array_equal(a["proc"], b["proc"])
+    cfg = SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0, fast_global_sd=0.1, fast_field_sd=0.0,
+                    fast_tau_frames=(3.0, 3.0))
+    rng = np.random.default_rng(8)
+    r = draw(tp, cfg, rng)
+    w = window(tp, r, 0, tp.T, 0, tp.R, 0, tp.C, rng)
+    frac = w["truth"] / tp.B[None] - 1  # the drift factor, the same at every pixel
+    assert np.allclose(frac, frac[:, :1, :1], atol=1e-5)
+    g = frac[:, 0, 0]
+    assert 0.0 < g.std() <= 0.1 * 1.3
+    ac = np.corrcoef(g[:-3], g[3:])[0, 1]
+    assert abs(ac - np.exp(-1)) < 0.15  # tau 3 frames
+    # regional fields add their own processes and are in the whole-trial variance input
+    cfg2 = SimConfig(bleach=0, global_sd=0, field_sd=0, excess=0.0, n_fields=0, fast_field_sd=0.1, n_fast_fields=2)
+    r2 = draw(tp, cfg2, rng)
+    assert r2["fields"].shape[0] == 2 and r2["proc"].shape[0] == 3
+    w2 = window(tp, r2, 0, tp.T, 0, tp.R, 0, tp.C, rng)
+    tv = np.var(w2["truth"], 0)
+    assert np.allclose(np.median(tv / tp.B ** 2), np.median(np.einsum("kl,kij,lij->ij", r2["proc_cov"],
+                       np.concatenate([np.ones((1, tp.R, tp.C)), r2["fields"]]),
+                       np.concatenate([np.ones((1, tp.R, tp.C)), r2["fields"]]))), rtol=0.05)

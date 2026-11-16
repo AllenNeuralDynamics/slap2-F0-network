@@ -173,3 +173,25 @@ def test_activity_subtracted_windows(tmp_path):
         assert float(b["mean_act"][fin].abs().max()) == 0
         mi = b["mean_image"][fin].numpy()  # values of the residual's mean map
         assert np.isin(np.round(mi, 4), np.round(st["mean_res"].astype(np.float32), 4)).all()
+
+
+def test_train_box_model_with_accumulation(tmp_path):
+    """The box model trains (two micro-batches per step), saves, and evaluate rebuilds it from the checkpoint."""
+    for k, label in enumerate(["sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "2", "--batch", "1",
+          "--accum", "2", "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_windows", "2",
+          "--val_every", "2", "--box_radius", "2", "--hp_width", "4", "--hp_temporal_dilations", "1,2",
+          "--hp_spatial_dilations", "1,1", "--hp_full_res_blocks", "1", "--pool_scales", "4,0"])
+    cfg = json.loads((out / "config.json").read_text())
+    assert cfg["model"]["box_radius"] == 2 and cfg["window"]["s_reach"] == 7  # 2 + 1 + 1 + 2 * 1 + 1
+    rows = list(csv.DictReader(open(out / "metrics.csv")))
+    assert [r["step"] for r in rows] == ["0", "2"]
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", f"box={out / 'best.pt'}", "--out", str(ev), "--windows", "2",
+          "--workers", "0", "--stats_from", str(out / "stats")])
+    assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 6  # 3 sessions x real, sim

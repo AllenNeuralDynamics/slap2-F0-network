@@ -279,7 +279,45 @@ def _model_config(args) -> ModelConfig:
         mcfg.temporal_dilations = [int(d) for d in args.temporal_dilations.split(",")]
     if args.spatial_dilations:
         mcfg.spatial_dilations = [int(d) for d in args.spatial_dilations.split(",")]
+    mcfg.box_radius, mcfg.hp_width, mcfg.hp_full_res_blocks = args.box_radius, args.hp_width, args.hp_full_res_blocks
+    if args.hp_temporal_dilations:
+        mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
+    if args.hp_spatial_dilations:
+        mcfg.hp_spatial_dilations = [int(d) for d in args.hp_spatial_dilations.split(",")]
+    if args.pool_scales:
+        mcfg.pool_scales = [int(d) for d in args.pool_scales.split(",")]
     return mcfg
+
+
+def load_compatible(model: torch.nn.Module, state: dict) -> str:
+    """Load a checkpoint into a model that may have more parts (e.g. a slab
+    model's weights into a box model): matching tensors are copied; a tensor
+    whose input-channel axis grew (the first fusion layer, whose inputs are
+    concatenated with the new ones last) gets the old columns and zeros for
+    the new ones, so the model starts out computing what the old one did.
+    Returns a summary."""
+    own = model.state_dict()
+    copied, grown, new = 0, [], []
+    for k, v in own.items():
+        if k not in state:
+            new.append(k)
+            continue
+        w = state[k]
+        if w.shape == v.shape:
+            own[k] = w
+            copied += 1
+        elif w.dim() == v.dim() and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:] and w.shape[1] < v.shape[1]:
+            nv = torch.zeros_like(v)
+            nv[:, : w.shape[1]] = w
+            own[k] = nv
+            grown.append(k)
+        else:
+            raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not fit the model's {tuple(v.shape)}")
+    unused = [k for k in state if k not in own]
+    if unused:
+        raise SystemExit(f"checkpoint tensors the model does not have: {unused[:5]}")
+    model.load_state_dict(own)
+    return f"{copied} tensors copied" + (f", {len(grown)} widened ({', '.join(grown)})" if grown else "") +         (f", {len(new)} new" if new else "")
 
 
 def stats_cache(args, out: Path) -> Path:
@@ -295,12 +333,27 @@ def stats_cache(args, out: Path) -> Path:
     return cache
 
 
+# simulated windows with fast shared brightness changes, sized like the real
+# trials' (evaluate --kinds fast): field-wide and regional, 1.5-20 frames
+FAST_GLOBAL_SD, FAST_FIELD_SD = 0.06, 0.04  # real: field-wide 2-5%, per 48-px region 2-4% per frame
+FAST_SIM = dict(fast_global_sd=FAST_GLOBAL_SD, fast_field_sd=FAST_FIELD_SD)
+
+
+def eval_sim(kind: str) -> SimConfig | None:
+    """The simulation of an evaluation kind (real: None)."""
+    return {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM)}.get(kind)
+
+
+EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000}
+
+
 def sim_config(args, free: bool = False) -> SimConfig:
     """Simulation settings from the arguments; free: no activity anywhere."""
     if free:
         return SimConfig(silent_trial=1.0)
     lo, hi = (float(v) for v in args.silent_frac.split(","))
-    return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi))
+    return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
+                     fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields)
 
 
 def train(args) -> None:
@@ -334,8 +387,7 @@ def train(args) -> None:
     model = SlabBlindSpotNet(mcfg).to(device)
     if args.init:
         ck = torch.load(args.init, map_location=device, weights_only=False)
-        model.load_state_dict(ck["model"])
-        print(f"initialized from {args.init} (step {ck.get('step')})")
+        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, ck['model'])}")
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
@@ -350,16 +402,20 @@ def train(args) -> None:
         WindowDataset(fl, wcfg, stats, length=n, seed=seed, sim=s, flip=seed == args.seed and not args.no_flip,
                       sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
         batch_size=args.batch, **kw)
-    dl = mk(train_files, args.steps * args.batch, args.seed, sim, frac)
+    dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
     evals = {}
     if val_files:
         evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
         evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, SimConfig())
         if args.val_free:
             evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
+        if args.val_fast:
+            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast"))
     evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
     region = loss_region(wcfg)
-    sel_prefix = ("real" if args.data == "mix" else args.data) if val_files else "tr"
+    sel_prefix = (args.select_on or ("real" if args.data == "mix" else args.data)) if val_files else "tr"
+    if sel_prefix not in evals:
+        raise SystemExit(f"--select_on {sel_prefix}: no such validation set ({', '.join(evals)})")
     sel_key = f"{sel_prefix}_{args.select}"
 
     (out / "config.json").write_text(json.dumps({
@@ -404,15 +460,19 @@ def train(args) -> None:
 
     validate(0)
     step = 0
-    for step, b in enumerate(dl, 1):
+    opt.zero_grad(set_to_none=True)
+    for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
         b, mu, var = _forward(model, b, device, amp_dtype, region)
         loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
-        opt.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
+        scaler.scale(loss / args.accum).backward()
+        if micro % args.accum:
+            continue
+        step = micro // args.accum
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
         scaler.update()
+        opt.zero_grad(set_to_none=True)
         sched.step()
         ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
@@ -463,8 +523,8 @@ def evaluate_checkpoints(args) -> None:
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
         for sess in sorted(groups):
             for kind in args.kinds.split(","):
-                sim = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0)}.get(kind)
-                seed = {"real": 10_000, "sim": 20_000, "free": 40_000}[kind] + args.seed
+                sim = eval_sim(kind)
+                seed = EVAL_SEEDS[kind] + args.seed
                 ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows, seed=seed, sim=sim, flip=False)
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                     pin_memory=device.type == "cuda")
@@ -524,7 +584,9 @@ def add_eval_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
     p.add_argument("--ckpt", nargs="+", required=True, help="checkpoints to score, each path or name=path")
     p.add_argument("--out", default="results/eval")
-    p.add_argument("--kinds", default="real,sim", help="comma-separated: real, sim, free (simulated without activity)")
+    p.add_argument("--kinds", default="real,sim",
+                   help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
+                        "shared brightness changes)")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
@@ -543,19 +605,20 @@ def probe(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rows = []
-    grid = [(b, w, fr, md) for md in [int(v) for v in args.max_dilations.split(",")]
+    grid = [(b, w, fr, md, br) for br in [int(v) for v in args.box_radii.split(",")]
+            for md in [int(v) for v in args.max_dilations.split(",")]
             for fr in [int(v) for v in args.full_res_list.split(",")]
             for w in [int(v) for v in args.widths.split(",")]
             for b in [int(v) for v in args.batches.split(",")]]
-    for b, w, fr, md in grid:
+    for b, w, fr, md, br in grid:
         dil = [2 ** k for k in range(int(math.log2(md)) + 1)]
-        mcfg = ModelConfig(width=w, full_res_blocks=fr, temporal_dilations=dil)
+        mcfg = ModelConfig(width=w, full_res_blocks=fr, temporal_dilations=dil, box_radius=br, hp_width=args.hp_width)
         T = args.out_frames + 2 * (mcfg.gap + 1 + mcfg.temporal_reach)
         S = args.out_px + 2 * mcfg.spatial_reach
         region = (slice(T // 2 - args.out_frames // 2, T // 2 + args.out_frames // 2),
                   slice(mcfg.spatial_reach, mcfg.spatial_reach + args.out_px),
                   slice(mcfg.spatial_reach, mcfg.spatial_reach + args.out_px))
-        row = {"batch": b, "width": w, "full_res_blocks": fr, "max_dilation": md, "window_frames": T,
+        row = {"batch": b, "width": w, "full_res_blocks": fr, "max_dilation": md, "box_radius": br, "window_frames": T,
                "window_px": S, "peak_gb": float("nan"), "s_per_step": float("nan"), "status": "ok"}
         model = opt = None
         try:
@@ -606,6 +669,8 @@ def add_probe_arguments(p) -> None:
     p.add_argument("--widths", default="16,32")
     p.add_argument("--full_res_list", default="0,1,2")
     p.add_argument("--max_dilations", default="32,64")
+    p.add_argument("--box_radii", default="-1", help="comma-separated; -1 = slab model")
+    p.add_argument("--hp_width", type=int, default=24)
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
 
@@ -621,10 +686,20 @@ def add_arguments(p) -> None:
     p.add_argument("--downsample", type=int, default=2, help="spatial downsampling after the full-resolution blocks")
     p.add_argument("--full_res_blocks", type=int, default=2)
     p.add_argument("--no_checkpoint", action="store_true", help="store activations instead of recomputing them")
+    p.add_argument("--box_radius", type=int, default=-1,
+                   help="box blind spot: pixels further than this (rows or columns) are visible at every frame; "
+                        "-1 = slab blind spot (no same-frame context)")
+    p.add_argument("--hp_width", type=int, default=24, help="channels of the half-plane branches (box model)")
+    p.add_argument("--hp_temporal_dilations", default="", help="comma-separated, default 1,2,4,8,16")
+    p.add_argument("--hp_spatial_dilations", default="", help="comma-separated, default 1,1,1,2,4")
+    p.add_argument("--hp_full_res_blocks", type=int, default=2)
+    p.add_argument("--pool_scales", default="", help="half-widths of the pooled same-frame features, 0 = whole window; "
+                                                     "default 8,16,32,0")
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
     p.add_argument("--w_unfitted", type=float, default=0.0, help="loss weight of labeled pixels outside every footprint")
     p.add_argument("--batch", type=int, default=4)
+    p.add_argument("--accum", type=int, default=1, help="micro-batches of --batch windows per optimizer step")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=2e-4)
@@ -637,6 +712,13 @@ def add_arguments(p) -> None:
                    help="lo,hi: otherwise this fraction (uniform) of a simulated trial has no activity")
     p.add_argument("--subtract_frac", type=float, default=0.0,
                    help="fraction of real training windows whose input is movie - activity (no fitted events)")
+    p.add_argument("--fast_global_sd", type=float, default=0.0,
+                   help="simulated fast field-wide brightness changes: largest SD (fraction), 0 = none")
+    p.add_argument("--fast_field_sd", type=float, default=0.0,
+                   help="simulated fast regional brightness changes: largest SD per field (fraction), 0 = none")
+    p.add_argument("--n_fast_fields", type=int, default=3)
+    p.add_argument("--val_fast", action="store_true",
+                   help="also validate on held-out windows simulated with fast shared brightness changes (fast_*)")
     p.add_argument("--exclude", default="", help="comma-separated sessions to leave out of training and validation")
     p.add_argument("--val_free", action="store_true",
                    help="also validate on held-out windows simulated without activity (free_*)")
@@ -651,6 +733,8 @@ def add_arguments(p) -> None:
                    help="best.pt criterion on held-out windows: 8-frame MSE vs the mean image, averaged over "
                         "support and background (balanced; balanced_free adds labeled pixels of the activity-free "
                         "simulation, needs --val_free) or over all pixels (mse8), or the mean loss")
+    p.add_argument("--select_on", default="", help="validation set for best.pt (real, sim, free, fast); "
+                                                  "default: the training data kind (real for mix)")
     p.add_argument("--no_flip", action="store_true", help="no random flips of training windows")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)

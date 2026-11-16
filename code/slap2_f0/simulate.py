@@ -25,6 +25,13 @@ geometry, brightness, events and noise statistics:
   pixels of real trials vary more than photon noise explains, at both time
   scales; a network trained without this read the extra spread as activity
   and over-subtracted on real data (v3 run, worst in the brightest sessions);
+* **fast shared brightness** (optional, ``fast_global_sd``, ``fast_field_sd``):
+  a global and a few regional (smooth field) multiplicative fluctuations with
+  time constants of 1.5-20 frames, part of the drift factor. Real trials
+  carry such changes, shared by every pixel in the frame (field-wide
+  fractional brightness SD 2-5% per frame, much of it faster than the 8
+  hidden frames, also in the GFP control): a slab blind spot cannot see them,
+  a box blind spot can (``model``);
 * **silent regions** (optional, ``silent_trial`` and ``silent_frac``): no
   activity in random smooth patches of the field, or anywhere in the virtual
   trial. Bright labeled pixels then vary (the excess) without any events, as
@@ -74,6 +81,13 @@ class SimConfig:
     silent_trial: float = 0.0
     silent_frac: tuple[float, float] = (0.0, 0.0)
     silent_px: tuple[float, float] = (20.0, 60.0)
+    # fast shared brightness changes (fractions; 0 = none, as in v1-v5): SDs drawn
+    # uniform in (0, sd) per virtual trial, time constants log-uniform in frames
+    fast_global_sd: float = 0.0
+    n_fast_fields: int = 3
+    fast_field_sd: float = 0.0
+    fast_field_px: tuple[float, float] = (15.0, 60.0)
+    fast_tau_frames: tuple[float, float] = (1.5, 20.0)
 
 
 def _spatial_tap(rho: float) -> float:
@@ -252,6 +266,18 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
             v = tp.tf.valid
             thr = np.quantile(fld[v], frac) if v.any() and frac > 0 else -np.inf
             r["act_mask"] = (fld > thr).astype(np.float32)
+    if cfg.fast_global_sd > 0 or (cfg.fast_field_sd > 0 and cfg.n_fast_fields > 0):  # drawn last, see above
+        kf = cfg.n_fast_fields if cfg.fast_field_sd > 0 else 0
+        taus_f = np.exp(rng.uniform(*np.log(cfg.fast_tau_frames), 1 + kf))
+        sds_f = np.concatenate([[rng.uniform(0, cfg.fast_global_sd)], rng.uniform(0, cfg.fast_field_sd, kf)])
+        fp = _ou(T, taus_f, sds_f, rng).astype(np.float32)
+        proc = r["proc"].copy()
+        proc[0] += fp[0]  # the global process
+        if kf:
+            ff = np.stack([_field(tp.R, tp.C, rng.uniform(*cfg.fast_field_px), rng) for _ in range(kf)])
+            proc = np.vstack([proc, fp[1:]])
+            r["fields"] = np.concatenate([r["fields"], ff]) if len(r["fields"]) else ff
+        r.update(proc=proc, proc_mean=proc.mean(1), proc_cov=np.atleast_2d(np.cov(proc)))
     return r
 
 
