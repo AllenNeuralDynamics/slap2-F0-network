@@ -477,3 +477,20 @@ Checks:
 **Training.** The GPU has 22 GB, and v4 already peaked at 18.3 GB with batch 2, so `--accum` runs 2 micro-batches of 1 window per optimizer step. On the CPU, one step of 1 window takes 65 s with the box, against 45 s without.
 
 **Runs.** Pretraining starts from v4 pretrained, on simulations with the fast brightness changes (3000 steps, best.pt chosen on fast simulations). Fine-tuning then follows v5b (mix, half simulated with the fast changes, GFP excluded, 1700 steps).
+
+## v6 pretraining results (2026-11-16)
+
+Same evaluation as v5 (192 held-out windows per session and kind). Support: mean over the four sensor sessions; other columns: range over them.
+
+| checkpoint | real support | real support bias | real background | GFP dendrites (real), bias | simulated support | fast-brightness simulations, support | fast, background |
+|---|---|---|---|---|---|---|---|
+| v4 pretrained | −4.7% | −0.08 to −0.18 | +0.3 to +0.7% | +0.049 | −33 to −45% | −30 to −42% | −21 to −24% |
+| v4 fine-tuned | −6.7% | −0.06 to +0.04 | −0.3 to +0.1% | +0.191 | −47 to −54% | | |
+| v5b | −5.9% | −0.07 to −0.15 | +0.1 to +0.4% | +0.041 | −42 to −52% | | |
+| **v6 pretrained** | **−7.0%** | −0.06 to −0.11 | +0.2 to +0.7% | **+0.015** | −51 to −59% | −52 to −62% | −31 to −37% |
+
+- **The box model beats every slab model on real support, with no real data in training.** Per session: −9.6% (780125), −7.1% (803121), −4.8% (878030), −6.3% (885233), against −7.1 / −5.0 / −3.2 / −3.3% for v4 pretrained. The gain is largest in the two sessions where same-frame context explained the most residual (780125, 803121), but it is there in all four.
+- **Support bias shrinks** without the cost fine-tuning had. It drops to −0.06 to −0.11, and the GFP bias falls to +0.015, the lowest of any checkpoint. Same-frame neighbours tell the network when events are under the gap, so it no longer has to lower every bright pixel's baseline.
+- **Simulated windows improve too, also without fast changes.** On activity-free labeled pixels it is about the same as v4 pretrained, slightly worse in 780125 and 878030.
+- **Training:** 2.8 s per step (2 windows), peak 12.5 GB. best.pt is the last checkpoint (step 3000). Validation on fast simulations was still improving slowly; real support had been flat for the last 1000 steps.
+- **A check for fine-tuning.** The real target is movie − GIAnT activity, and a source's footprint can reach past the box when the output pixel sits at its edge, so on real windows the visible pixels carry a little of the target's estimation noise. The pretrained network never saw real windows, so it cannot use this. After fine-tuning, the GFP session (no sources) and simulated windows are the clean comparison.
