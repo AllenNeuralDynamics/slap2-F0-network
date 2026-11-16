@@ -128,6 +128,9 @@ for DMDix = paths(:)'
         fl = double(h5read(es, [grp '/frame_info/frame_line_idxs']));
     catch
         warning('exportF0TrainingData:NoSources', 'No SiLo sources for path %d; exporting with zero activity', DMDix);
+        % without sources SiLo writes zero frame counts; the trials are those with a registered movie
+        reg = tt.motion_correction.fn_reg_ds;
+        nf = double(arrayfun(@(k) strlength(string(reg{DMDix, k})) > 0, 1:size(reg, 2)));
         profSz = [numel(nf) 0 1 0 0];
         fl = [];
     end
