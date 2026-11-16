@@ -14,7 +14,10 @@ function summary = exportF0TrainingData(trialTableFn, outDir, varargin)
 %                 mean of the valid pixels
 %     /varfac     SLAP2 variance factor (per-pixel mean, or every frame)
 %     /sources/*  each source's peak pixel
-%   plus <outDir>/export_summary.json with per-trial QC. Arrays are written
+%   plus <outDir>/export_summary.json with per-trial QC. A path where SiLo
+%   found no sources (e.g. a GFP control without an activity sensor) is
+%   exported with zero activity, an empty footprint support and no
+%   /sources; its residual is then the movie itself. Arrays are written
 %   so that h5py reads them in C order as (channel, frame, row, col),
 %   (row, col) and (frame,); pixel coordinates are 0-based in the crop, and
 %   the crop origin is stored as an attribute.
@@ -62,6 +65,8 @@ function summary = exportF0TrainingData(trialTableFn, outDir, varargin)
 %     label       session label stored with the data (default: the name of
 %                 the trial table's datadr folder)
 %     giantRef    GIAnT commit that made the SiLo outputs, stored as metadata
+%     ignoreSources  export every path as if SiLo had found no sources (zero
+%                 activity; for checks of the raw residual statistics)
 
 p = inputParser;
 addParameter(p, 'saveDir', '');
@@ -76,6 +81,7 @@ addParameter(p, 'varFac', 'mean');
 addParameter(p, 'deflate', 4);
 addParameter(p, 'label', '');
 addParameter(p, 'giantRef', '');
+addParameter(p, 'ignoreSources', false);
 parse(p, varargin{:});
 o = p.Results;
 
@@ -111,13 +117,20 @@ for DMDix = paths(:)'
     grp = sprintf('/Path%d', DMDix);
     try
         nf = double(h5read(es, [grp '/frame_info/trial_num_frames']));
-        profInfo = h5info(pts, [grp '/sources/spatial/per_trial_profiles']);
     catch
-        warning('exportF0TrainingData:NoPath', 'No SiLo sources for path %d; skipped', DMDix);
+        warning('exportF0TrainingData:NoPath', 'No SiLo output for path %d; skipped', DMDix);
         continue
     end
-    fl = double(h5read(es, [grp '/frame_info/frame_line_idxs']));
-    profSz = profInfo.Dataspace.Size; % [nTrials nSources 1 rows cols]
+    try
+        assert(~o.ignoreSources);
+        profInfo = h5info(pts, [grp '/sources/spatial/per_trial_profiles']);
+        profSz = profInfo.Dataspace.Size; % [nTrials nSources 1 rows cols]
+        fl = double(h5read(es, [grp '/frame_info/frame_line_idxs']));
+    catch
+        warning('exportF0TrainingData:NoSources', 'No SiLo sources for path %d; exporting with zero activity', DMDix);
+        profSz = [numel(nf) 0 1 0 0];
+        fl = [];
+    end
     pathDir = fullfile(outDir, sprintf('Path%d', DMDix));
     if ~exist(pathDir, 'dir')
         mkdir(pathDir);
@@ -150,19 +163,21 @@ end
 end
 
 function q = exportTrial(tt, t, DMDix, nf, fl, profSz, es, pts, grp, mocoDr, prm, o, outFn)
-nS = profSz(2);
+nS = profSz(2); % 0: no sources, zero activity
 %--- GIAnT outputs for this trial (200 Hz, consensus canvas)
-f200 = sum(nf(1:t-1)) + (1:nf(t));
-nCh200 = h5info(es, [grp '/sources/temporal/dF_denoised']).Dataspace.Size(2);
-X200 = double(h5read(es, [grp '/sources/temporal/dF_denoised'], [1 1 f200(1)], [nS nCh200 nf(t)]));
-lines200 = fl(f200);
-disc200 = squeeze(all(isnan(X200(:,1,:)), 1));
-X200(isnan(X200)) = 0;
-H = h5read(pts, [grp '/sources/spatial/per_trial_profiles'], [t 1 1 1 1], [1 nS 1 profSz(4) profSz(5)]);
-H = reshape(double(H), nS, profSz(4), profSz(5));
-H(isnan(H)) = 0;
-if ~any(H(:))
-    error('no footprints for this trial');
+if nS > 0
+    f200 = sum(nf(1:t-1)) + (1:nf(t));
+    nCh200 = h5info(es, [grp '/sources/temporal/dF_denoised']).Dataspace.Size(2);
+    X200 = double(h5read(es, [grp '/sources/temporal/dF_denoised'], [1 1 f200(1)], [nS nCh200 nf(t)]));
+    lines200 = fl(f200);
+    disc200 = squeeze(all(isnan(X200(:,1,:)), 1));
+    X200(isnan(X200)) = 0;
+    H = h5read(pts, [grp '/sources/spatial/per_trial_profiles'], [t 1 1 1 1], [1 nS 1 profSz(4) profSz(5)]);
+    H = reshape(double(H), nS, profSz(4), profSz(5));
+    H(isnan(H)) = 0;
+    if ~any(H(:))
+        error('no footprints for this trial');
+    end
 end
 
 %--- the 80 Hz registered movie and its alignment data
@@ -190,6 +205,15 @@ act(:,:,discard) = nan;
 valid = mean(isnan(act), 3) < prm.nanThresh;
 clear act
 
+Y1 = reshape(IM(:,:,prm.activityChannel,:), R*C, T);
+meanT = mean(reshape(IM(:,:,prm.activityChannel,:), R, C, T), 3, 'omitnan');
+if nS == 0 % no activity to map, align or fit
+    Y1(:, discard) = nan;
+    Hs = sparse(R*C, 0);
+    dt = NaN; half = NaN; lpc = NaN; best.shift = [0 0];
+    bestSig = struct('sigma', NaN, 'slope', NaN, 'r', NaN);
+    gain = 1; cfD = NaN; rD = NaN; etaFrac = NaN; nEv = 0; pr = []; pc = [];
+else
 %--- the getImages kernel, from 200 Hz frames to 80 Hz frames
 if numel(dsLines) > 1
     dt = ceil(mean(diff(dsLines)));
@@ -218,9 +242,7 @@ for ch = 1:nCh200
 end
 
 %--- consensus -> trial offset and blur
-Y1 = reshape(IM(:,:,prm.activityChannel,:), R*C, T);
 Y1(:, discard) = nan;
-meanT = mean(reshape(IM(:,:,prm.activityChannel,:), R, C, T), 3, 'omitnan');
 meanC = squeeze(h5read(es, [grp '/visualizations/mean_im']));
 meanC = reshape(meanC(prm.activityChannel, :), profSz(4), profSz(5));
 sh0 = integerOffset(meanT, meanC, 5);
@@ -268,6 +290,7 @@ for s = 1:nS
     end
 end
 etaFrac = max(etaR(9:13)) / max(etaY(9:13));
+end
 
 %--- crop and write
 rows = find(any(valid, 2)); cols = find(any(valid, 1));
@@ -282,8 +305,10 @@ for k = 1:numel(chans)
     m = crop(squeeze(IM(:,:,chans(k),:)));
     m(:,:,discard) = nan;
     mov(:,:,:,k) = m;
-    a = full(Hs * X80{min(chans(k), nCh200)});
-    actv(:,:,:,k) = crop(reshape(single(a), R, C, T));
+    if nS > 0
+        a = full(Hs * X80{min(chans(k), nCh200)});
+        actv(:,:,:,k) = crop(reshape(single(a), R, C, T));
+    end
 end
 clear IM
 movSz = [Cc Rc T numel(chans)]; % explicit, so a single channel keeps its axis
@@ -314,8 +339,10 @@ if strcmpi(o.varFac, 'full')
 else
     writeArr(outFn, '/varfac', single(mean(vf, 3, 'omitnan'))', [], o.deflate);
 end
-writeArr(outFn, '/sources/peak_row', int32(pr(:) - r0), [], o.deflate);
-writeArr(outFn, '/sources/peak_col', int32(pc(:) - c0), [], o.deflate);
+if nS > 0
+    writeArr(outFn, '/sources/peak_row', int32(pr(:) - r0), [], o.deflate);
+    writeArr(outFn, '/sources/peak_col', int32(pc(:) - c0), [], o.deflate);
+end
 
 q = struct('path', DMDix, 'trial', t, 'file', outFn, 'frames', T, 'rows', Rc, 'cols', Cc, ...
     'cropOriginRC', [r0 c0] - 1, 'nSources', nS, 'validPixels', nnz(valid), ...
