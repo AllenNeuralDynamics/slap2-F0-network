@@ -407,3 +407,38 @@ def check(args) -> None:
         w.writeheader()
         w.writerows(rows)
     print(f"wrote {out / 'simcheck.csv'} (real/sim)")
+
+
+def excess_summary(tf: TrialFile, st: dict) -> dict[str, float]:
+    """How much more the trial's residual (movie - activity) varies than photon
+    noise: the measured variance of single frames and of 8- and 64-frame means
+    over the photon-noise prediction (gain * mean, through the trial's noise
+    kernel), median over pixel classes (all valid, background, footprint
+    support) and over all or the brightest 10% of valid pixels; plus the
+    simulator's fast and slow excess on the brightest 10% (slow as SD over the
+    mean). NaN without the residual maps (older stats caches)."""
+    out: dict[str, float] = {}
+    if "var64_res" not in st:
+        return out
+    kt = noise_kernels(st)[0]
+    mm = np.nan_to_num(st["mean_movie"])
+    ph = st["gain"] * np.maximum(mm, 0)
+    valid = tf.valid & np.isfinite(st["var_res"]) & (ph > 0)
+    if not valid.any():
+        return out
+    top = valid & (mm >= np.quantile(mm[valid], 0.9))
+    classes = {"all": valid, "bg": valid & ~tf.labeled, "sup": valid & tf.support}
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for n, key in ((1, "var_res"), (8, "var8_res"), (64, "var64_res")):
+            ratio = st[key] / (ph * kernel_var(kt, n))
+            fin = np.isfinite(ratio)  # 64-frame means need at least 8 blocks
+            for cname, cm in classes.items():
+                for bname, bm in (("", cm & fin), ("top10_", cm & top & fin)):
+                    out[f"{cname}_{bname}r{n}"] = float(np.median(ratio[bm])) if bm.any() else float("nan")
+    fast, slow = excess_maps(st, kt, tf.valid)
+    out["top10_fast"] = float(np.median(fast[top]))
+    out["top10_slow_sd_rel"] = float(np.median(np.sqrt(slow[top]) / np.maximum(mm[top], 1e-6)))
+    out["top10_mean_over_scale"] = float(np.median(mm[top]) / tf.scale)
+    out["valid_px"] = float(valid.sum())
+    out["support_px"] = float((valid & tf.support).sum())
+    return out

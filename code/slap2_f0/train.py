@@ -49,7 +49,7 @@ from .data import WindowConfig, WindowDataset, loss_region
 from .io import TrialFile, list_trials
 from .losses import gaussian_nll, student_t_nll
 from .model import ModelConfig, SlabBlindSpotNet, blind_window_stats, make_inputs
-from .simulate import SimConfig
+from .simulate import SimConfig, excess_summary
 from .stats import load_stats
 
 
@@ -411,6 +411,7 @@ def evaluate_checkpoints(args) -> None:
     stats = load_stats(files, cache, workers=args.workers)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; sessions: "
           + ", ".join(f"{s} ({len(f)} trials)" for s, f in sorted(groups.items())), flush=True)
+    excess_report(groups, stats, out / "excess.csv")
     rows = []
     for spec in args.ckpt:
         name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
@@ -448,6 +449,34 @@ def evaluate_checkpoints(args) -> None:
                                   for c in ("sup_", "bg_", ""))
                       + f"; z_var {r['z_var']:.3f} mix {r['mix']:.3f}", flush=True)
     print(f"done in {time.time() - t0:.0f} s")
+
+
+def excess_report(groups: dict, stats: dict, path: Path) -> None:
+    """Per-trial excess of the residual variance over photon noise
+    (``simulate.excess_summary``) to a CSV, and session medians to the log."""
+    rows = []
+    for sess, fl in sorted(groups.items()):
+        for f in fl:
+            with TrialFile(f) as tf:
+                rows.append({"session": sess, "file": str(f), **excess_summary(tf, stats[str(f)])})
+    fields = list(dict.fromkeys(k for r in rows for k in r))
+    with open(path, "w", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=fields, restval=float("nan"))
+        wr.writeheader()
+        wr.writerows(rows)
+    print("residual variance over photon noise (session medians of trials), valid pixels / brightest 10% / "
+          "support; 1, 8, 64-frame means:")
+    for sess in sorted(groups):
+        rs = [r for r in rows if r["session"] == sess and "all_r1" in r]
+        if not rs:
+            print(f"  {sess}: no residual maps in the stats")
+            continue
+        med = lambda k: float(np.nanmedian([r.get(k, math.nan) for r in rs]))  # noqa: E731
+        print(f"  {sess}: all " + "/".join(f"{med(f'all_r{n}'):.2f}" for n in (1, 8, 64))
+              + "  top10% " + "/".join(f"{med(f'all_top10_r{n}'):.2f}" for n in (1, 8, 64))
+              + "  support " + "/".join(f"{med(f'sup_r{n}'):.2f}" for n in (1, 8, 64))
+              + f"  | top10% fast {med('top10_fast'):+.2f}, slow SD/mean {med('top10_slow_sd_rel'):.3f}, "
+              + f"brightness {med('top10_mean_over_scale'):.1f}x scale; support px {med('support_px'):.0f}", flush=True)
 
 
 def add_eval_arguments(p) -> None:

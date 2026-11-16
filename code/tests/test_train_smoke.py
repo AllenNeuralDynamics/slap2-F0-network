@@ -79,6 +79,8 @@ def test_evaluate_reproduces_validation(tmp_path):
     main(["evaluate", str(tmp_path / "data"), "--ckpt", f"last={out / 'last.pt'}", "--out", str(ev),
           "--windows", "2", "--workers", "0", "--stats_from", str(out / "stats")])
     rows = list(csv.DictReader(open(ev / "eval.csv")))
+    ex = list(csv.DictReader(open(ev / "excess.csv")))  # residual variance over photon noise, per trial
+    assert len(ex) == 4 and all(np.isfinite(float(r["all_r1"])) for r in ex)
     assert sorted((r["session"], r["kind"]) for r in rows) == sorted(
         (s, k) for s in ("sessA", "sessB", "sessC") for k in ("real", "sim"))
     # the held-out session's windows are the ones the training validation used
