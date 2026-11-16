@@ -123,7 +123,7 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 
 ```bash
 slap2-f0 predict <export folder> --ckpt v6=<best.pt> v5b=<best.pt> --files 878030_2026-08-28_14-41-35/Path1/trial_002 --out <predictions>
-slap2-f0 view <predictions>          # opens http://127.0.0.1:8765
+slap2-f0 view <predictions> --models v6,v5b   # opens http://127.0.0.1:8765; --models lists those first
 ```
 
 - **predict** tiles each trial in the checkpoint's training geometry (`out_px` pixels plus the model's reach), so every pixel sees the same kind of window as in training. It writes one file per trial, `<predictions>/<session>/<path>/<trial>.h5`, with the movie, GIAnT's activity and each baseline at the trial's valid pixels (float16). It needs the GPU for real use; on a CPU a trial takes minutes per model even for a tiny network. On Code Ocean: `--mode predict --predict_args "--ckpt name=<path> ... --files ..."` (results in `/results/predict`). To add a checkpoint later, run it alone with `--no_movie --no_silo`; the viewer merges files for the same trial.
