@@ -99,7 +99,9 @@ main { padding: 10px 16px 24px; }
       <option value="target" selected>data − activity − F0</option>
       <option value="raw">data − F0</option>
       <option value="dff">(data − F0) / F0</option>
+      <option value="z">(data − activity − F0) / photon SD</option>
     </select></label>
+    <label>Display <select id="gamma"><option value="1">linear</option><option value="0.5" selected>square root</option></select></label>
     <label>Data / F0 range <input id="lo" type="number" step="any"> – <input id="hi" type="number" step="any"></label>
     <label>Residual ± <input id="rr" type="number" step="any" min="0"></label>
     <button id="bauto" title="Set both ranges from the current frame">Auto range</button>
@@ -136,7 +138,7 @@ const S = {
   meta: null, trial: null, st: null, layers: [], N: 0, R: 0, C: 0, T: 0, fr: 80,
   t: 0, avg: 8, playing: false, frame: null, inflight: false, pending: false,
   view: { z: 1, cx: 0, cy: 0 }, sel: null, rad: 1, resMode: "target",
-  lo: 0, hi: 1, rr: 1, models: [], shown: new Set(), ncols: 4,
+  lo: 0, hi: 1, rr: 1, gamma: 0.5, models: [], shown: new Set(), ncols: 4,
   trace: null, tsmooth: 8, xr: [0, 1], hoverT: null, pix: null, tiles: [],
 };
 const MEAN = "mean image";
@@ -281,12 +283,14 @@ function values(tile) {
   if (tile.kind === "target") { for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n]; return out; }
   const b = F[tile.model];
   if (tile.kind === "base") return b;
-  const m = S.resMode;
-  for (let n = 0; n < N; n++) {
-    const d = F.movie[n];
-    out[n] = m === "raw" ? d - b[n] : m === "dff" ? (d - b[n]) / b[n] : d - F.activity[n] - b[n];
-  }
+  for (let n = 0; n < N; n++) out[n] = residual(F.movie[n], F.activity[n], b[n]);
   return out;
+}
+function residual(d, a, b) {
+  // photon SD of an average of S.avg frames at baseline b (counts): sqrt(gain * b / avg)
+  const m = S.resMode;
+  return m === "raw" ? d - b : m === "dff" ? (d - b) / b
+    : m === "z" ? (d - a - b) / Math.sqrt(Math.max(S.trial.gain * b / S.avg, 1e-9)) : d - a - b;
 }
 function pct(a, q) {
   const v = Array.from(a).filter(Number.isFinite).sort((x, y) => x - y);
@@ -358,16 +362,18 @@ function renderTile(t) {
   if (!v) return;
   const u = t.u32, pix = S.pix, N = S.N;
   if (t.kind === "res") {
-    const k = 127.5 / (S.resMode === "dff" ? S.rr : S.rr);
+    const k = 127.5 / S.rr;
     for (let n = 0; n < N; n++) {
       const x = v[n];
       u[pix[n]] = Number.isFinite(x) ? DIV[Math.max(0, Math.min(255, Math.round(127.5 + x * k)))] : 0;
     }
   } else {
-    const lo = S.lo, k = 255 / Math.max(1e-9, S.hi - S.lo);
+    const lo = S.lo, k = 1 / Math.max(1e-9, S.hi - S.lo), g = S.gamma;
     for (let n = 0; n < N; n++) {
       const x = v[n];
-      u[pix[n]] = Number.isFinite(x) ? GRAY[Math.max(0, Math.min(255, Math.round((x - lo) * k)))] : 0;
+      if (!Number.isFinite(x)) { u[pix[n]] = 0; continue; }
+      const f = Math.max(0, Math.min(1, (x - lo) * k));
+      u[pix[n]] = GRAY[Math.round(255 * (g === 1 ? f : Math.pow(f, g)))];
     }
   }
   t.octx.putImageData(t.img, 0, 0);
@@ -455,7 +461,7 @@ function updateReadout() {
   const F = S.frame, parts = [`row ${h.r}, col ${h.c}`, `data ${fmt(F.movie[n])}`, `activity ${fmt(F.activity[n])}`];
   for (const m of S.models) if (S.shown.has(m)) {
     const b = F[m][n], d = F.movie[n];
-    const res = S.resMode === "raw" ? d - b : S.resMode === "dff" ? (d - b) / b : d - F.activity[n] - b;
+    const res = residual(d, F.activity[n], b);
     parts.push(`${label(m)} F0 ${fmt(b)} (res ${fmt(res)})`);
   }
   el.textContent = parts.join(" · ");
@@ -647,6 +653,7 @@ for (const id of ["lo", "hi", "rr"]) $(id).addEventListener("change", () => {
   const v = parseFloat($(id).value); if (Number.isFinite(v)) { S[id] = v; renderAll(); }
 });
 $("bauto").onclick = () => { autoRange(); renderAll(); };
+$("gamma").onchange = (e) => { S.gamma = +e.target.value; renderAll(); };
 $("ncols").onchange = (e) => { S.ncols = +e.target.value; S.userCols = true; buildTiles(); renderAll(); };
 $("zin").onclick = () => { S.view.z = Math.min(64, S.view.z * 1.5); drawAllTiles(); };
 $("zout").onclick = () => { S.view.z = Math.max(1, S.view.z / 1.5); if (S.view.z === 1) { S.view.cx = S.C / 2; S.view.cy = S.R / 2; } drawAllTiles(); };

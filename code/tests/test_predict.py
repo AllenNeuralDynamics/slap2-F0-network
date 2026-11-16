@@ -187,6 +187,8 @@ def test_predict_and_view(tmp_path):
         fr = np.frombuffer(body, np.float32).reshape(5, N)
         assert json.loads(h["X-Layers"])[3] == "silo"
         assert np.allclose(fr[0], movie[20]) and np.allclose(fr[3], silo[20])
+        body, _ = _get(f"{base}/api/frame?key={key}&t=40&avg=1")  # discarded: no data, baselines blanked
+        assert np.isnan(np.frombuffer(body, np.float32).reshape(5, N)[[0, 2, 3, 4]]).all()
         body, _ = _get(f"{base}/api/frame?key={key}&t=10&avg=4")
         assert np.allclose(np.frombuffer(body, np.float32).reshape(5, N)[0], movie[9:13].mean(0), rtol=1e-5)
         r, c = st["rows"][100], st["cols"][100]

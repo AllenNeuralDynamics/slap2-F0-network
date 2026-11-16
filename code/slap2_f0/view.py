@@ -6,6 +6,10 @@ model's baseline and residual, frame by frame (scroll or play through time,
 average a few frames, zoom and pan, all panels in step), with traces of a
 chosen pixel or small region over the whole trial below.
 
+Baselines are blanked (NaN) on discarded frames, where the movie has no data
+and no network was ever trained, so frame averages and smoothed traces near
+them use real frames only.
+
 Trials are read from every predict file under DIR; files for the same trial
 are merged (models in file order, a later file's copy of a model replacing an
 earlier one). A trial's arrays are held in memory while it is shown
@@ -82,6 +86,8 @@ class Trial:
         if self.movie is None:
             raise ValueError(f"no movie in {[str(f) for f in files]} (run predict without --no_movie once)")
         self.T, self.N = self.movie.shape
+        for b in self.baselines.values():  # no data, never trained on: a baseline there means nothing
+            b[self.discard] = np.nan
         self.index = np.full((self.R, self.C), -1, np.int64)
         self.index[self.rows, self.cols] = np.arange(self.N)
         self.layers = ["movie", "activity"] + list(self.baselines)
