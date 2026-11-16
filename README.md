@@ -23,11 +23,11 @@ The repository is laid out as a Code Ocean capsule. Two capsules run its code: t
 
 ```
 code/
-  run                  capsule entry point: --mode export (default) or --mode train
+  run                  capsule entry point: --mode export (default), train, eval, predict or probe
   run_export.m         per session: trial table -> trim -> MultiRoiRegistration -> SILo -> export
   startup.m            MATLAB path for the capsule (SLAP2 reader, NoRMCorre, Fast_Tiff_Write)
   matlab/              exportF0TrainingData.m, trimTrialTableSLAP2.m
-  slap2_f0/            Python package: io, stats, simulate, data, model, losses, train, ceiling, cli
+  slap2_f0/            Python package: io, stats, simulate, data, model, losses, train, ceiling, predict, view, cli
   tests/               pytest (blind-spot exactness, simulator, likelihoods, reader, ceiling, training smoke tests)
 environment/           Dockerfile and postInstall (MATLAB R2023b, Slap2DataReader, GIAnT-MATLAB, PyTorch)
 .codeocean/            the capsule's machine (each capsule keeps its own; see below)
@@ -116,6 +116,18 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 - **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). It also reports each session's residual variance over photon noise (`excess.csv`). With the training seed, a held-out session gets the windows its training validation used.
 - **Controls without activity:** a session where SiLo finds no sources, such as a GFP mouse without a glutamate sensor, is exported with zero activity. All its valid pixels are exact targets with loss weight 1, so any bias on its labeled pixels (`lab_bias_*`) is spurious ΔF.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
+
+### Viewing baselines
+
+`slap2-f0 predict` runs saved checkpoints over whole trials and adds SiLo's baseline; `slap2-f0 view` shows the result in a browser.
+
+```bash
+slap2-f0 predict <export folder> --ckpt v6=<best.pt> v5b=<best.pt> --files 878030_2026-08-28_14-41-35/Path1/trial_002 --out <predictions>
+slap2-f0 view <predictions>          # opens http://127.0.0.1:8765
+```
+
+- **predict** tiles each trial in the checkpoint's training geometry (`out_px` pixels plus the model's reach), so every pixel sees the same kind of window as in training. It writes one file per trial, `<predictions>/<session>/<path>/<trial>.h5`, with the movie, GIAnT's activity and each baseline at the trial's valid pixels (float16). It needs the GPU for real use; on a CPU a trial takes minutes per model even for a tiny network. On Code Ocean: `--mode predict --predict_args "--ckpt name=<path> ... --files ..."` (results in `/results/predict`). To add a checkpoint later, run it alone with `--no_movie --no_silo`; the viewer merges files for the same trial.
+- **view** shows, per frame, the data, the data minus GIAnT's activity, and each model's baseline and residual (data − activity − F0, data − F0, or ΔF/F). Scroll over the images to step through time, average up to 64 frames, or play. Ctrl + scroll zooms all panels together, and drag pans. Clicking a pixel plots its traces (or a small ROI's) over the whole trial: data, baselines and residuals, with smoothing, zoom and hover values.
 
 ### On Code Ocean
 

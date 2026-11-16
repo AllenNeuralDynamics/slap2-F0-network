@@ -210,7 +210,10 @@ async function loadTrial(key) {
   S.discard = new Set(S.st.discard);
   $("tinfo").textContent = `${S.T} frames (${(S.T / S.fr).toFixed(1)} s) · ${S.R} × ${S.C} px, ${S.N} valid · ${tr.n_sources} sources`;
   $("tslider").max = S.T - 1;
-  S.t = Math.min(S.t, S.T - 1);
+  // start at the first imaged frame (exported trials often begin with discarded frames)
+  let t0 = 0; while (t0 < S.T - 1 && S.discard.has(t0)) t0++;
+  S.t = Math.min(S.T - 1, t0 + Math.floor(S.avg / 2));
+  $("tslider").value = S.t; updateTLabel();
   S.view = { z: 1, cx: S.C / 2, cy: S.R / 2 };
   S.xr = [0, S.T];
   // default trace pixel: the brightest footprint-support pixel (else labeled, else any)
@@ -220,6 +223,7 @@ async function loadTrial(key) {
     if (best >= 0) break;
   }
   S.sel = best >= 0 ? { r: S.st.rows[best], c: S.st.cols[best] } : { r: S.R >> 1, c: S.C >> 1 };
+  if (!S.userCols) { S.ncols = S.C / S.R > 2 ? 2 : 4; $("ncols").value = S.ncols; }  // wide trials: 2 per row
   buildModels(); buildTiles();
   S.autoNext = true;
   await requestFrame();
@@ -292,10 +296,14 @@ function pct(a, q) {
 function nice(x) { if (!Number.isFinite(x) || x === 0) return x; const p = Math.pow(10, Math.floor(Math.log10(Math.abs(x))) - 1); return Math.round(x / p) * p; }
 function autoRange() {
   if (!S.frame) return;
-  S.lo = nice(pct(S.frame.movie, 0.005)); S.hi = nice(pct(S.frame.movie, 0.995));
+  // from the frame's data; from the mean image when the frame has none (discarded frames)
+  let src = S.frame.movie;
+  if (src.filter(Number.isFinite).length < 10) src = S.mean;
+  const lo = nice(pct(src, 0.005)), hi = nice(pct(src, 0.995));
+  if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) { S.lo = lo; S.hi = hi; }
   const first = S.models.find((m) => S.shown.has(m)) || S.models[0];
-  const res = values({ kind: "res", model: first });
-  S.rr = nice(pct(res.map(Math.abs), 0.99)) || 1;
+  const rr = nice(pct(values({ kind: "res", model: first }).map(Math.abs), 0.99));
+  if (Number.isFinite(rr) && rr > 0) S.rr = rr;
   $("lo").value = S.lo; $("hi").value = S.hi; $("rr").value = S.rr;
 }
 
@@ -434,7 +442,7 @@ function attachTileEvents(t) {
   cv.addEventListener("pointerleave", () => { S.hover = null; updateReadout(); });
   cv.addEventListener("dblclick", () => { S.view = { z: 1, cx: S.C / 2, cy: S.R / 2 }; drawAllTiles(); });
 }
-function fmt(x) { if (!Number.isFinite(x)) return "–"; const a = Math.abs(x); return a >= 100 ? x.toFixed(0) : a >= 10 ? x.toFixed(1) : a >= 1 ? x.toFixed(2) : x.toFixed(3); }
+function fmt(x) { if (!Number.isFinite(x)) return "–"; if (x === 0) return "0"; const a = Math.abs(x); return a >= 100 ? x.toFixed(0) : a >= 10 ? x.toFixed(1) : a >= 1 ? x.toFixed(2) : x.toFixed(3); }
 function hoverReadout(t, ev) { const p = toTrial(t, ev); S.hover = { tile: t, r: p.r, c: p.c }; updateReadout(); }
 function updateReadout() {
   const h = S.hover, el = $("readout");
@@ -639,7 +647,7 @@ for (const id of ["lo", "hi", "rr"]) $(id).addEventListener("change", () => {
   const v = parseFloat($(id).value); if (Number.isFinite(v)) { S[id] = v; renderAll(); }
 });
 $("bauto").onclick = () => { autoRange(); renderAll(); };
-$("ncols").onchange = (e) => { S.ncols = +e.target.value; buildTiles(); renderAll(); };
+$("ncols").onchange = (e) => { S.ncols = +e.target.value; S.userCols = true; buildTiles(); renderAll(); };
 $("zin").onclick = () => { S.view.z = Math.min(64, S.view.z * 1.5); drawAllTiles(); };
 $("zout").onclick = () => { S.view.z = Math.max(1, S.view.z / 1.5); if (S.view.z === 1) { S.view.cx = S.C / 2; S.view.cy = S.R / 2; } drawAllTiles(); };
 $("zreset").onclick = () => { S.view = { z: 1, cx: S.C / 2, cy: S.R / 2 }; drawAllTiles(); };
