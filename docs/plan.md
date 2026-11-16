@@ -304,3 +304,79 @@ v3 bounds the heads (mix in ±1, baseline correction 0.5–2×, noise correction
 
   It is within about 10–20% elsewhere. Some variance at the 8-frame scale is still missing.
 - **The run** repeats v3 (same split, steps and seed) with the new simulator, fine-tunes, and scores both checkpoints on all four sessions.
+
+## v4 results (2026-11-15)
+
+- **Pretraining on the excess-noise simulator now works in every session.** 8-frame MSE relative to the mean image on real windows, footprint support / background. 878030 is the held-out session; the fine-tuned scores for the other three are in-sample (fine-tuning trained on their real windows):
+
+  | session | v3 pretrained | v4 pretrained | v3 fine-tuned | v4 fine-tuned | SiLo | oracle (support) |
+  |---|---|---|---|---|---|---|
+  | 780125 | +15.9 / +3.7 | −7.1 / +0.3 | −6.9 / 0.0 | −9.0 / −0.1 | −9.0 / +8.6 | −11.7 |
+  | 803121 | +6.2 / +11.3 | −5.0 / +0.4 | −4.6 / +0.1 | −6.0 / 0.0 | −8.0 / +2.1 | −6.6 |
+  | 878030 (held out) | −5.0 / +0.6 | −3.2 / +0.7 | −5.2 / 0.0 | −5.3 / +0.1 | −4.6 / +10.9 | −8.2 |
+  | 885233 | −5.8 / +0.4 | −3.3 / +0.4 | −6.0 / −0.2 | −6.4 / −0.3 | −5.8 / +5.5 | −10.7 |
+
+- **The excess removed the over-subtraction in the bright sessions** (780125, 803121). The pretrained network now beats the mean image everywhere and keeps the background flat.
+- **It costs about 2 points on support in the dimmer sessions** (878030, 885233) compared with v3 pretrained.
+- **v4 fine-tuned beats v3 fine-tuned on support in every session** (by 0.1–2.1 points) and ties on background. On the held-out session it beats SiLo on support (−5.3 vs −4.6), and on background by 11 points.
+- **Calibration:** z variance 0.96–0.99 pretrained and 0.99–1.01 fine-tuned.
+- **Bias on support** (target − baseline, in the trial's scale) on real windows:
+
+  | | 780125 | 803121 | 878030 | 885233 |
+  |---|---|---|---|---|
+  | v4 pretrained | −0.18 | −0.08 | −0.15 | −0.15 |
+  | v4 fine-tuned | −0.04 | +0.04 | −0.02 | −0.06 |
+  | mean image | −0.33 | −0.12 | −0.29 | −0.20 |
+
+  The pretrained baseline sits between the mean image and the true baseline, so it removes only about half of the mean activity. Fine-tuning removes most of the rest.
+
+## GFP control: is the excess spillover? (2026-11-15)
+
+- **Session:** 847983_2026-02-24_08-47-45, an EGFP mouse with no activity sensor (whether the label is CAAX-GFP is not confirmed). SiLo finds no sources, so the export writes zero activity and the residual is the movie itself. Settings: 180 s, 7 trials per path.
+- **Code changes:**
+  - In a trial with `nSources` 0, every valid pixel now has loss weight 1, since its activity is known to be zero.
+  - `evaluate` adds a `lab_` class: labeled pixels outside every footprint.
+  - The excess report adds a labeled class.
+- **Fast excess is not from the sensor.** On dendrite pixels, GFP's single-frame residual variance exceeds photon noise by about as much as on the sensor sessions' footprint support at the same brightness, 5–30%. The excess grows with brightness, so it is multiplicative.
+- **Slow excess is smaller in GFP at matched brightness.** At 64 frames GFP is at the low end, close to 803121 and 885233. 780125 and 878030 are well above it.
+- **Regional modes remove most of GFP's slow excess.** The model fits brightness (laser, hemodynamics), xy shift and defocus blur (z motion) per frame and per 48-px block. The same fit removes all of 803121's slow excess but only part of 780125's.
+- **780125's leftover excess is largest outside the footprints.** Labeled pixels outside every footprint carry more than footprint support at the same brightness. That fits activity GIAnT did not fit there, whether spillover or undetected synapses, which GFP cannot tell apart.
+
+  Real residual variance over photon noise, at 1 / 8 / 64 / 256-frame means. One trial per session; motion model per 48-px block, fitted on half the pixels and tested on the other half:
+
+  | session, pixels (brightness 12–30) | raw | after the motion model |
+  |---|---|---|
+  | GFP, labeled | 1.08 / 1.12 / 1.21 / 1.23 | 1.07 / 1.10 / 1.10 / 1.01 |
+  | 780125, support | 1.02 / 1.11 / 1.47 / 1.90 | 1.01 / 1.07 / 1.19 / 1.23 |
+  | 780125, labeled outside footprints | 1.18 / 1.36 / 1.86 / 2.05 | 1.15 / 1.29 / 1.51 / 1.41 |
+  | 803121, labeled outside footprints | 1.05 / 1.10 / 1.26 / 1.22 | 1.03 / 1.02 / 1.00 / 0.90 |
+  | 878030, labeled outside footprints | 1.16 / 1.27 / 1.55 / 1.23 | 1.15 / 1.25 / 1.39 / 1.16 |
+  | 885233, support | 1.08 / 1.14 / 1.15 / 0.99 | 1.08 / 1.13 / 1.17 / 0.97 |
+
+- **Session-wide excess** (`evaluate`'s report, session medians over trials; labeled pixels, 1 / 8 / 64 frames):
+
+  | session | labeled | brightest 10%: fast, slow SD/mean, brightness |
+  |---|---|---|
+  | GFP 847983 | 1.09 / 1.14 / 1.22 | +0.13, 0.036, 7.7× scale |
+  | 780125 | 1.23 / 1.37 / 1.76 | +0.78, 0.068, 26× |
+  | 803121 | 1.01 / 1.10 / 1.37 | −0.07, 0.036, 18× |
+  | 878030 | 1.11 / 1.20 / 1.24 | +0.13, 0.074, 5.2× |
+  | 885233 | 1.07 / 1.13 / 1.18 | +0.07, 0.060, 5.1× |
+
+- **Networks on GFP dendrites.** Bias (target − baseline) in the trial's scale, and 8-frame MSE relative to the mean image. With no activity, any bias is spurious ΔF:
+
+  | baseline | bias, real | bias, simulated | 8-frame MSE, real | 8-frame MSE, simulated |
+  |---|---|---|---|---|
+  | v3 pretrained | +0.30 | +0.31 | +12.9% | +484% |
+  | v3 fine-tuned | +0.26 | +0.25 | +7.5% | +223% |
+  | v4 pretrained | +0.05 | +0.04 | +0.2% | −28% |
+  | v4 fine-tuned | +0.19 | +0.18 | +3.7% | +94% |
+  | SiLo (moving median) | +0.12 | +0.14 | −2.4% | +82% |
+  | mean image | 0.00 | 0.00 | 0 | 0 |
+
+  Background bias is about 0 for every network. The simulated GFP windows come from the v4 simulator, so they carry GFP's measured excess. Dendrites are 2.0× scale (median) to 2.8× (mean) here, so a bias of 0.19 is about 7–10% ΔF/F on a sample with no activity.
+  - **v3 reads excess variance as activity.** It was trained without the excess, and its bias appears in simulated windows only because those now include the excess.
+  - **v4 pretrained is nearly unbiased.** It has the smallest bias of all, and on simulated windows it beats the mean image by 28% while SiLo is 82% worse.
+  - **Fine-tuning on the sensor sessions brings the bias back** (+0.19 for v4). On those sessions bright footprint pixels always carry activity, so the network learns to subtract a typical amount even where none is visible. That prior helps the average sensor-session score but biases quiet synapses.
+  - **Remedies:** fine-tune with activity-free data in the mix (GFP sessions, where every pixel is an exact target), or with sims whose activity is randomly silenced per region. Keep a second GFP session held out to test it.
+  - **On real GFP dendrites SiLo beats the mean image by 2.4% at 8 frames**, while v4 pretrained ties. Real dendrites carry slow fluctuations that a running median follows (motion and brightness modes, above), and the network does not yet track them on real data.

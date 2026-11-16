@@ -108,12 +108,13 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
   - **Baselines compared:** the network, the mean image, the window mean and SiLo's moving median.
   - **Oracles,** which know the activity: the mean image minus the trial's mean activity (`oracle`, the best constant) and the blind window mean of movie − activity (`oracle_blind`).
   - **Scales:** per frame and on 8-frame averages (`mse8_*`, what SiLo Z-scores).
-  - **Pixel classes:** all, footprint support (`sup_`) and background (`bg_`).
+  - **Pixel classes:** all, footprint support (`sup_`), background (`bg_`) and labeled pixels outside every footprint (`lab_`). The last only counts where it has loss weight: with `--w_unfitted` > 0, or in a session without sources.
   - **Noise calibration:** `z_*`, and `r8`, which converts per-frame σ to SiLo's.
 - **best.pt** is picked on held-out windows of the training data kind (`--select`). The default, `balanced`, is the network's 8-frame MSE relative to the mean image's, averaged over support and background pixels. The per-frame loss is too noisy to pick checkpoints on real data. The untrained network counts (score 1), so best.pt is never worse than the mean image.
 - **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt`, `last.pt` and `stats/` (cached whole-trial statistics).
 - **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
-- **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). With the training seed, a held-out session gets the windows its training validation used.
+- **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). It also reports each session's residual variance over photon noise (`excess.csv`). With the training seed, a held-out session gets the windows its training validation used.
+- **Controls without activity:** a session where SiLo finds no sources, such as a GFP mouse without a glutamate sensor, is exported with zero activity. All its valid pixels are exact targets with loss weight 1, so any bias on its labeled pixels (`lab_bias_*`) is spurious ΔF.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
 
 ### On Code Ocean
