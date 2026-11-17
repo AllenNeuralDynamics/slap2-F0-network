@@ -598,10 +598,13 @@ What made it faster:
 | moving median (main) | 0.96 / 0.53 / **0.68** | 0.94 / 0.57 / **0.71** | 0.79 (4) | 0.78 (4) |
 | v6 fine-tuned | 0.84 / 0.78 / **0.81** | 0.90 / 0.78 / **0.83** | 0.83 (6) | 0.84 (7) |
 | true baseline | 0.71 / 0.93 / 0.81 | 0.79 / 0.95 / 0.87 | 0.87 (15) | 0.88 (15) |
+| v6f (reach 14) | 0.80 / 0.76 / 0.78 | 0.88 / 0.78 / 0.83 | 0.82 (6) | 0.86 (7) |
+| min(v6 fine-tuned, moving median) | 0.92 / 0.68 / 0.79 | 0.93 / 0.66 / 0.77 | 0.81 (5) | 0.80 (4) |
 
 - **At SiLo's threshold the network baseline finds half again as many true sources** (recall 0.53 → 0.78) for a small loss of precision. The moving median sits high at event pixels (+42% at source peaks), which shrinks every event's Z-score; the true baseline shows how much there is to gain.
 - **With each baseline's best threshold** (one threshold for all trials; thresholds 2.5–20 swept), the network still beats the moving median (0.83–0.84 against 0.78–0.79) and closes about half of the gap to the true baseline. The best threshold moves (moving median 4, network 6–7, truth 15), so part of the gain at the default threshold is calibration.
 - **Per session:** the gain is in 780125 (F1 0.68 → 0.86 at the default threshold) and 803121 (0.30 → 0.52–0.58); the 5-source 878030 and 885233 are about even (one session up, one down).
+- **The reach-14 model localizes as well as v6** (0.82 / 0.86 at the best threshold).
 - Single trials, so SiLo's averaging of activity images over trials is not in this test; the network was trained on simulations of the same kind (the fast-brightness ones are its own pretraining distribution).
 
 **Real trials** (one viewer trial per session), against the session's final GIAnT sources (from all trials, localized with the moving median, so this reference favors it):
@@ -614,7 +617,7 @@ What made it faster:
 | 885233 (25) | 14, 0.51, 0.62 | 18, 0.56, 0.63 | 21, 0.61, 0.64 | 24, 0.61, 0.62 |
 | 847983, GFP (0) | 0 | 0 | 0 | 0 |
 
-The networks find more of the final sources in three of four sessions, none in the GFP session (no false positives where there is no activity), and fewer in 803121.
+The networks find more of the final sources in three of four sessions, none in the GFP session (no false positives where there is no activity), and fewer in 803121. Pooled over the four sessions: F1 0.54 (moving median) against 0.58–0.60 (networks) at the default threshold, and 0.58 against 0.59–0.60 at each one's best threshold.
 
 **Full SILo on 780125** with network baselines (`slap2-f0 predict-registered` for all 30 registered movies, then SILo of the GIAnT branch `localization-network-baseline` with `localizationBaselineDir`), against the main run above:
 
