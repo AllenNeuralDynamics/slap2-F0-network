@@ -370,10 +370,12 @@ FAST_SIM = dict(fast_global_sd=FAST_GLOBAL_SD, fast_field_sd=FAST_FIELD_SD)
 
 def eval_sim(kind: str) -> SimConfig | None:
     """The simulation of an evaluation kind (real: None)."""
-    return {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM)}.get(kind)
+    return {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
+            "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3))}.get(kind)
 
 
-EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000}
+# dark: fast simulations where 30% of the footprint pixels sit on a nearly dark baseline
+EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "dark": 60_000}
 
 
 def sim_config(args, free: bool = False) -> SimConfig:
@@ -381,8 +383,9 @@ def sim_config(args, free: bool = False) -> SimConfig:
     if free:
         return SimConfig(silent_trial=1.0)
     lo, hi = (float(v) for v in args.silent_frac.split(","))
+    dlo, dhi = (float(v) for v in args.dark_frac.split(","))
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
-                     fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields)
+                     fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi))
 
 
 def train(args) -> None:
@@ -752,6 +755,9 @@ def add_arguments(p) -> None:
     p.add_argument("--fast_field_sd", type=float, default=0.0,
                    help="simulated fast regional brightness changes: largest SD per field (fraction), 0 = none")
     p.add_argument("--n_fast_fields", type=int, default=3)
+    p.add_argument("--dark_frac", default="0,0",
+                   help="lo,hi: fraction (uniform) of footprint pixels of a simulated trial whose baseline is scaled "
+                        "down by 0.02-0.3 (sources on nearly dark pixels)")
     p.add_argument("--val_fast", action="store_true",
                    help="also validate on held-out windows simulated with fast shared brightness changes (fast_*)")
     p.add_argument("--exclude", default="", help="comma-separated sessions to leave out of training and validation")

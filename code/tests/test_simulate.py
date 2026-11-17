@@ -176,3 +176,29 @@ def test_fast_shared_brightness(tmp_path):
     assert np.allclose(np.median(tv / tp.B ** 2), np.median(np.einsum("kl,kij,lij->ij", r2["proc_cov"],
                        np.concatenate([np.ones((1, tp.R, tp.C)), r2["fields"]]),
                        np.concatenate([np.ones((1, tp.R, tp.C)), r2["fields"]]))), rtol=0.05)
+
+
+def test_dark_sources(tmp_path):
+    """Dark sources: chosen support pixels get a lower baseline, in the truth
+    and in the mean image, with the same activity; default settings draw what
+    they drew before."""
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    a, b = draw(tp, SimConfig(), np.random.default_rng(5)), draw(tp, SimConfig(dark_px=(1, 2)), np.random.default_rng(5))
+    assert "dark" not in a and "dark" not in b and a["shift"] == b["shift"]
+    rng = np.random.default_rng(3)
+    r = draw(tp, SimConfig(dark_frac=(0.5, 0.5)), rng)
+    dark = r["dark"]
+    sup = tp.tf.support & tp.tf.valid
+    picked = dark < 1
+    assert picked.any() and not picked[~sup].any() and abs(picked[sup].mean() - 0.5) < 0.1
+    assert (dark[picked] >= 0.02).all() and (dark[picked] <= 0.3).all()
+    w0 = window(tp, dict(r, dark=np.ones_like(dark)), 0, tp.T, 0, tp.R, 0, tp.C, np.random.default_rng(1))
+    w = window(tp, r, 0, tp.T, 0, tp.R, 0, tp.C, np.random.default_rng(1))
+    t0, t1 = np.nanmean(w0["truth"], 0), np.nanmean(w["truth"], 0)
+    assert np.allclose(t1[picked], t0[picked] * dark[picked], rtol=0.05, atol=0.05)
+    assert np.allclose(t1[~picked], t0[~picked])
+    assert np.allclose(w["activity"], w0["activity"])
+    assert (np.nanmean(w["mean_image"][picked] - w0["mean_image"][picked]) < -1.0)

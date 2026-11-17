@@ -88,6 +88,13 @@ class SimConfig:
     fast_field_sd: float = 0.0
     fast_field_px: tuple[float, float] = (15.0, 60.0)
     fast_tau_frames: tuple[float, float] = (1.5, 20.0)
+    # dark sources: a fraction (uniform in dark_frac) of the footprint-support
+    # pixels, in patches of dark_px, get their baseline scaled by a factor
+    # uniform in dark_factor while their activity stays, as at real sources on
+    # nearly dark pixels (the movie mostly 0, with large events; 0 = none)
+    dark_frac: tuple[float, float] = (0.0, 0.0)
+    dark_px: tuple[float, float] = (2.0, 6.0)
+    dark_factor: tuple[float, float] = (0.02, 0.3)
 
 
 def _spatial_tap(rho: float) -> float:
@@ -278,6 +285,16 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
             proc = np.vstack([proc, fp[1:]])
             r["fields"] = np.concatenate([r["fields"], ff]) if len(r["fields"]) else ff
         r.update(proc=proc, proc_mean=proc.mean(1), proc_cov=np.atleast_2d(np.cov(proc)))
+    if cfg.dark_frac[1] > 0:  # drawn last, see above
+        frac = rng.uniform(*cfg.dark_frac)
+        sup = tp.tf.support & tp.tf.valid
+        dark = np.ones((tp.R, tp.C), np.float32)
+        if sup.any() and frac > 0:
+            fld = _field(tp.R, tp.C, rng.uniform(*cfg.dark_px), rng)
+            thr = np.quantile(fld[sup], 1 - frac)
+            pick = sup & (fld >= thr)
+            dark[pick] = rng.uniform(*cfg.dark_factor, int(pick.sum())).astype(np.float32)
+        r["dark"] = dark
     return r
 
 
@@ -310,6 +327,9 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     rows, cols = np.arange(rs, re), np.arange(cs, ce)
     valid = tf.valid[rs:re, cs:ce]
     B = np.nan_to_num(tp.B[rs:re, cs:ce])
+    dk = r["dark"][rs:re, cs:ce] if "dark" in r else None
+    if dk is not None:  # dark sources: less baseline, the same activity
+        B = B * dk
     # drift factor on the window
     f = r["fields"][:, rs:re, cs:ce]
     p = r["proc"][:, ts:te]
@@ -317,6 +337,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     truth = B[None] * d
     # the excess's slow part: baseline fluctuations with the template's per-pixel variance
     sa = np.sqrt(tp.slow[rs:re, cs:ce] * r.get("excess", 0.0))
+    if dk is not None:
+        sa = sa * dk  # the slow excess scales with the baseline it rides on
     if "slow_fields" in r:
         sg = r["slow_fields"][:, rs:re, cs:ce] * sa[None]
         truth = truth + np.tensordot(r["slow_proc"][:, ts:te].T, sg, 1)
