@@ -128,18 +128,25 @@ def _is_oom(e: BaseException) -> bool:
 
 @torch.no_grad()
 def tile_frames(model: SlabBlindSpotNet, wcfg: WindowConfig, T: int, device: torch.device, amp_dtype=None,
-                out_px: int | None = None, fraction: float = 0.8) -> int:
+                out_px: int | None = None, fraction: float = 0.85, margin: float = 1.1) -> int:
     """Output frames per tile for ``predict_trial``: the whole trial if one
     tile of it fits in `fraction` of the free GPU memory, else the trial split
-    into equal tiles that do (peak memory measured on two small tiles and
-    extrapolated linearly). 512 on the CPU."""
+    into equal tiles that do. Peak memory is measured on tiles of 64 and 320
+    output frames and extrapolated linearly with a `margin` on the slope (the
+    peak grows faster for long tiles, when the layers that run on the output
+    frames only dominate). Also caps this process at 95% of the GPU's memory,
+    so that running out raises the allocator's error, which predict_trial
+    handles by splitting the tile, rather than failing in the driver (after
+    which the allocator can be left broken). 512 on the CPU."""
     if device.type != "cuda":
         return min(T, 512)
+    torch.cuda.set_per_process_memory_fraction(0.95)  # the current device
     tR, sR = wcfg.t_reach, wcfg.s_reach
     op = out_px or wcfg.out_px
     ns = op + 2 * sR
+    sizes = (64, 320)
     peaks = []
-    for nf in (32, 160):
+    for nf in sizes:
         x = torch.rand(1, model.cfg.n_inputs, nf + 2 * tR, ns, ns, device=device) + 0.5
         x[:, 1] = 1
         one = torch.ones(1, device=device)
@@ -150,8 +157,8 @@ def tile_frames(model: SlabBlindSpotNet, wcfg: WindowConfig, T: int, device: tor
             model(x, one, 10 * one, (slice(tR, tR + nf), slice(sR, sR + op), slice(sR, sR + op)))
         peaks.append(torch.cuda.max_memory_allocated() - base)
         del x
-    slope = max((peaks[1] - peaks[0]) / 128, 1.0)
-    fixed = max(peaks[0] - slope * (32 + 2 * tR), 0.0)
+    slope = margin * max((peaks[1] - peaks[0]) / (sizes[1] - sizes[0]), 1.0)
+    fixed = max(peaks[1] - slope * (sizes[1] + 2 * tR), 0.0)
     torch.cuda.empty_cache()
     free = torch.cuda.mem_get_info()[0]  # the current device (torch 2.4 wants an index, not "cuda")
     most = int((fraction * free - fixed) / slope) - 2 * tR
@@ -227,17 +234,19 @@ def predict_trial(model: SlabBlindSpotNet, wcfg: WindowConfig, tr: TrialFile, st
             except (torch.OutOfMemoryError, RuntimeError) as e:
                 if not _is_oom(e):
                     raise
-                x = mu = var = None
-                torch.cuda.empty_cache()
-                if len(chunk) > 1:
-                    h = len(chunk) // 2
-                    (m1, v1), (m2, v2) = infer(chunk[:h]), infer(chunk[h:])
-                    return np.concatenate([m1, m2]), np.concatenate([v1, v2])
-                if nf < 64:
-                    raise SystemExit("out of GPU memory with a 32-frame tile")
-                (t0, _, c0), h = chunk[0], nf // 2
-                (m1, v1), (m2, v2) = infer([(t0, h, c0)]), infer([(t0 + h, nf - h, c0)])
-                return np.concatenate([m1, m2], 1), np.concatenate([v1, v2], 1)
+            # retry outside the except block: the exception's traceback holds the
+            # failed pass's tensors, so memory is only freed once it is gone
+            x = mu = var = None
+            torch.cuda.empty_cache()
+            if len(chunk) > 1:
+                h = len(chunk) // 2
+                (m1, v1), (m2, v2) = infer(chunk[:h]), infer(chunk[h:])
+                return np.concatenate([m1, m2]), np.concatenate([v1, v2])
+            if nf < 64:
+                raise SystemExit("out of GPU memory with a 32-frame tile")
+            (t0, _, c0), h = chunk[0], nf // 2
+            (m1, v1), (m2, v2) = infer([(t0, h, c0)]), infer([(t0 + h, nf - h, c0)])
+            return np.concatenate([m1, m2], 1), np.concatenate([v1, v2], 1)
 
         tiles = [(t0, out_frames, c0) for c0 in cs for t0 in range(0, T, out_frames)]
         for i in range(0, len(tiles), batch):
