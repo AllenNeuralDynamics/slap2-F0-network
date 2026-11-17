@@ -540,6 +540,22 @@ Four runs, all with v5b's fine-tuning recipe after the simulation stage (half re
 
 v6c gets the same extra training as v6r with the old input, so v6r − v6c is the effect of the fix; v6f is the faster architecture and v6d the wider correction (both below).
 
+**Results (v6r, v6c, v6f).** 8-frame MSE against the mean image on real support pixels (four sensor sessions, evaluated as before), background, the GFP session's bias, and simulations with fast brightness changes:
+
+| checkpoint | real support, mean (780125, 803121, 878030, 885233) | real background | GFP bias | fast sims: support / background / activity-free labeled |
+|---|---|---|---|---|
+| v6 fine-tuned (before) | −7.8% (−9.9, −8.9, −5.3, −7.2) | −0.2 to +0.4% | +0.033 | −57 to −69% / −26 to −32% / −21 to −71% |
+| **v6r pretrained** | **−7.9%** (−9.8, −9.2, −5.0, −7.5) | +0.1 to +0.7% | +0.020 | −63 to −70% / −32 to −41% / −30 to −78% |
+| v6r fine-tuned | −7.2% (−10.1, −5.6, −5.5, −7.7) | −0.2 to +0.3% | +0.080 | −60 to −63% / −32 to −37% / +15 to −33% |
+| v6c pretrained (old input) | −7.6% (−10.0, −8.1, −4.9, −7.5) | +0.1 to +0.8% | +0.029 | −64 to −68% / −31 to −42% / −26 to −77% |
+| v6c fine-tuned (old input) | −7.8% (−10.1, −7.7, −5.5, −7.8) | −0.2 to +0.4% | +0.091 | −61 to −69% / −31 to −37% / −11 to −55% |
+| v6f (reach 14) | −7.3% (−9.4, −7.6, −4.8, −7.5) | +0.1 to +0.9% | −0.003 | −61 to −69% / −27 to −41% / −24 to −77% |
+
+- **The fix is worth little on its own:** v6r against v6c, same training, −7.9% against −7.6% pretrained. The variance-ratio input already carried most of what the variance factor says (pixels with more variance than photon noise).
+- **More simulation training is what helped:** 3000 more steps took v6 pretrained from −7.0% to −7.9% on real support with no real data, as good as v6 fine-tuned, and better on every simulated class.
+- **Fine-tuning then adds nothing reliable.** Its validation is flat after 300 steps (real support −6.9 to −7.1% on the 48 validation windows), and the selection metric moves with noise in the activity-free labeled-pixel bias, so the chosen step is arbitrary. In v6r it picked a step that is worse on 803121 (−5.6%) and on activity-free labeled pixels (bias up to +0.7 in simulations; GFP +0.08). **v6r pretrained is the retrained v6** (`f0v6r` results, `train/best.pt`).
+- **Reach 14 (v6f) costs about half a point** (−7.3% against −7.9%) for 1.7× faster inference (780125 trials: 107 and 98 s against 185 and 168 s on the RTX 4060 Ti), and has the smallest GFP bias. Its fine-tuning never beat step 0.
+
 ## Inference time against GIAnT main (2026-11-16)
 
 **GIAnT main** (4cef08c) SILo on 780125, 15 trials × 2 paths, on a 16-core Threadripper PRO 5955WX with 12 workers: **2571 s** (43 min) in all. Per path: localization 410 and 296 s (loading each trial's 80 Hz movie and `localizeSources_vIM`, 12 trials at a time), alignment and source selection 19 and 27 s, extraction 748 and 993 s.
