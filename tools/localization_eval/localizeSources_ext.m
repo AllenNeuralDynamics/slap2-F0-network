@@ -1,11 +1,13 @@
-function [skIm, P, summaryEroded] = localizeSources_ext(IM, vIM, params, IMbExt)
+function [skIm, P, summaryEroded] = localizeSources_ext(IM, vIM, params, IMbExt, combine)
 %LOCALIZESOURCES_EXT localizeSources_vIM of GIAnT main (4cef08c), with an optional external baseline.
 %   IMbExt (X x Y x Time, the units of IM): replaces the moving median of the
 %   smoothed movie (IMb) wherever it is used: the high-pass (IM - IMb) and the
 %   variance model's brightness (Vk * IMb * vIM + Vb, Vk and Vb fitted as in
 %   main). Empty: main's behavior exactly. Also returns the summary image that
 %   getActImPeaks thresholds, so other peakth values can be tried.
+%   combine = 'min': the smaller of IMbExt and the moving median (a diagnostic).
 doPlot = false;
+if nargin < 5, combine = ''; end
 %inputs:
 %IM:        3D recording, X x Y x Time
 %aData:     alignment metadata
@@ -53,7 +55,10 @@ vIM = 1./smoothdata(1./vIM, 3, 'movmean', ceil(denoiseWindow/2), 'omitnan');
 IMs = IMs.*vIM;
 
 %baseline estimate
-if nargin > 3 && ~isempty(IMbExt)
+if nargin > 3 && ~isempty(IMbExt) && strcmp(combine, 'min')
+    IMb = min(smoothdata(IMs, 3, 'movmedian', baselineWindow, 'omitnan'), single(IMbExt));
+    IMb(nans) = nan;
+elseif nargin > 3 && ~isempty(IMbExt)
     IMb = single(IMbExt);
     IMb(nans) = nan;
 else

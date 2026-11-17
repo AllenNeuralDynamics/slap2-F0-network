@@ -7,7 +7,8 @@ function R = locnet_run(trialFn, predFn, names, outFn, giantDir, peakths)
 %             the valid pixels), a cell array of them (the first file holding
 %             a baseline is used), or '' when only movmedian/truth are wanted
 %   names     cell array: 'movmedian' (GIAnT's 4 s moving median), 'truth'
-%             (simulations), or names of baselines in predFn
+%             (simulations), names of baselines in predFn, or 'min:<name>'
+%             (the smaller of that baseline and the moving median)
 %   outFn     .mat file for the results
 %   giantDir  GIAnT-MATLAB checkout whose SiLo parameters and getActImPeaks
 %             are used (localization itself is localizeSources_ext, a copy of
@@ -66,7 +67,10 @@ end
 for k = 1:numel(names)
     name = names{k};
     IMb = [];
-    switch name
+    combine = '';
+    src = name;
+    if startsWith(name, 'min:'), combine = 'min'; src = name(5:end); end
+    switch src
         case 'movmedian'
         case 'truth'
             IMb = padIm(permute(h5read(trialFn, '/truth/baseline'), [2 1 3]));
@@ -75,23 +79,23 @@ for k = 1:numel(names)
             fn = '';
             for j = 1:numel(fns)
                 try
-                    h5info(fns{j}, ['/baseline/' name]);
+                    h5info(fns{j}, ['/baseline/' src]);
                     fn = fns{j};
                     break
                 catch
                 end
             end
-            if isempty(fn), error('locnet_run:noBaseline', 'no baseline/%s in the prediction files', name); end
+            if isempty(fn), error('locnet_run:noBaseline', 'no baseline/%s in the prediction files', src); end
             rows = double(h5read(fn, '/rows')) + 1;
             cols = double(h5read(fn, '/cols')) + 1;
-            b = h5read(fn, ['/baseline/' name]);  % (T, N) in HDF5 -> N x T
+            b = h5read(fn, ['/baseline/' src]);  % (T, N) in HDF5 -> N x T
             if isa(b, 'uint16') || ~isfloat(b), b = single(b); end
             IMb = nan(nr * nc, T, 'single');
             IMb(sub2ind([nr nc], rows, cols), :) = single(b);
             IMb = padIm(reshape(IMb, nr, nc, T));
     end
     t1 = tic;
-    [~, P, summary] = localizeSources_ext(IM, vIM, params, IMb);
+    [~, P, summary] = localizeSources_ext(IM, vIM, params, IMb, combine);
     P.row = P.row - pad; P.col = P.col - pad;  % back to the trial's coordinates
     summary = summary(pad + 1:end - pad, pad + 1:end - pad);
     P = rmfield(P, 'peakIM');
