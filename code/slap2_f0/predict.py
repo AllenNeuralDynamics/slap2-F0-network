@@ -153,7 +153,7 @@ def tile_frames(model: SlabBlindSpotNet, wcfg: WindowConfig, T: int, device: tor
     slope = max((peaks[1] - peaks[0]) / 128, 1.0)
     fixed = max(peaks[0] - slope * (32 + 2 * tR), 0.0)
     torch.cuda.empty_cache()
-    free = torch.cuda.mem_get_info(device)[0]
+    free = torch.cuda.mem_get_info()[0]  # the current device (torch 2.4 wants an index, not "cuda")
     most = int((fraction * free - fixed) / slope) - 2 * tR
     if most >= T:
         return T
@@ -252,6 +252,21 @@ def predict_trial(model: SlabBlindSpotNet, wcfg: WindowConfig, tr: TrialFile, st
     return mu_out, var_out
 
 
+def movie_gain(st: dict, valid: np.ndarray) -> float:
+    """The trial's variance/mean ratio from the movie alone: the median over
+    the dimmer half of the valid pixels. The stats' gain is measured on movie -
+    activity at pixels without fitted sources, which exist only after GIAnT's
+    extraction; on the five sessions' viewer trials this is within 3% of it
+    (events inflate the variance mostly on brighter pixels)."""
+    m, v = st["mean_movie"], st["var_movie"]
+    ok = valid & np.isfinite(m) & np.isfinite(v) & (m > 0)
+    if not ok.any():
+        return float(st["gain"])
+    m, v = m[ok], v[ok]
+    dim = m <= np.median(m)
+    return float(np.median(v[dim] / m[dim]))
+
+
 def prepare(model: SlabBlindSpotNet, device: torch.device, precision: str = "auto"):
     """Cast the model for inference and return the autocast dtype: "fp16"
     (the default on GPU) and "bf16" run the whole model in that precision
@@ -330,6 +345,8 @@ def run(args: argparse.Namespace) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with TrialFile(fn) as tr, h5py.File(dest, "a") as f:
             st = stats[str(fn)]
+            if args.gain == "movie":
+                st = dict(st, gain=movie_gain(st, tr.valid))
             rows, cols = valid_index(tr)
             f.attrs.update({"slap2_f0_predictions": FORMAT_VERSION, "session": session,
                             "path": fn.parent.name, "trial": fn.stem,
@@ -390,4 +407,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--precision", default="auto", choices=["auto", "fp16", "bf16", "amp", "fp32"],
                    help="auto = fp16 on GPU (the whole model cast), fp32 on CPU; amp = bf16 autocast (before 2026-11-17)")
     p.add_argument("--no_amp", action="store_true", help="same as --precision fp32")
+    p.add_argument("--gain", default="stats", choices=["stats", "movie"],
+                   help="the trial's variance/mean ratio: from movie - activity (stats, as in training) or from the movie "
+                        "alone (movie: for trials without GIAnT activity, e.g. before localization)")
     p.add_argument("--compile", action="store_true", help="torch.compile the model (Linux; each new tile shape compiles)")

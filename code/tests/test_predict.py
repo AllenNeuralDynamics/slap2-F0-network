@@ -235,3 +235,14 @@ def test_out_of_memory_splits_tiles_in_time(tmp_path):
         mu, _ = predict_trial(model, wcfg, tr, st, cpu, out_frames=160, out_px=8, batch=2)
     assert any(c[0] == 2 for c in calls) and max(done) <= 60 + 2 * wcfg.t_reach
     assert np.allclose(mu, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_movie_gain_ignores_bright_pixels_with_events():
+    from slap2_f0.predict import movie_gain
+    rng = np.random.default_rng(0)
+    m = rng.uniform(1, 20, (30, 30))
+    v = 8.0 * m
+    v[m > 15] *= 3  # events on bright pixels
+    valid = np.ones((30, 30), bool)
+    valid[:3] = False
+    assert abs(movie_gain({"mean_movie": m, "var_movie": v, "gain": 1.0}, valid) - 8.0) < 1e-9
