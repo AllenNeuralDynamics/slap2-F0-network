@@ -1,4 +1,4 @@
-"""Command line: ``slap2-f0 inspect|train|evaluate|predict|view|probe|ceiling|simcheck ...``."""
+"""Command line: ``slap2-f0 inspect|train|evaluate|predict|predict-registered|view|probe|ceiling|simcheck ...``."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import numpy as np
 
 from . import ceiling as ceiling_mod
 from . import predict as predict_mod
+from . import registered as registered_mod
 from . import simulate as simulate_mod
 from . import train as train_mod
 from . import view as view_mod
@@ -43,6 +44,10 @@ def main(argv=None) -> None:
     pr = sub.add_parser("predict", help="full-trial baselines of saved checkpoints and SiLo, for viewing")
     predict_mod.add_arguments(pr)
     pr.set_defaults(func=predict_mod.run)
+    pg = sub.add_parser("predict-registered",
+                        help="network baselines for GIAnT's registered 80 Hz movies (*_BASELINE-80Hz.h5 for SiLo)")
+    registered_mod.add_arguments(pg)
+    pg.set_defaults(func=registered_mod.run)
     pv = sub.add_parser("view", help="browser viewer of predict output: data, baselines and residuals over time")
     pv.add_argument("root", help="folder with predict output (any depth)")
     pv.add_argument("--port", type=int, default=8765)
