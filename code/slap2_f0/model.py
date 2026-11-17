@@ -155,6 +155,14 @@ class ModelConfig:
         return 2 * len(self.pool_scales) if self.box else 0
 
 
+def _residual(x: torch.Tensor, alpha: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+    """x + alpha * h; in place in inference when the dtypes agree (a model
+    cast to half precision), which saves a full-size temporary per block."""
+    if not torch.is_grad_enabled() and x.dtype == h.dtype == alpha.dtype:
+        return x.add_(h.mul_(alpha))
+    return x + alpha * h
+
+
 class CausalBlock(nn.Module):
     """Per-frame spatial conv, then a causal dilated temporal conv, residual.
 
@@ -177,8 +185,11 @@ class CausalBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T, H, W)
         h = F.gelu(self.spatial(x))
-        h = F.pad(h, (0, 0, 0, 0, self.t_pad, 0))  # left (past) padding only
-        return x + self.alpha * F.gelu(self.temporal(h))
+        # past-only padding: padding both sides and keeping the first T outputs
+        # is the same and saves a padded copy of h
+        h = F.conv3d(h, self.temporal.weight, self.temporal.bias, padding=(self.t_pad, 0, 0),
+                     dilation=self.temporal.dilation)[:, :, : x.shape[2]]
+        return _residual(x, self.alpha, F.gelu(h))
 
 
 class CausalBranch(nn.Module):
@@ -239,9 +250,13 @@ class HalfPlaneBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T, H, W)
         d = self.s_dil
-        h = F.gelu(self.spatial(F.pad(x, (d, d, d, 0))))  # cols d | d, rows d on top only
-        h = F.pad(h, (0, 0, 0, 0, self.t_dil, self.t_dil))
-        return x + self.alpha * F.gelu(self.temporal(h))
+        # cols d | d, rows d on top only: padding rows on both sides and keeping
+        # the first H outputs is the same and saves a padded copy of x
+        h = F.conv3d(x, self.spatial.weight, self.spatial.bias, padding=(0, d, d),
+                     dilation=self.spatial.dilation)[:, :, :, : x.shape[3]]
+        h = F.conv3d(F.gelu(h), self.temporal.weight, self.temporal.bias, padding=(self.t_dil, 0, 0),
+                     dilation=self.temporal.dilation)
+        return _residual(x, self.alpha, F.gelu(h))
 
 
 class HalfPlaneBranch(nn.Module):
@@ -383,7 +398,8 @@ class SlabBlindSpotNet(nn.Module):
         line up (row pairs 2i, 2i + 1 in the window's own coordinates)."""
         H, W = x.shape[3:]
         xp = F.pad(x, (0, W % 2, 0, H % 2))
-        if xp.shape[3] == xp.shape[4]:  # square: one batched pass over the rotations
+        if xp.shape[3] == xp.shape[4] and torch.is_grad_enabled():  # square: one batched pass over the rotations
+            # (in inference one rotation at a time, below: a quarter of the memory)
             h = self.hp(torch.cat([torch.rot90(xp, k, (3, 4)) for k in range(4)], 0))
             outs = [torch.rot90(hk, -k, (3, 4)) for k, hk in enumerate(h.chunk(4, 0))]
         else:
@@ -403,8 +419,15 @@ class SlabBlindSpotNet(nn.Module):
         s = torch.ones(B, device=x.device) if scale is None else scale.to(x.device).float()
         g = torch.full((B,), 10.0, device=x.device) if gain is None else gain.to(x.device).float()
         T = x.shape[2]
+        sel = None if region is None else (slice(None), slice(None)) + tuple(region)
         hp = self.past(x)
-        hf = self.future(x.flip(2)).flip(2)
+        if sel is not None:  # crop each branch as soon as it is done (memory)
+            hp = hp[sel]
+        hf = self.future(x.flip(2))
+        if sel is not None:  # crop in flipped time, then flip only the cropped part
+            ta, tb, _ = region[0].indices(T)
+            hf = hf[(slice(None), slice(None), slice(T - tb, T - ta)) + tuple(region[1:])]
+        hf = hf.flip(2)
         wm, wv, n = blind_window_stats(x[:, 0], x[:, 1], self.cfg.gap, self.cfg.window_reach)
         extra = []
         if self.hp is not None:  # box blind spot: same-frame context outside the box
@@ -419,8 +442,7 @@ class SlabBlindSpotNet(nn.Module):
                 hh, pf = hh[sp], pf[sp]
             extra = [hh, pf.to(hh.dtype)]
         if region is not None:
-            sel = (slice(None), slice(None)) + tuple(region)
-            hp, hf, x = hp[sel], hf[sel], x[sel]
+            x = x[sel]
             wm, wv, n = (a[(slice(None),) + tuple(region)] for a in (wm, wv, n))
         gs = (g / s).view(-1, 1, 1, 1)  # gain in scale units: var = gs * mu
         feats = self._features(x.float(), wm, wv, n, gs).to(hp.dtype)

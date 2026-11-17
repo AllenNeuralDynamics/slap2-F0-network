@@ -209,3 +209,29 @@ def test_predict_and_view(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_out_of_memory_splits_tiles_in_time(tmp_path):
+    """A tile that runs out of GPU memory is split in two in time (a batch
+    first into single tiles); the output is the same."""
+    fn = tmp_path / "s" / "Path1" / "trial_000.h5"
+    fn.parent.mkdir(parents=True)
+    _trial(fn, 5)
+    model, wcfg = _model(box=True)
+    st = load_stats([fn])[str(fn)]
+    cpu = torch.device("cpu")
+    with TrialFile(fn) as tr:
+        ref, _ = predict_trial(model, wcfg, tr, st, cpu, out_frames=160, out_px=8, batch=2)
+        orig, calls, done = model.forward, [], []
+
+        def small_only(x, *a, **k):
+            calls.append(tuple(x.shape[:3]))
+            if x.shape[0] > 1 or x.shape[2] > 60 + 2 * wcfg.t_reach:
+                raise torch.OutOfMemoryError("CUDA out of memory (test)")
+            done.append(x.shape[2])
+            return orig(x, *a, **k)
+
+        model.forward = small_only
+        mu, _ = predict_trial(model, wcfg, tr, st, cpu, out_frames=160, out_px=8, batch=2)
+    assert any(c[0] == 2 for c in calls) and max(done) <= 60 + 2 * wcfg.t_reach
+    assert np.allclose(mu, ref, rtol=1e-5, atol=1e-5)
