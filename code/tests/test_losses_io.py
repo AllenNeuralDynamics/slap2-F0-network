@@ -65,6 +65,28 @@ def test_read_pads_outside_trial(tmp_path):
         assert p.activity[0].sum() == 0 and p.activity[2, 1:, :2].sum() == 6
 
 
+def test_varfac_relative_to_trial_median(tmp_path):
+    """TrialFile.varfac is relative to its median over the valid pixels, and a
+    trial saved from it (a simulation) reads back the same."""
+    fn = tmp_path / "trial_001.h5"
+    _write_trial(fn)
+    with h5py.File(fn, "a") as f:
+        vf = np.full((6, 7), 0.25, np.float32)
+        vf[1, :] = 0.5
+        vf[0, 0] = 0.0  # the unimaged pixel
+        del f["varfac"]
+        f["varfac"] = vf
+    with TrialFile(fn) as tr:
+        assert tr.varfac_ref == 0.25 and tr.varfac[1, 3] == 2.0 and tr.varfac[3, 3] == 1.0
+        p = tr.read(0, 4, 0, 6, 0, 7)
+        assert np.allclose(p.varfac, tr.varfac)
+        again = tr.varfac.copy()
+    with h5py.File(fn, "a") as f:
+        f["varfac"][...] = again
+    with TrialFile(fn) as tr:
+        assert tr.varfac_ref == 1.0 and np.allclose(tr.varfac, again)
+
+
 def test_silo_baseline_matches_numpy():
     """Moving mean (MATLAB's even-window convention: k/2 before, k/2-1 after)
     then a NaN-aware moving median, on the loss region."""

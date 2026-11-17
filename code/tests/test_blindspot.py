@@ -233,3 +233,54 @@ def test_box_model_warm_starts_from_slab():
     x[:, 2] = x[:, 2].abs() + 1
     a, b = slab(x), box(x)
     assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+
+def test_varfac_input_does_not_depend_on_the_window():
+    """The "trial" variance-factor input is log(factor) at each pixel, whatever
+    else is in the window; the old "window" input divided by the window's
+    median, unimaged pixels (factor 0) included, and saturated at +3 once more
+    than half of the window was unimaged."""
+    from slap2_f0.model import config_from_dict
+    from dataclasses import asdict
+    movie = torch.ones(1, 3, 4, 4)
+    vf = torch.full((1, 4, 4), 1.5)
+    vf_sparse = vf.clone()
+    vf_sparse[0, :3] = 0  # 12 of 16 pixels unimaged
+    one, s = torch.ones(1, 4, 4), torch.tensor([1.0])
+    a = make_inputs(movie, one, vf, s)[0, 3, 0]
+    b = make_inputs(movie, one, vf_sparse, s)[0, 3, 0]
+    assert torch.allclose(a[3], b[3]) and torch.allclose(a[3], torch.log(torch.tensor(1.5)))
+    assert (b[:3] == 0).all()
+    w = make_inputs(movie, one, vf_sparse, s, varfac_norm="window")[0, 3, 0]
+    assert torch.allclose(w[3], torch.tensor(3.0))
+    old = asdict(ModelConfig())
+    del old["varfac_norm"]
+    assert config_from_dict(old).varfac_norm == "window" and ModelConfig().varfac_norm == "trial"
+
+
+def test_adapted_varfac_weights_keep_the_output():
+    """A "window" checkpoint folded into a "trial" model (train --init) gives
+    the same output on a window where the old input was saturated (more than
+    half unimaged, no discarded frames), box and slab alike."""
+    from slap2_f0.train import adapt_varfac_input, load_compatible
+    torch.manual_seed(0)
+    kw = dict(gap=2, width=4, temporal_dilations=[1, 2], spatial_dilations=[1, 1], full_res_blocks=1,
+              window_reach=6, checkpoint=False, box_radius=1, hp_width=4, hp_temporal_dilations=[1, 1],
+              hp_spatial_dilations=[1, 1], hp_full_res_blocks=1, pool_scales=[2])
+    old = SlabBlindSpotNet(ModelConfig(**kw, varfac_norm="window")).eval()
+    _activate_box(old)
+    new = SlabBlindSpotNet(ModelConfig(**kw, varfac_norm="trial")).eval()
+    load_compatible(new, adapt_varfac_input(old.state_dict(), 4))
+    T, H, W = 24, 12, 12
+    movie = torch.full((1, T, H, W), float("nan"))
+    movie[:, :, 3:9, 4:10] = 5 + torch.rand(1, T, 6, 6)  # 36 of 144 pixels imaged
+    mean = torch.where(torch.isfinite(movie[0, 0]), movie.nanmean(1)[0], torch.tensor(float("nan")))[None]
+    vf = torch.where(torch.isfinite(mean), 0.8 + 0.4 * torch.rand(1, H, W), torch.zeros(1, H, W))
+    s = torch.tensor([5.0])
+    region = (slice(8, 16), slice(3, 9), slice(4, 10))
+    with torch.no_grad():
+        a = old(make_inputs(movie, mean, vf, s, varfac_norm="window"), s, region=region)[0]
+        b = new(make_inputs(movie, mean, vf, s, varfac_norm="trial"), s, region=region)[0]
+        c = old(make_inputs(movie, mean, vf, s, varfac_norm="trial"), s, region=region)[0]
+    assert torch.allclose(a, b, rtol=1e-4, atol=1e-5)
+    assert not torch.allclose(a, c, rtol=1e-3, atol=1e-4)  # unfolded, the new input changes the output

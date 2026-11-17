@@ -55,7 +55,7 @@ from torch.utils.data import DataLoader
 from .data import WindowConfig, WindowDataset, loss_region
 from .io import TrialFile, list_trials
 from .losses import gaussian_nll, student_t_nll
-from .model import ModelConfig, SlabBlindSpotNet, blind_window_stats, make_inputs
+from .model import ModelConfig, SlabBlindSpotNet, blind_window_stats, config_from_dict, make_inputs
 from .simulate import SimConfig, excess_summary
 from .stats import load_stats
 
@@ -114,7 +114,8 @@ def _losses(args, b, mu, var, region):
 def _forward(model, b, device, amp_dtype, region, aux=False):
     """Model outputs on the loss region only (mu, var: (B, frames, rows, cols))."""
     b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
-    x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"], b["var_map"], b["gain"])
+    x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"], b["var_map"], b["gain"],
+                    varfac_norm=model.cfg.varfac_norm)
     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
         out = model(x, b["scale"], b["gain"], region, aux=aux)
     if aux:
@@ -280,6 +281,7 @@ def _model_config(args) -> ModelConfig:
     if args.spatial_dilations:
         mcfg.spatial_dilations = [int(d) for d in args.spatial_dilations.split(",")]
     mcfg.box_radius, mcfg.hp_width, mcfg.hp_full_res_blocks = args.box_radius, args.hp_width, args.hp_full_res_blocks
+    mcfg.varfac_norm = args.varfac_norm
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -287,6 +289,33 @@ def _model_config(args) -> ModelConfig:
     if args.pool_scales:
         mcfg.pool_scales = [int(d) for d in args.pool_scales.split(",")]
     return mcfg
+
+
+def adapt_varfac_input(state: dict, width: int) -> dict:
+    """Fold a "window" checkpoint's variance-factor weights (``ModelConfig.
+    varfac_norm``) so that a "trial" model starts out computing what it did.
+
+    In most training windows the old input was saturated: +3 at imaged pixels
+    and -3 at unimaged ones. The layers that take it are pointwise (the
+    branches' input convolutions and the first fusion layer), so its weight w
+    moves to the validity flag (6 w, with -3 w in the bias) in the branches,
+    and to the bias (3 w; outputs are at imaged pixels) in the fusion layer,
+    and the variance-factor weight starts at 0. Exact except on discarded
+    frames and in windows that were not saturated."""
+    state = dict(state)
+    for k in [k for k in state if k.endswith(".inp.weight")]:
+        wt, b = state[k].clone(), state[k[:-6] + "bias"].clone()
+        w3 = wt[:, 3].clone()
+        wt[:, 1] += 6 * w3
+        b -= 3 * w3.flatten(1).sum(1)
+        wt[:, 3] = 0
+        state[k], state[k[:-6] + "bias"] = wt, b
+    col = 2 * width + 5  # [past, future, features]: the variance factor is the last feature
+    wt, b = state["fuse.0.weight"].clone(), state["fuse.0.bias"].clone()
+    b += 3 * wt[:, col].flatten(1).sum(1)
+    wt[:, col] = 0
+    state["fuse.0.weight"], state["fuse.0.bias"] = wt, b
+    return state
 
 
 def load_compatible(model: torch.nn.Module, state: dict) -> str:
@@ -387,7 +416,11 @@ def train(args) -> None:
     model = SlabBlindSpotNet(mcfg).to(device)
     if args.init:
         ck = torch.load(args.init, map_location=device, weights_only=False)
-        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, ck['model'])}")
+        state = ck["model"]
+        if config_from_dict(ck["config"]).varfac_norm == "window" and mcfg.varfac_norm == "trial":
+            state = adapt_varfac_input(state, mcfg.width)
+            print("variance-factor weights folded from the window-median input to the trial-median input")
+        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
@@ -516,7 +549,7 @@ def evaluate_checkpoints(args) -> None:
     for spec in args.ckpt:
         name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
         ck = torch.load(path, map_location=device, weights_only=False)
-        model = SlabBlindSpotNet(ModelConfig(**ck["config"])).to(device)
+        model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device)
         model.load_state_dict(ck["model"])
         wcfg = WindowConfig(**ck["window"])
         region = loss_region(wcfg)
@@ -695,6 +728,8 @@ def add_arguments(p) -> None:
     p.add_argument("--hp_full_res_blocks", type=int, default=2)
     p.add_argument("--pool_scales", default="", help="half-widths of the pooled same-frame features, 0 = whole window; "
                                                      "default 8,16,32,0")
+    p.add_argument("--varfac_norm", default="trial", choices=["trial", "window"],
+                   help="variance-factor input relative to the trial's median (default) or the window's (v1-v6)")
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
     p.add_argument("--w_unfitted", type=float, default=0.0, help="loss weight of labeled pixels outside every footprint")

@@ -42,7 +42,9 @@ def _trial(fn, seed, T=160, R=22, C=26, sources=True):
         f["movie"] = movie
         f["activity"] = act
         f["mean_image"] = movie.mean(1)
-        f["varfac"] = np.ones((R, C), np.float32)
+        vf = (0.2 + 0.4 * rng.random((R, C))).astype(np.float32)
+        vf[:5, :7] = 0  # no factor where nothing was imaged
+        f["varfac"] = vf
         f["mask/valid"] = valid
         f["mask/labeled"] = sup
         f["mask/footprint_support"] = sup
@@ -50,10 +52,10 @@ def _trial(fn, seed, T=160, R=22, C=26, sources=True):
         f.attrs["nSources"] = int(sources)
 
 
-def _model(box: bool) -> tuple[SlabBlindSpotNet, WindowConfig]:
+def _model(box: bool, varfac_norm: str = "trial") -> tuple[SlabBlindSpotNet, WindowConfig]:
     torch.manual_seed(3)
     cfg = ModelConfig(gap=2, width=4, temporal_dilations=[1, 2], spatial_dilations=[1, 1], full_res_blocks=1,
-                      window_reach=6, checkpoint=False)
+                      window_reach=6, checkpoint=False, varfac_norm=varfac_norm)
     if box:  # pooled scales within the reach: then a box model is tiling-independent too
         cfg = ModelConfig(**{**asdict(cfg), "box_radius": 1, "hp_width": 4, "hp_temporal_dilations": [1, 1],
                              "hp_spatial_dilations": [1, 1], "hp_full_res_blocks": 1, "pool_scales": [2]})
@@ -63,19 +65,22 @@ def _model(box: bool) -> tuple[SlabBlindSpotNet, WindowConfig]:
     return model, wcfg
 
 
-@pytest.mark.parametrize("box", [False, True])
-def test_tiling_does_not_change_the_output(tmp_path, box, monkeypatch):
+@pytest.mark.parametrize("box,varfac_norm", [(False, "trial"), (True, "trial"), (True, "window")])
+def test_tiling_does_not_change_the_output(tmp_path, box, varfac_norm, monkeypatch):
     """Small tiles (several per axis, partial at the edges) give the same
-    baseline and variance as one tile covering the whole trial. The variance
-    factor input is held at 1 here: make_inputs divides it by its median over
-    the window, unimaged pixels included, which depends on the window."""
+    baseline and variance as one tile covering the whole trial. With the old
+    "window" variance-factor input (checkpoints up to v6) the factor is held
+    at 1 here: make_inputs divides it by its median over the window, unimaged
+    pixels included, which depends on the window."""
     import slap2_f0.predict as pr
-    orig = pr.make_inputs
-    monkeypatch.setattr(pr, "make_inputs", lambda movie, mi, vf, *a: orig(movie, mi, torch.ones_like(vf), *a))
+    if varfac_norm == "window":
+        orig = pr.make_inputs
+        monkeypatch.setattr(pr, "make_inputs",
+                            lambda movie, mi, vf, *a, **k: orig(movie, mi, torch.ones_like(vf), *a, **k))
     fn = tmp_path / "s" / "Path1" / "trial_000.h5"
     fn.parent.mkdir(parents=True)
     _trial(fn, 1)
-    model, wcfg = _model(box)
+    model, wcfg = _model(box, varfac_norm)
     st = load_stats([fn])[str(fn)]
     cpu = torch.device("cpu")
     with TrialFile(fn) as tr:

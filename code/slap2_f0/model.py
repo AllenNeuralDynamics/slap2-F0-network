@@ -34,8 +34,9 @@ motion, defocus) can be followed. Two additions see them:
   images, exact and cheap; 0 = the whole window).
 
 Inputs to the branches (``make_inputs``): the movie, its validity flag and
-three whole-trial maps (mean image, SiLo's variance factor, and the trial's
-variance relative to photon noise, which marks pixels with events). The
+three whole-trial maps (mean image, SiLo's variance factor relative to its
+median over the trial's imaged pixels, and the trial's variance relative to
+photon noise, which marks pixels with events). The
 whole-trial maps contain every frame with weight 1/T, a negligible leak;
 being constant in time they cannot say when an event happened.
 
@@ -91,6 +92,12 @@ class ModelConfig:
     hp_spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 1, 2, 4])
     hp_full_res_blocks: int = 2  # the rest at half resolution
     pool_scales: list[int] = field(default_factory=lambda: [8, 16, 32, 0])
+    # variance-factor input: "trial" = log of the factor relative to its median
+    # over the trial's imaged pixels (``io.TrialFile``), the same in every
+    # window; "window" (checkpoints up to v6) = relative to the median over the
+    # window with unimaged pixels as 0, which is 0 whenever more than half of
+    # the window is unimaged, so the input saturated at +3 in most windows
+    varfac_norm: str = "trial"
     # memory: the first full_res_blocks blocks of each branch run at full
     # resolution, the rest at 1/downsample in space (per-frame down/upsampling,
     # so the blind spot in time is unaffected); checkpointing recomputes blocks
@@ -430,15 +437,26 @@ class SlabBlindSpotNet(nn.Module):
         return mu, var
 
 
+def config_from_dict(d: dict) -> ModelConfig:
+    """A checkpoint's ModelConfig; checkpoints saved before ``varfac_norm``
+    existed used the window median."""
+    d = dict(d)
+    d.setdefault("varfac_norm", "window")
+    return ModelConfig(**d)
+
+
 def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Tensor, scale: torch.Tensor,
-                var_map: torch.Tensor | None = None, gain: torch.Tensor | None = None) -> torch.Tensor:
+                var_map: torch.Tensor | None = None, gain: torch.Tensor | None = None,
+                varfac_norm: str = "trial") -> torch.Tensor:
     """Network inputs from a batch of windows.
 
     movie (B, T, H, W) in counts with NaN where there is no data; mean_image,
     varfac and var_map (B, H, W), the last a whole-trial map in counts^2;
     scale and gain (B,). Returns (B, 5, T, H, W): movie / scale with missing
     values as 0, a validity flag, mean image / scale, the log variance factor
-    relative to its median (clamped to +-3), and log(var_map / (gain * mean image)), about 0
+    (clamped to +-3; see ``ModelConfig.varfac_norm``: with "trial", varfac must
+    already be relative to the trial's median, as ``io.TrialFile`` gives it,
+    and pixels without a factor get 0), and log(var_map / (gain * mean image)), about 0
     where photon noise explains the variance and positive where events add to
     it. The mean image is a whole-trial average, so it contains each frame
     with weight 1/T; that leak through the blind spot is negligible for trials
@@ -449,8 +467,15 @@ def make_inputs(movie: torch.Tensor, mean_image: torch.Tensor, varfac: torch.Ten
     valid = torch.isfinite(movie)
     m = torch.where(valid, movie, torch.zeros_like(movie)) / s
     mi = torch.nan_to_num(mean_image / s.squeeze(1), nan=0.0)
-    vf = varfac / varfac.flatten(1).median(1).values.clamp_min(1e-6).view(-1, 1, 1)
-    vf = torch.nan_to_num(torch.log(vf.clamp_min(1e-3)), nan=0.0).clamp(-3, 3)
+    if varfac_norm == "window":
+        vf = varfac / varfac.flatten(1).median(1).values.clamp_min(1e-6).view(-1, 1, 1)
+        vf = torch.nan_to_num(torch.log(vf.clamp_min(1e-3)), nan=0.0).clamp(-3, 3)
+    elif varfac_norm == "trial":
+        ok = torch.isfinite(varfac) & (varfac > 0)
+        vf = torch.where(ok, torch.log(torch.where(ok, varfac, torch.ones_like(varfac))).clamp(-3, 3),
+                         torch.zeros_like(varfac))
+    else:
+        raise ValueError(f"varfac_norm {varfac_norm!r}")
     if var_map is None:
         vr = torch.zeros_like(mi)
     else:

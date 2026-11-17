@@ -15,9 +15,10 @@ model's pooled features with half-widths beyond its reach (32 and the whole
 window by default) see only the part inside the tile's window, as in
 training; with the training tile size every pixel sees the same window
 geometry as in training, and seams can show where those features change.
-The variance-factor input is relative to its median over the window, with
-unimaged pixels counted as 0 (``make_inputs``), which also depends on the
-window; the training tile size keeps that as in training too.
+Checkpoints up to v6 take the variance-factor input relative to its median
+over the window, with unimaged pixels counted as 0 (``ModelConfig.varfac_norm``
+"window"), which also depends on the window; the training tile size keeps that
+as in training too. Later checkpoints use the trial's median.
 
 SiLo's baseline (``silo``: an 8-frame moving mean, then a 321-frame moving
 median, not blind) is added unless ``--no_silo``.
@@ -54,7 +55,7 @@ import torch
 
 from .data import WindowConfig
 from .io import TrialFile, list_trials
-from .model import ModelConfig, SlabBlindSpotNet, make_inputs
+from .model import SlabBlindSpotNet, config_from_dict, make_inputs
 from .stats import load_stats
 from .train import silo_baseline
 
@@ -64,7 +65,7 @@ FRAME_RATE = 80.0  # exported trials are on an 80 Hz grid (see io.py)
 
 def load_checkpoint(path: str | Path, device: torch.device) -> tuple[SlabBlindSpotNet, WindowConfig, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
-    model = SlabBlindSpotNet(ModelConfig(**ck["config"])).to(device).eval()
+    model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device).eval()
     model.load_state_dict(ck["model"])
     return model, WindowConfig(**ck["window"]), ck
 
@@ -146,7 +147,8 @@ def predict_trial(model: SlabBlindSpotNet, wcfg: WindowConfig, tr: TrialFile, st
                 x = make_inputs(torch.from_numpy(movie).to(device),
                                 torch.from_numpy(np.stack([sp(mean_p, c0) for _, c0 in chunk])).to(device),
                                 torch.from_numpy(np.stack([sp(vf_p, c0) for _, c0 in chunk])).to(device), scale,
-                                torch.from_numpy(np.stack([sp(var_p, c0) for _, c0 in chunk])).to(device), gain)
+                                torch.from_numpy(np.stack([sp(var_p, c0) for _, c0 in chunk])).to(device), gain,
+                                varfac_norm=model.cfg.varfac_norm)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
                     mu, var = model(x, scale, gain, region)
                 return (mu.float() * s).cpu().numpy(), (var.float() * s * s).cpu().numpy()

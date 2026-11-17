@@ -8,7 +8,7 @@ grid, cropped to the box around the valid pixels. Arrays (C order):
     activity    (channel, frame, row, col)  GIAnT's fitted activity, same grid
                                             and timing; target = movie - activity
     mean_image  (channel, row, col)
-    varfac      (row, col) or (frame, row, col)
+    varfac      (row, col) or (frame, row, col); TrialFile.varfac is relative to its median over valid pixels
     mask/valid, mask/labeled, mask/footprint_support   (row, col) uint8
     frame/discard, frame/motion_row, ...               (frame,)
     sources/peak_row, sources/peak_col                 (source,)
@@ -53,7 +53,13 @@ class TrialFile:
         self.discard = self._f["frame/discard"][:].astype(bool)
         self.mean_image = self._f["mean_image"][channel].astype(np.float32)
         vf = self._f["varfac"]
-        self.varfac = (vf[:] if vf.ndim == 2 else np.nanmean(vf[:], axis=0)).astype(np.float32)
+        vf = (vf[:] if vf.ndim == 2 else np.nanmean(vf[:], axis=0)).astype(np.float32)
+        # relative to its median over the imaged pixels, so the network input
+        # does not depend on the window (idempotent: a simulated trial saved
+        # from this keeps it)
+        ok = self.valid & np.isfinite(vf) & (vf > 0)
+        self.varfac_ref = float(np.median(vf[ok])) if ok.any() else 1.0
+        self.varfac = vf / np.float32(self.varfac_ref)
         good = self.valid & np.isfinite(self.mean_image)
         # one scale per trial, so inputs and outputs are O(1)
         self.scale = float(np.nanmedian(self.mean_image[good])) if good.any() else 1.0
