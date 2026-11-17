@@ -58,7 +58,9 @@ for fn in args.results:
                 out = dict(n=len(r), matched=m, precision=p, recall=rc, f1=f)
             if f == f and f > best[0]:
                 best = (f, th)
-        rows.append(dict(trial=Path(fn).stem, baseline=name, n_gt=len(gr), **out, best_f1=best[0], best_peakth=best[1],
+        rows.append(dict(trial=Path(fn).stem, baseline=name, n_gt=len(gr), **out,
+                         best_f1=best[0] if best[1] is not None else float("nan"),
+                         best_peakth=best[1] if best[1] is not None else float("nan"),
                          seconds=e.get("seconds")))
 w = max(len(r["trial"]) for r in rows)
 print(f"{'trial':{w}} {'baseline':>14} {'n_gt':>5} {'n':>5} {'match':>5} {'prec':>6} {'rec':>6} {'F1':>6} {'bestF1':>6} {'@th':>4}")
