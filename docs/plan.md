@@ -537,6 +537,7 @@ Four runs, all with v5b's fine-tuning recipe after the simulation stage (half re
 | v6s | scratch | trial median | 6000 steps | 23 px |
 | v6f | v6 pretrained (folded) | trial median | 3000 steps | 14 px (all spatial dilations 1) |
 | v6d | v6 pretrained (folded) | trial median | 3000 steps | 23 px; baseline correction cap 3 instead of 0.7 (see the localization results) |
+| v6k | v6r pretrained | trial median | 2500 steps, with dark sources (`--dark_frac 0,0.3`, also in fine-tuning) | 23 px |
 
 v6c gets the same extra training as v6r with the old input, so v6r − v6c is the effect of the fix; v6f is the faster architecture and v6d the wider correction (both below).
 
@@ -552,6 +553,8 @@ v6c gets the same extra training as v6r with the old input, so v6r − v6c is th
 | v6f (reach 14) | −7.3% (−9.4, −7.6, −4.8, −7.5) | +0.1 to +0.9% | −0.003 | −61 to −69% / −27 to −41% / −24 to −77% |
 | v6s pretrained (scratch, 5530 steps) | −7.2% (−10.1, −5.4, −5.4, −7.7) | +0.1 to +0.6% | +0.021 | −55 to −68% / −31 to −40% / −28 to −59% |
 | **v6s fine-tuned** | **−8.3%** (−11.2, −8.1, −5.5, −8.3) | −0.2 to +0.3% | +0.090 | −60 to −68% / −23 to −37% / −28 to −65% |
+| v6d pretrained (cap 3) | −7.9% (−9.8, −9.1, −5.0, −7.6) | +0.1 to +0.7% | +0.014 | −63 to −69% / −32 to −41% / −28 to −78% |
+| v6d fine-tuned (cap 3) | −7.5% (−10.2, −6.4, −5.5, −7.7) | −0.2 to +0.4% | +0.078 | −60 to −66% / −31 to −37% / +10 to −39% |
 
 - **The fix is worth little on its own:** v6r against v6c, same training, −7.9% against −7.6% pretrained. The variance-ratio input already carried most of what the variance factor says (pixels with more variance than photon noise).
 - **More simulation training is what helped:** 3000 more steps took v6 pretrained from −7.0% to −7.9% on real support with no real data, as good as v6 fine-tuned, and better on every simulated class.
@@ -631,8 +634,9 @@ The networks find more of the final sources in three of four sessions, none in t
 | Path 2 sources | 113 | 146: 77 of main's 113, and 69 more (median SNR 5.7) |
 | median SNR of all sources | 5.9 / 6.9 | 4.7 / 5.4 |
 | SILo time (with other jobs on the machine) | 2571 s | 3597 s |
+| v6r pretrained, same test | | Path 1: 198 (125 of 130, 73 more); Path 2: 150 (77 of 113, 73 more); the same 36 dark-pixel sources lost |
 
 - **More sources, as in the simulations:** 135 sources main did not find, with lower but useful SNR (4.5–5.7); main's sources that both runs found keep 91–97% of their SNR.
-- **But 36 of main's Path 2 sources are lost, and they are good ones** (median SNR 7.7, higher than main's average). They sit on nearly dark pixels: the movie is exactly 0 in 45–82% of frames, the mean is 1–6 counts, and events reach 30–60 counts. The moving median there is about 0, so every event stands out; the network's baseline equals the pixel's mean, events included. Two reasons: the baseline is the mean image times a correction soft-capped at a factor of 0.5–2 (`max_log_correction` 0.7), so it can never go far below the mean; and such event-dominated pixels are rare in training (GIAnT's activity is more than half the mean on 0.2–2.7% of footprint pixels), so the network does not even use the room it has (its baseline there is 1.00× the mean). v6d (below) retrains with the cap at 3 (a factor of 0.05–20).
+- **But 36 of main's Path 2 sources are lost, and they are good ones** (median SNR 7.7, higher than main's average). They sit on nearly dark pixels: the movie is exactly 0 in 45–82% of frames, the mean is 1–6 counts, and events reach 30–60 counts. The moving median there is about 0, so every event stands out; the network's baseline equals the pixel's mean, events included. Two reasons: the baseline is the mean image times a correction soft-capped at a factor of 0.5–2 (`max_log_correction` 0.7), so it can never go far below the mean; and such event-dominated pixels are rare in training (GIAnT's activity is more than half the mean on 0.2–2.7% of footprint pixels), so the network does not even use the room it has (its baseline there is 1.00× the mean). v6d retrained with the cap at 3 (a factor of 0.05–20): it scores like v6r on windows, and **its baseline at the lost sources is still 0.99× the mean** (kept sources: 0.91×). The cap was not what held it back; the network has not learned what such pixels look like. **v6k** therefore simulates them: `--dark_frac 0,0.3` scales the baseline of up to 30% of the footprint pixels (in patches of 2–6 px) by 0.02–0.3 while their activity stays, and `evaluate --kinds dark` scores fast simulations with 30% of the support dark (run in progress).
 - The extra time is mostly extraction of the extra sources (and other jobs running at the same time); reading the baseline files costs a few seconds per trial.
 - **Diagnostic: the smaller of the two baselines** (`localizationBaselineCombine = 'min'`, same network baselines). Path 1: 154 sources, 125 of main's 130 and 29 more; Path 2: 125, 106 of main's 113 (32 of the 36 dark-pixel sources come back) and 19 more; matched sources keep their SNR. It adds fewer sources than the network alone, because the moving median's low bias on dim background raises the spread of the summary image, and the peak threshold is relative to that spread. On the simulations it lands between the two (best single-threshold F1 0.81 / 0.80). So the dark-pixel failure and the gain are separable, and the fix belongs in the network (v6d), not in combining baselines.
