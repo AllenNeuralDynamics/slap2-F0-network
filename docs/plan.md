@@ -576,6 +576,8 @@ One trial's `localizeSources_vIM` (export of 780125 trial 2, 2254 frames, 36k va
 | same precision and tiles, new code (greedy tiles, no padded copies) | 146 | 145 | 90 | 57 | 64 |
 | **new default: fp16 model, whole-trial tiles** | **109** | **112** | **71** | **45** | **48** |
 | new default + `torch.compile` (first trial includes compiling) | 163 | 91 | 55 | 40 | 42 |
+| v6r pretrained, new default | 113 | 112 | 72 | 44 | 48 |
+| **v6f (reach 14), new default** | **68** | **81** | **46** | **32** | **35** |
 | v5b slab, before | 108 | 119 | 83 | 43 | 45 |
 | v5b slab, new default | 55 | 73 | 41 | 28 | 29 |
 
@@ -587,8 +589,8 @@ What made it faster:
 - **Memory**, so whole trials fit: half-plane rotations one at a time in inference, branch outputs cropped as soon as they are done, in-place residual adds, and convolution padding instead of padded copies.
 - The precision and tile changes move the old checkpoints' outputs by up to a few percent at some pixels (99th percentile 2–5% in 780125, 803121 and 878030, 0.2% in 847983 and 885233), because their variance-factor input and the box model's pooled features depend on where the window sits. Retrained checkpoints keep only the pooled features' dependence.
 
-**Per session**, 780125's 30 trial-paths would take about 55 min in the network on one A10G with v6 (45 min compiled), against 43 min for all of SILo; the moving median it replaces costs about 10 min of one core per session. Remaining levers:
-- **Smaller spatial reach:** reach 14 instead of 23 (all spatial dilations 1) makes a box tile 1.65× faster (v6f tests its quality). Spatial context explained little of the baseline (R² 0.003), and the pooled same-frame features keep the field-wide information at no cost.
+**Per session**, 780125's 30 trial-paths would take about 55 min in the network on one A10G with v6 (45 min compiled), or about 34 min with the reach-14 v6f, against 43 min for all of SILo; the moving median it replaces costs about 10 min of one core per session. Remaining levers:
+- **Smaller spatial reach:** reach 14 instead of 23 (all spatial dilations 1): 1.4–1.6× faster per trial on the A10G (1.7× on the RTX 4060 Ti) for half a point of real support MSE, and the same localization on the simulations (v6f, above). Spatial context explained little of the baseline (R² 0.003), and the pooled same-frame features keep the field-wide information at no cost.
 - **The box model's half-plane branches cost as much as both causal branches:** a slab model is 1.9× faster per voxel, but loses the same-frame tracking.
 - **`torch.compile`** fuses the elementwise work (the model is memory-bound): 1.2× on Linux, plus a compile per trial length.
 - **Several GPUs:** trials are independent.
