@@ -12,12 +12,12 @@ function R = locnet_run(trialFn, predFn, names, outFn, giantDir, peakths)
 %   giantDir  GIAnT-MATLAB checkout whose SiLo parameters and getActImPeaks
 %             are used (localization itself is localizeSources_ext, a copy of
 %             main's localizeSources_vIM with an optional external baseline)
-%   peakths   peak thresholds to sweep (default 4:1:20); the default
+%   peakths   peak thresholds to sweep (default 2:1:20); the default
 %             threshold (params.peakth) is always included
 %   R.(name): P (sources at params.peakth), sweep (one P per peakth),
 %   summary (the image getActImPeaks thresholds), seconds.
 
-if nargin < 6 || isempty(peakths), peakths = 4:20; end
+if nargin < 6 || isempty(peakths), peakths = 2:20; end
 pathDirs = strsplit(path, pathsep);
 other = pathDirs(contains(pathDirs, 'GIAnT-MATLAB') | contains(pathDirs, 'bench-code'));
 if ~isempty(other), rmpath(other{:}); end

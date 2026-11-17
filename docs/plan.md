@@ -520,3 +520,95 @@ v6 pretrained, fine-tuned with v5b's recipe: half the windows real, half simulat
 - **Fast tracking.** On a soma pixel in 780125, between the gaps, v6 follows part of the fast (0.1–0.3 s) swings of data − activity, by ±100–150 counts, where v5b and SiLo stay flat.
 
 **The variance-factor input saturates.** `make_inputs` divides SiLo's variance factor by its median over the window, and unimaged pixels are 0 there. When less than half of the window is imaged, the median is 0, and the input clamps at its maximum on every imaged pixel. That happens in 34% (780125), 94% (803121), 78% (878030) and 100% (885233, GFP) of 94 × 94 training windows, so for most windows this input carries nothing. Every checkpoint so far was trained this way, so predictions with the training geometry reproduce it. The fix is a median over imaged pixels only, which needs retraining.
+
+## Variance-factor fix (2026-11-16)
+
+`TrialFile.varfac` is now relative to its median over the trial's imaged pixels, and the network takes its log as it is (`ModelConfig.varfac_norm = "trial"`; pixels without a factor get 0). The input is the same in every window, so a slab model's full-trial output no longer depends on the tiling at all. On the five viewer trials the new input spans −0.5 to +1.1 (780125, 803121) and stays near 0 elsewhere, and it never saturates.
+
+- **Old checkpoints:** those saved before the field load as `"window"` and get exactly the inputs they were trained on (2e-7 on real windows).
+- **Warm starts:** `train --init` from such a checkpoint folds the old variance-factor weights into the validity flag and biases of the pointwise input layers (`adapt_varfac_input`), so the warm start computes what it did in saturated windows; tested on a box model.
+
+Four runs, all with v5b's fine-tuning recipe after the simulation stage (half real windows, half simulated with fast brightness changes, GFP held out), evaluated on real, simulated, activity-free and fast-brightness windows:
+
+| run | starts from | input | simulation stage | spatial reach |
+|---|---|---|---|---|
+| v6r | v6 pretrained (folded) | trial median | 3000 steps | 23 px |
+| v6c (control) | v6 pretrained | window median (old) | 3000 steps | 23 px |
+| v6s | scratch | trial median | 6000 steps | 23 px |
+| v6f | v6 pretrained (folded) | trial median | 3000 steps | 14 px (all spatial dilations 1) |
+| v6d | v6 pretrained (folded) | trial median | 3000 steps | 23 px; baseline correction cap 3 instead of 0.7 (see the localization results) |
+
+v6c gets the same extra training as v6r with the old input, so v6r − v6c is the effect of the fix; v6f is the faster architecture and v6d the wider correction (both below).
+
+## Inference time against GIAnT main (2026-11-16)
+
+**GIAnT main** (4cef08c) SILo on 780125, 15 trials × 2 paths, on a 16-core Threadripper PRO 5955WX with 12 workers: **2571 s** (43 min) in all. Per path: localization 410 and 296 s (loading each trial's 80 Hz movie and `localizeSources_vIM`, 12 trials at a time), alignment and source selection 19 and 27 s, extraction 748 and 993 s.
+
+One trial's `localizeSources_vIM` (export of 780125 trial 2, 2254 frames, 36k valid pixels): 63 s on one thread (as on a SILo worker), of which **the moving median the network would replace is 20 s**; 27 s and 1.6 s on 16 threads. 878030 trial 2 (1493 frames, 18k pixels): 32 s and 11 s on one thread.
+
+**The network** on the same five viewer trials (780125, 803121, 847983, 878030, 885233), seconds per trial in the network (A10G on Code Ocean; stats and reading excluded):
+
+| | 780125 | 803121 | 847983 | 878030 | 885233 |
+|---|---|---|---|---|---|
+| v6 box, before (bf16 autocast, 512-frame tiles on a grid) | 185 | 191 | 135 | 70 | 75 |
+| same precision and tiles, new code (greedy tiles, no padded copies) | 146 | 145 | 90 | 57 | 64 |
+| **new default: fp16 model, whole-trial tiles** | **109** | **112** | **71** | **45** | **48** |
+| new default + `torch.compile` (first trial includes compiling) | 163 | 91 | 55 | 40 | 42 |
+| v5b slab, before | 108 | 119 | 83 | 43 | 45 |
+| v5b slab, new default | 55 | 73 | 41 | 28 | 29 |
+
+On the local RTX 4060 Ti (8 GB; tiles of at most ~700 frames fit) a 780125 trial takes 184 s with the new code, and the registered-movie path (`predict-registered`) adds 8 s to load the TIFF and 10 s for stats. On the CPU (16 threads of the Threadripper, fp32) the box model needs about 1.8 µs per window voxel, 20–30× the GPU's: close to an hour per 780125 trial, so the network needs a GPU.
+
+What made it faster:
+- **Precision.** The ReZero scale is a float32 parameter, so under bf16 autocast the residual stream became float32 after the first block, and some convolutions ran as TF32. Casting the whole model to fp16 is 1.4× faster than bf16 autocast and 10× closer to fp32 (99th-percentile relative difference 3e-4 against 3e-3).
+- **Tiles.** The model reaches 23 px and 263 frames beyond each output, and the imaged pixels are thin dendrites (6–20% of the frame), so 512-frame tiles on a 48-px grid processed 24–45× more voxels than they output. Whole-trial tiles halve that (13–26×), and placing tiles greedily (bands from the first uncovered valid row, tiles from the first uncovered column) removes another 10–25%. Smaller tiles are worse: the margin dominates.
+- **Memory**, so whole trials fit: half-plane rotations one at a time in inference, branch outputs cropped as soon as they are done, in-place residual adds, and convolution padding instead of padded copies.
+- The precision and tile changes move the old checkpoints' outputs by up to a few percent at some pixels (99th percentile 2–5% in 780125, 803121 and 878030, 0.2% in 847983 and 885233), because their variance-factor input and the box model's pooled features depend on where the window sits. Retrained checkpoints keep only the pooled features' dependence.
+
+**Per session**, 780125's 30 trial-paths would take about 55 min in the network on one A10G with v6 (45 min compiled), against 43 min for all of SILo; the moving median it replaces costs about 10 min of one core per session. Remaining levers:
+- **Smaller spatial reach:** reach 14 instead of 23 (all spatial dilations 1) makes a box tile 1.65× faster (v6f tests its quality). Spatial context explained little of the baseline (R² 0.003), and the pooled same-frame features keep the field-wide information at no cost.
+- **The box model's half-plane branches cost as much as both causal branches:** a slab model is 1.9× faster per voxel, but loses the same-frame tracking.
+- **`torch.compile`** fuses the elementwise work (the model is memory-bound): 1.2× on Linux, plus a compile per trial length.
+- **Several GPUs:** trials are independent.
+
+## Network baselines in SiLo's localization (2026-11-16)
+
+**Harness** (`tools/localization_eval/locnet_*`): `localizeSources_ext.m` is GIAnT main's `localizeSources_vIM` with an optional external baseline, which replaces the 4 s moving median in the high-pass and in the variance model (Vk and Vb fitted as in main). `locnet_run.m` localizes one trial with several baselines and sweeps the peak threshold on the summary image; `locnet_score.py` matches the sources to reference sources at 2 px. On real trials the harness's moving median and the Python copy of SiLo's baseline (`silo`) find exactly the same sources.
+
+**Simulations with known sources.** `locnet_sims.py` simulates one trial from each sensor session's viewer trial (the default simulator, and the one with fast brightness changes), so the true sources are the template's 152 GIAnT sources (106, 16, 5, 25) and the true baseline is known. Single-trial localization, sums over the four sessions:
+
+| baseline | default threshold (8): precision / recall / F1, fast-brightness sims | same, default sims | best single threshold: F1 (threshold), fast | same, default |
+|---|---|---|---|---|
+| moving median (main) | 0.96 / 0.53 / **0.68** | 0.94 / 0.57 / **0.71** | 0.79 (4) | 0.78 (4) |
+| v6 fine-tuned | 0.84 / 0.78 / **0.81** | 0.90 / 0.78 / **0.83** | 0.83 (6) | 0.84 (7) |
+| true baseline | 0.71 / 0.93 / 0.81 | 0.79 / 0.95 / 0.87 | 0.87 (15) | 0.88 (15) |
+
+- **At SiLo's threshold the network baseline finds half again as many true sources** (recall 0.53 → 0.78) for a small loss of precision. The moving median sits high at event pixels (+42% at source peaks), which shrinks every event's Z-score; the true baseline shows how much there is to gain.
+- **With each baseline's best threshold** (one threshold for all trials; thresholds 2.5–20 swept), the network still beats the moving median (0.83–0.84 against 0.78–0.79) and closes about half of the gap to the true baseline. The best threshold moves (moving median 4, network 6–7, truth 15), so part of the gain at the default threshold is calibration.
+- **Per session:** the gain is in 780125 (F1 0.68 → 0.86 at the default threshold) and 803121 (0.30 → 0.52–0.58); the 5-source 878030 and 885233 are about even (one session up, one down).
+- Single trials, so SiLo's averaging of activity images over trials is not in this test; the network was trained on simulations of the same kind (the fast-brightness ones are its own pretraining distribution).
+
+**Real trials** (one viewer trial per session), against the session's final GIAnT sources (from all trials, localized with the moving median, so this reference favors it):
+
+| session (final sources) | moving median: found, F1 at 8, best F1 | v5b | v6 pretrained | v6 fine-tuned |
+|---|---|---|---|---|
+| 780125 (106) | 52, 0.57, 0.61 | 72, 0.64, 0.65 | 78, 0.62, 0.65 | 91, 0.63, 0.65 |
+| 803121 (16) | 13, 0.48, 0.55 | 21, 0.38, 0.48 | 22, 0.37, 0.46 | 23, 0.46, 0.49 |
+| 878030 (5) | 3, 0.25, 0.50 | 8, 0.62, 0.62 | 11, 0.50, 0.60 | 14, 0.53, 0.60 |
+| 885233 (25) | 14, 0.51, 0.62 | 18, 0.56, 0.63 | 21, 0.61, 0.64 | 24, 0.61, 0.62 |
+| 847983, GFP (0) | 0 | 0 | 0 | 0 |
+
+The networks find more of the final sources in three of four sessions, none in the GFP session (no false positives where there is no activity), and fewer in 803121.
+
+**Full SILo on 780125** with network baselines (`slap2-f0 predict-registered` for all 30 registered movies, then SILo of the GIAnT branch `localization-network-baseline` with `localizationBaselineDir`), against the main run above:
+
+| | moving median (main) | v6 fine-tuned |
+|---|---|---|
+| Path 1 sources | 130 | 192: 126 of main's 130, and 66 more (median SNR 4.5) |
+| Path 2 sources | 113 | 146: 77 of main's 113, and 69 more (median SNR 5.7) |
+| median SNR of all sources | 5.9 / 6.9 | 4.7 / 5.4 |
+| SILo time (with other jobs on the machine) | 2571 s | 3597 s |
+
+- **More sources, as in the simulations:** 135 sources main did not find, with lower but useful SNR (4.5–5.7); main's sources that both runs found keep 91–97% of their SNR.
+- **But 36 of main's Path 2 sources are lost, and they are good ones** (median SNR 7.7, higher than main's average). They sit on nearly dark pixels: the movie is exactly 0 in 45–82% of frames, the mean is 1–6 counts, and events reach 30–60 counts. The moving median there is about 0, so every event stands out; the network's baseline equals the pixel's mean, events included. Two reasons: the baseline is the mean image times a correction soft-capped at a factor of 0.5–2 (`max_log_correction` 0.7), so it can never go far below the mean; and such event-dominated pixels are rare in training (GIAnT's activity is more than half the mean on 0.2–2.7% of footprint pixels), so the network does not even use the room it has (its baseline there is 1.00× the mean). v6d (below) retrains with the cap at 3 (a factor of 0.05–20).
+- The extra time is mostly extraction of the extra sources (and other jobs running at the same time); reading the baseline files costs a few seconds per trial.

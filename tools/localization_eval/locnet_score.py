@@ -39,6 +39,15 @@ ap.add_argument("--radius", type=float, default=2.0)
 ap.add_argument("--csv", default="")
 args = ap.parse_args()
 rows = []
+pooled = {}  # (baseline, kind) -> threshold -> [found, true, matched] summed over trials
+
+
+def kind_of(stem):
+    """Simulation kind from the folder name (<session>_<kind><seed>), else "real"."""
+    tail = stem.rsplit("_", 1)[-1]
+    return tail.rstrip("0123456789") if tail.rstrip("0123456789") in ("sim", "fast") else "real"
+
+
 for fn in args.results:
     J = json.loads(Path(fn).read_text())
     gr, gc = np.atleast_1d(J.get("gt_row", [])).astype(float), np.atleast_1d(J.get("gt_col", [])).astype(float)
@@ -53,6 +62,8 @@ for fn in args.results:
         for th, sw in zip(ths, sweep):
             r, c = np.atleast_1d(sw["row"]).astype(float), np.atleast_1d(sw["col"]).astype(float)
             m = match(r, c, gr, gc, args.radius)
+            acc = pooled.setdefault((name, kind_of(Path(fn).stem)), {}).setdefault(float(th), [0, 0, 0])
+            acc[0] += len(r); acc[1] += len(gr); acc[2] += m
             p, rc, f = prf(len(r), len(gr), m)
             if th == J["peakth_default"]:
                 out = dict(n=len(r), matched=m, precision=p, recall=rc, f1=f)
@@ -72,3 +83,18 @@ if args.csv:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
         wr.writeheader()
         wr.writerows(rows)
+
+print()
+print("pooled over trials (sum of found, true, matched): at the default threshold, and at each baseline's best single threshold")
+print(f"{'kind':>5} {'baseline':>14} {'prec':>6} {'rec':>6} {'F1':>6} | {'th':>4} {'prec':>6} {'rec':>6} {'F1':>6}")
+default = None
+for fn in args.results[:1]:
+    default = float(json.loads(Path(fn).read_text())["peakth_default"])
+for (name, kind), byth in sorted(pooled.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+    if not any(v[1] for v in byth.values()):
+        continue
+    stats = {th: prf(*v[:2], v[2]) for th, v in byth.items()}
+    p0, r0, f0 = stats.get(default, (float("nan"),) * 3)
+    th_best = max(stats, key=lambda t: stats[t][2] if stats[t][2] == stats[t][2] else -1)
+    pb, rb, fb = stats[th_best]
+    print(f"{kind:>5} {name:>14} {p0:6.3f} {r0:6.3f} {f0:6.3f} | {th_best:4.1f} {pb:6.3f} {rb:6.3f} {fb:6.3f}")
