@@ -598,13 +598,14 @@ What made it faster:
 | moving median (main) | 0.96 / 0.53 / **0.68** | 0.94 / 0.57 / **0.71** | 0.79 (4) | 0.78 (4) |
 | v6 fine-tuned | 0.84 / 0.78 / **0.81** | 0.90 / 0.78 / **0.83** | 0.83 (6) | 0.84 (7) |
 | true baseline | 0.71 / 0.93 / 0.81 | 0.79 / 0.95 / 0.87 | 0.87 (15) | 0.88 (15) |
+| v6r pretrained (the retrained v6) | 0.82 / 0.81 / 0.81 | 0.87 / 0.78 / 0.82 | 0.82 (6) | 0.82 (8) |
 | v6f (reach 14) | 0.80 / 0.76 / 0.78 | 0.88 / 0.78 / 0.83 | 0.82 (6) | 0.86 (7) |
 | min(v6 fine-tuned, moving median) | 0.92 / 0.68 / 0.79 | 0.93 / 0.66 / 0.77 | 0.81 (5) | 0.80 (4) |
 
 - **At SiLo's threshold the network baseline finds half again as many true sources** (recall 0.53 → 0.78) for a small loss of precision. The moving median sits high at event pixels (+42% at source peaks), which shrinks every event's Z-score; the true baseline shows how much there is to gain.
 - **With each baseline's best threshold** (one threshold for all trials; thresholds 2.5–20 swept), the network still beats the moving median (0.83–0.84 against 0.78–0.79) and closes about half of the gap to the true baseline. The best threshold moves (moving median 4, network 6–7, truth 15), so part of the gain at the default threshold is calibration.
 - **Per session:** the gain is in 780125 (F1 0.68 → 0.86 at the default threshold) and 803121 (0.30 → 0.52–0.58); the 5-source 878030 and 885233 are about even (one session up, one down).
-- **The reach-14 model localizes as well as v6** (0.82 / 0.86 at the best threshold).
+- **The networks localize alike:** v6 fine-tuned, v6r and the reach-14 v6f all reach 0.82–0.86 at their best threshold; the differences between them are within what eight trials can resolve.
 - Single trials, so SiLo's averaging of activity images over trials is not in this test; the network was trained on simulations of the same kind (the fast-brightness ones are its own pretraining distribution).
 
 **Real trials** (one viewer trial per session), against the session's final GIAnT sources (from all trials, localized with the moving median, so this reference favors it):
