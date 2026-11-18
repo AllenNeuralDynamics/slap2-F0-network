@@ -786,3 +786,55 @@ A v6 780125 trial-path takes 184 s on the RTX 4060 Ti, so about 74 min on the CP
 - **CPU-only users** get the baseline files from a GPU elsewhere (the Code Ocean GPU capsule, a cluster GPU node, a lab workstation): `predict-registered` needs only the motion-correction folder and writes one small HDF5 file per trial. Or they choose 'movmedian' knowingly. On Path 2 of 780125 a third of the moving median's sources failed the flash test, and it finds fewer real sources.
 - **A CPU-friendly distilled model** is possible (width 8 is ~4× cheaper) but would still be hours per session and less accurate. Not worth it unless many users lack GPUs.
 - Apple Silicon (PyTorch MPS) and AMD (ROCm) are untested.
+
+## v7: guards against the leak (2026-11-18)
+
+**Runs.** All three start from v6r pretrained and train 3000 steps on simulations, then fine-tune 1700 steps on real and simulated windows, with realistic low counts (`--photon_zeros`), up/down flips and per-direction half-plane trunks:
+
+- **v7b:** no guards.
+- **v7c:** `--sim_event_weight 4` throughout, and `--event_mask 0.5` in fine-tuning.
+- **v7:** v7c plus `--shuffle_prob 0.5`.
+
+**No guarded checkpoint beat its start.** Checkpoint selection (fast-brightness simulations in pretraining, real plus activity-free data in fine-tuning) kept step 0 in both stages of v7 and v7c, so their best checkpoints are v6r's own weights. v7b pretraining ended slightly better than v6r (best at step 2000); its fine-tuning did not, so its best checkpoint is step 0.
+
+Validation over training, averaged over the six checkpoints after step 0. Leak is the slope at support pixels; bias is truth − baseline in units of the trial's median pixel brightness, so positive means too low:
+
+| | leak, fast-brightness sims | bias, fast-brightness sims, support | bias, activity-free sims, support | leak, real windows |
+|---|---|---|---|---|
+| start (v6r pretrained) | 0.098 | −0.052 | +0.052 | 0.040 |
+| v7b pretraining | 0.079 | +0.041 | +0.091 | 0.023 |
+| v7c pretraining | 0.072 | +0.136 | +0.150 | 0.017 |
+| v7 pretraining | 0.070 | +0.143 | +0.150 | 0.016 |
+| v7b fine-tuning (from v7b at 0.094 / −0.015 / +0.065 / 0.038) | 0.106 | +0.001 | +0.090 | 0.051 |
+| v7c fine-tuning (from v6r) | 0.080 | +0.047 | +0.111 | 0.018 |
+| v7 fine-tuning (from v6r) | 0.081 | +0.047 | +0.111 | 0.019 |
+
+- **Shuffling does nothing.** v7 and v7c agree at every step within noise. In the full evaluation the v6r leak is 0.136 on rhythmic and 0.131 on shuffled fast-brightness simulations. Shuffling stays a diagnostic.
+- **Event weighting trades leak for a baseline that is too low everywhere**, including where there is no activity at all. In pretraining it lowers the leak by 0.007 and lowers the baseline by 0.06 in activity-free simulations and by 0.10 at activity.
+- **Why, by construction:** given what the network sees, a frame-wide brightening can be either activity or a baseline change. The unweighted loss is minimized by the conditional mean, which is unbiased. Weighting event voxels w× is the same as telling the network that events are w× more likely than the simulator makes them: it moves the optimum toward "it was activity" and lowers the baseline wherever the brightening is ambiguous. A scalar toy (brightness = baseline + event + noise, events in 20% of frames) gives: weight 1, bias 0 and leak slope 0.36; weight 4, bias +0.20 overall (+0.33 on frames without an event) and leak slope 0.33. So the leak of the unweighted fit is not a training failure the loss can fix. Lowering it honestly needs more information in the inputs, or simulated activity and shared brightening whose statistics match the real data.
+- **Masking GIAnT's events in real fine-tuning is the useful part.** It removes targets that still hold unfitted activity rather than reweighting correct ones. Fine-tuning without guards raises the real-window leak (v7b 0.038 → 0.051, as in v6). With the guards it stays near 0.018, at a smaller bias cost than event weighting has in pretraining. The runs did not separate the event mask from the event weight in fine-tuning.
+
+**Full evaluation, v7b pretrained against v6r pretrained** (means over sessions):
+
+- **Simulations:** v7b is better on fast-brightness simulations. Its support error is 8.6% above the oracle's, against 17.6% for v6r, and 68.2% below the mean image's, against 65.8%. Leak is 0.129 against 0.136.
+- **Real support pixels:** about the same, −8.1% against −7.9% relative to the mean image.
+- **Real background:** slightly worse, +0.5% against +0.3%, and its bias doubles (+0.024 against +0.010).
+
+**Real trials** (`leak_check --real`, the viewer trials): slope of the baseline's fast part on the activity at support pixels.
+
+| | 780125 | 803121 | 878030 | 885233 |
+|---|---|---|---|---|
+| v6r pretrained | 0.031 | 0.072 | 0.002 | 0.043 |
+| v7 at the end of pretraining | 0.030 | 0.055 | 0.012 | 0.035 |
+| v7 at the end of fine-tuning | 0.023 | 0.056 | 0.004 | 0.030 |
+| v7b pretrained | 0.034 | 0.063 | 0.015 | 0.044 |
+| v7b at the end of fine-tuning | 0.032 | 0.062 | 0.027 | 0.042 |
+
+The guarded checkpoints follow the activity 20–30% less in 780125, 803121 and 885233. 878030 has 5 sources and is noise. During strong population responses the guarded fine-tuned baseline at support pixels rises 1.7–3.0%, against 2.1–3.5% for v6r.
+
+**Decisions.**
+
+- Drop `--sim_event_weight`, and keep shuffling as a diagnostic.
+- Keep v6r pretrained as the default checkpoint: v7b is no clear improvement.
+- **v8** adds `--edge_frac 0.25` to v7b's pretraining, and `--event_mask 0.5` with `--edge_frac 0.25` in fine-tuning. Judge it on leak and bias in the simulations, on the real-trial leak, and on the edge bias with `edge_pieces.py`.
+- Whether the baseline should follow the stimulus-locked shared brightening is a question about the simulator's shared-brightness statistics (`--fast_global_sd`, `--fast_field_sd`), not about the loss.
