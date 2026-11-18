@@ -202,3 +202,45 @@ def test_dark_sources(tmp_path):
     assert np.allclose(t1[~picked], t0[~picked])
     assert np.allclose(w["activity"], w0["activity"])
     assert (np.nanmean(w["mean_image"][picked] - w0["mean_image"][picked]) < -1.0)
+
+
+def test_photon_zeros(tmp_path):
+    """Realistic low counts: never negative, the template's share of zero frames,
+    unbiased, variance = gain * mean."""
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn, T=1200)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    assert tp.zc is not None and 7.0 < float(np.median(tp.zc)) < 11.0  # 9 counts per photon in the template
+    plain = window(tp, draw(tp, SimConfig(), np.random.default_rng(2)), 0, 1200, 0, 30, 0, 34, np.random.default_rng(3))
+    cfg = SimConfig(photon_zeros=True)
+    r = draw(tp, cfg, np.random.default_rng(2))
+    w = window(tp, r, 0, 1200, 0, 30, 0, 34, np.random.default_rng(3))
+    inside = np.isfinite(w["movie"])
+    assert (plain["movie"][inside] < 0).any()  # the filtered Poisson noise goes negative
+    m = w["movie"][inside]
+    assert (m >= 0).all()
+    assert abs((m == 0).mean() - st["zero_frac"]) < 0.06
+    noise = (w["movie"] - w["activity"] - w["truth"])[inside]
+    truth = w["truth"][inside]
+    assert abs(noise.mean()) < 0.05 * truth.mean()
+    assert 0.8 < noise.var() / (tp.gain * truth.mean()) < 1.2
+    assert np.allclose(w["noisy"][inside], (w["movie"] - w["activity"])[inside])
+    # draws before it are unchanged: the truth is the same as without
+    assert np.allclose(w["truth"][inside], plain["truth"][inside])
+
+
+def test_shuffled_timing(tmp_path):
+    """Shuffled activity timing keeps every event whole and the total activity."""
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    plain = window(tp, draw(tp, SimConfig(), np.random.default_rng(4)), 0, 600, 0, 30, 0, 34, np.random.default_rng(5))
+    r = draw(tp, SimConfig(shuffle_prob=1.0, shuffle_frames=(20, 40)), np.random.default_rng(4))
+    assert sorted(r["tmap"]) == list(range(tp.T))
+    w = window(tp, r, 0, 600, 0, 30, 0, 34, np.random.default_rng(5))
+    assert np.isclose(w["activity"].sum(), plain["activity"].sum(), rtol=1e-5)
+    on = np.flatnonzero(w["activity"][:, 11, 11] > 0)  # the 10-frame event stays in one piece
+    assert len(on) == 10 and on[-1] - on[0] == 9
+    assert not np.array_equal(w["activity"], plain["activity"])

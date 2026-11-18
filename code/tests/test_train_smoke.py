@@ -6,6 +6,7 @@ import json
 import h5py
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from slap2_f0.cli import main
 
@@ -195,3 +196,78 @@ def test_train_box_model_with_accumulation(tmp_path):
     main(["evaluate", str(tmp_path / "data"), "--ckpt", f"box={out / 'best.pt'}", "--out", str(ev), "--windows", "2",
           "--workers", "0", "--stats_from", str(out / "stats")])
     assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 6  # 3 sessions x real, sim
+
+
+def test_flips_are_up_down_only(tmp_path):
+    """The default flip is along rows (up/down, the DMD's short axis) only: an
+    item is the unflipped window or its row-flipped copy, never column-flipped."""
+    import torch
+
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    _trial(fn, "sessA", 0)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=40, out_px=10, t_reach=20, s_reach=4)
+    plain = WindowDataset([fn], cfg, stats, length=40, seed=2, flip="none")
+    rows = WindowDataset([fn], cfg, stats, length=40, seed=2, flip="rows")
+    n_flipped = 0
+    for i in range(40):
+        a, b = plain[i]["movie"].nan_to_num(-1), rows[i]["movie"].nan_to_num(-1)
+        same, ud = torch.equal(a, b), torch.equal(a.flip(1), b)
+        assert same or ud
+        n_flipped += ud and not same
+        assert not (torch.equal(a.flip(2), b) and not same and not ud)
+    assert 5 < n_flipped < 35
+
+
+def test_event_mask(tmp_path):
+    """With event_mask, real-window voxels with activity, and event_margin
+    frames around them, weigh 0; everything else is unchanged."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    _trial(fn, "sessA", 0)  # activity 4.0 in frames 50-54 at rows/cols 8-10
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=160, out_px=24, t_reach=0, s_reach=0, w_unfitted=1.0)
+    from slap2_f0.data import _dilate_time
+
+    for seed in range(50):  # a window that holds the event
+        plain = WindowDataset([fn], cfg, stats, length=1, seed=seed, flip="none")[0]
+        act_at = (plain["target"] != plain["movie"] / plain["scale"]) & (plain["weight"] > 0)  # activity subtracted
+        if act_at.any():
+            break
+    assert act_at.any()
+    masked = WindowDataset([fn], replace(cfg, event_mask=0.5, event_margin=3), stats, length=1, seed=seed,
+                           flip="none")[0]
+    zero = _dilate_time(act_at.numpy(), 3)
+    assert (masked["weight"].numpy()[zero] == 0).all()
+    assert (masked["weight"].numpy()[~zero] == plain["weight"].numpy()[~zero]).all()
+    assert (masked["weight"][:, 0, 0] == plain["weight"][:, 0, 0]).all()  # no activity there: unchanged
+
+
+def test_sim_event_weight(tmp_path):
+    """Simulated windows weigh sim_event_weight during events, 1 elsewhere."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.simulate import SimConfig
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    _trial(fn, "sessA", 0)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=160, out_px=24, t_reach=0, s_reach=0, sim_event_weight=5.0, event_margin=2)
+    seen = False
+    for i in range(30):
+        b = WindowDataset([fn], cfg, stats, length=30, seed=0, sim=SimConfig(), flip="none")[i]
+        vals = set(np.unique(b["weight"].numpy()).tolist())
+        assert vals <= {0.0, 1.0, 5.0}
+        seen |= 5.0 in vals
+    assert seen

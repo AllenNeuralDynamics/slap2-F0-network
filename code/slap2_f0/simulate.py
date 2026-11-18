@@ -38,7 +38,18 @@ geometry, brightness, events and noise statistics:
   in a GFP control, so the template's footprint geometry no longer says which
   pixels are active and only the events themselves do. Without them, a
   network fine-tuned on sensor sessions (where every bright pixel in the loss
-  has activity) set the baseline of GFP dendrites too low (v4 run).
+  has activity) set the baseline of GFP dendrites too low (v4 run);
+* **realistic low counts** (optional, ``photon_zeros``): on pixels where
+  zeros are likely, the noise is replaced by a zero-inflated distribution
+  with the same mean and variance (see ``_photon_zeros``). Real movies are
+  photon counts: never negative, and dim pixels are exactly 0 in many frames
+  (37% at 0.5-2 counts, 27% at 2-4, 9% at 4-8 in 780125), most of all at ROI
+  edges and in small ROIs; the filtered Poisson noise above is negative in a
+  few percent of voxels and never exactly 0. On such pixels SiLo's moving
+  median sits far below the mean and makes false sources;
+* **shuffled activity timing** (optional, ``shuffle_prob``): the template's
+  activity timeline is cut into blocks at quiet frames and reordered, which
+  breaks the recordings' stimulus rhythm while keeping every event.
 
 Each draw is a new virtual trial; the window generator returns everything the
 training windows of real data have (movie, activity, mean image, variance map,
@@ -95,6 +106,21 @@ class SimConfig:
     dark_frac: tuple[float, float] = (0.0, 0.0)
     dark_px: tuple[float, float] = (2.0, 6.0)
     dark_factor: tuple[float, float] = (0.02, 0.3)
+    # shuffled activity timing: the template's activity is cut into blocks of
+    # shuffle_frames (uniform, cut where the summed activity is low, so events
+    # stay whole) and the blocks are put in random order, which breaks the
+    # stimulus rhythm of the recordings (2 s at 2 Hz, then 1 s off) while
+    # keeping every event; probability shuffle_prob per virtual trial (0 = never)
+    shuffle_prob: float = 0.0
+    shuffle_frames: tuple[float, float] = (20.0, 60.0)
+    # realistic low counts (photon_zeros): the noise is mapped, voxel by voxel
+    # (a Gaussian copula, so its correlations stay), onto a zero-inflated
+    # distribution with the same mean and variance whose share of exact zeros
+    # is exp(-mean / c), c the template pixel's mean count per photon event,
+    # measured from its share of zero frames (stats zero_movie). Real movies are
+    # never negative and dim pixels are exactly 0 in many frames, most of all at
+    # ROI edges and in small ROIs, where SiLo's moving median makes false sources
+    photon_zeros: bool = False
 
 
 def _spatial_tap(rho: float) -> float:
@@ -238,6 +264,78 @@ class Template:
         self.n_valid = max(1.0, float(np.nanmedian(np.where(tf.valid, st["n_valid"], np.nan))))
         self.gain = float(st["gain"])
         self.fast, self.slow = excess_maps(st, self.kt, tf.valid)
+        self.zc = zero_count_scale(st, tf.valid)  # None without zero_movie (older stats)
+        at = st.get("act_trace")
+        self.act_trace = np.asarray(at, np.float64) if at is not None and np.size(at) == self.T else None
+
+
+def zero_count_scale(st: dict, valid: np.ndarray):
+    """Per pixel c, the mean count per photon event, such that the share of
+    zero frames is exp(-mean / c) (a compound Poisson process: zero when no
+    photon event lands); from the measured share of zero frames and the mean
+    where both are informative (0.01-0.99), averaged over 3x3 valid neighbours,
+    and the template's median elsewhere. None without zero_movie."""
+    if "zero_movie" not in st:
+        return None
+    z = np.asarray(st["zero_movie"], np.float64)
+    m = np.asarray(st["mean_movie"], np.float64)
+    ok = valid & np.isfinite(z) & np.isfinite(m) & (z > 0.01) & (z < 0.99) & (m > 0)
+    if not ok.any():
+        return None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        c = np.where(ok, -m / np.log(np.where(ok, z, 0.5)), 0.0)
+    cs = _smooth_valid(c, ok)
+    has = _smooth_valid(ok.astype(np.float64), valid) > 0
+    out = np.where(has, cs, float(np.median(c[ok])))
+    return np.clip(out, 0.2, 50.0).astype(np.float32)
+
+
+def _photon_zeros(movie: np.ndarray, mu: np.ndarray, var: np.ndarray, zc: np.ndarray, g: np.ndarray,
+                  z_min: float = 0.02) -> np.ndarray:
+    """Voxels whose expected share of zeros exp(-mu / c) is at least z_min
+    get a zero-inflated value with mean mu and variance var: 0 with that
+    probability, otherwise lognormal. The draw goes through g, a correlated
+    unit Gaussian field (the template's noise kernels), as a Gaussian copula,
+    so the noise keeps its time and space structure. Other voxels keep movie."""
+    import torch
+
+    z = np.exp(-np.maximum(mu, 0) / zc)
+    z = np.minimum(z, var / np.maximum(var + mu ** 2, 1e-12) - 1e-3)  # a positive part must exist
+    use = (z >= z_min) & np.isfinite(movie) & (mu > 0)
+    if not use.any():
+        return movie
+    zu, mu_u, v_u = z[use], mu[use], var[use]
+    mp = mu_u / (1 - zu)  # mean and variance of the positive part
+    vp = np.maximum((v_u + mu_u ** 2) / (1 - zu) - mp ** 2, 1e-6)
+    s2 = np.log1p(vp / mp ** 2)
+    u = torch.special.ndtr(torch.from_numpy(g[use].astype(np.float64))).numpy()
+    w = np.clip((u - zu) / (1 - zu), 1e-9, 1 - 1e-9)
+    pos = np.exp(np.log(mp) - s2 / 2 + np.sqrt(s2) * torch.special.ndtri(torch.from_numpy(w)).numpy())
+    out = movie.copy()
+    out[use] = np.where(u < zu, 0.0, pos).astype(np.float32)
+    return out
+
+
+def _shuffle_map(tp: "Template", frames: tuple[float, float], rng) -> np.ndarray:
+    """A permutation of the template's frames: blocks of frames (length
+    uniform in frames, each cut moved to the next quiet frame - summed activity
+    in its lowest 30% - so events stay whole) in random order."""
+    T = tp.T
+    a = tp.act_trace if tp.act_trace is not None else np.zeros(T)
+    quiet = a <= np.quantile(a, 0.3)
+    cuts = [0]
+    while True:
+        nxt = cuts[-1] + int(rng.uniform(*frames))
+        if nxt >= T:
+            break
+        q = np.flatnonzero(quiet[nxt: nxt + int(frames[0])])
+        nxt += int(q[0]) if len(q) else 0
+        if nxt >= T:
+            break
+        cuts.append(nxt)
+    cuts.append(T)
+    blocks = [np.arange(c0, c1) for c0, c1 in zip(cuts[:-1], cuts[1:])]
+    return np.concatenate([blocks[i] for i in rng.permutation(len(blocks))])
 
 
 def draw(tp: Template, cfg: SimConfig, rng) -> dict:
@@ -295,6 +393,10 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
             pick = sup & (fld >= thr)
             dark[pick] = rng.uniform(*cfg.dark_factor, int(pick.sum())).astype(np.float32)
         r["dark"] = dark
+    if cfg.shuffle_prob > 0 and rng.random() < cfg.shuffle_prob:  # drawn last, see above
+        r["tmap"] = _shuffle_map(tp, cfg.shuffle_frames, rng)
+    if cfg.photon_zeros and tp.zc is not None:
+        r["photon_zeros"] = True
     return r
 
 
@@ -344,8 +446,10 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
         truth = truth + np.tensordot(r["slow_proc"][:, ts:te].T, sg, 1)
     # activity, shifted circularly in time
     src = (np.arange(ts, te) - r["shift"]) % T
+    if "tmap" in r:  # shuffled timeline
+        src = r["tmap"][src]
     act = np.empty((te - ts, re - rs, ce - cs), np.float32)
-    brk = np.flatnonzero(np.diff(src) < 0)
+    brk = np.flatnonzero(np.diff(src) != 1)
     pieces = np.split(np.arange(te - ts), brk + 1)
     for idx in pieces:
         a, b = src[idx[0]], src[idx[-1]] + 1
@@ -389,6 +493,13 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     out["varfac"][dr, dc] = np.nan_to_num(tf.varfac[rs:re, cs:ce])
     out["labeled"][dr, dc] = tf.labeled[rs:re, cs:ce] & valid
     out["support"][dr, dc] = tf.support[rs:re, cs:ce] & valid
+    if r.get("photon_zeros"):  # last, so the draws above are as without it
+        ge = rng.standard_normal(Se.shape).astype(np.float32)
+        g = _filter(ge, tp.kt, tp.kr, tp.kc) / np.sqrt(tp.ksum2)
+        var = tp.gain * np.maximum(S, 0) * fac[None]
+        mz = _photon_zeros(movie, S, var, np.broadcast_to(tp.zc[rs:re, cs:ce], S.shape), g)
+        out["movie"][dt, dr, dc] = mz
+        out["noisy"][dt, dr, dc] = mz - act
     return out
 
 

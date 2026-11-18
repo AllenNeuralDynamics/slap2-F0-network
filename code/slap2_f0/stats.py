@@ -17,7 +17,14 @@ no fitted activity), on the residual movie - activity:
     F64     variance of 64-frame means relative to var / 64: how much
             correlated noise inflates long averages
     skew    skewness of single frames (photon noise at low counts is skewed)
+    zero_frac   share of exact zeros among valid movie voxels
 The simulator matches these, so its noise looks like the real movie's.
+
+Also per pixel the share of frames where the movie is exactly 0 (zero_movie:
+real movies are photon counts, never negative, and dim pixels are 0 in many
+frames), and per frame the activity summed over footprint-support pixels
+(act_trace, where the simulator may cut the activity's timeline without
+splitting events).
 """
 
 from __future__ import annotations
@@ -30,9 +37,10 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res", "var_res", "var8_res", "var64_res")
-SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "n_frames")
-VERSION = 4  # bump when the stats change, to invalidate caches
+MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res", "var_res", "var8_res", "var64_res",
+        "zero_movie", "act_trace")  # arrays (act_trace is per frame)
+SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "zero_frac", "n_frames")
+VERSION = 5  # bump when the stats change, to invalidate caches
 
 
 def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 64) -> dict:
@@ -43,9 +51,11 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         mi = f["mean_image"][channel]
         valid = f["mask/valid"][:].astype(bool) & np.isfinite(mi)
         bg = valid & ~f["mask/labeled"][:].astype(bool)
+        support = valid & f["mask/footprint_support"][:].astype(bool)
         discard = f["frame/discard"][:].astype(bool)
+        act_trace = np.zeros(T, np.float64)
         z = lambda *s: np.zeros(s or (R, C), np.float64)  # noqa: E731
-        n, sm, sm2, sa, sa2 = z(), z(), z(), z(), z()
+        n, sm, sm2, sa, sa2, nz = z(), z(), z(), z(), z(), z()
         # residual moments on background pixels: own, lag 1 and 2, next row, next column
         sx, sx2, sx3 = z(), z(), z()
         lag = {k: [z(), z(), z(), z()] for k in (1, 2)}  # sum x_t x_t+k, sum x_t, sum x_t+k, count
@@ -69,6 +79,8 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
             sm2 += (m0 ** 2).sum(0, dtype=np.float64)
             sa += a0.sum(0, dtype=np.float64)
             sa2 += (a0 ** 2).sum(0, dtype=np.float64)
+            nz += (fin & (m == 0)).sum(0, dtype=np.float64)
+            act_trace[t0:t1] = np.nan_to_num(a[:, support]).sum(1, dtype=np.float64)
             xr = m0 - a0
             rs += xr.sum(0, dtype=np.float64)
             rs2 += (xr ** 2).sum(0, dtype=np.float64)
@@ -123,6 +135,7 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         mean_act = sa / n
         mean_act2 = sa2 / n
         mean_res = rs / n
+        zero_movie = nz / n
         var_res = rs2 / n - mean_res ** 2
         var8_res = b8s2 / np.maximum(b8n, 1) - (b8s / np.maximum(b8n, 1)) ** 2
         var8_res[b8n < 8] = np.nan
@@ -154,8 +167,11 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         skew = float(np.median(m3[use] / vx[use] ** 1.5)) if use.any() else float("nan")
     out = {k: v.astype(np.float32) for k, v in
            dict(mean_movie=mean_movie, var_movie=var_movie, mean_act=mean_act, mean_act2=mean_act2, n_valid=n,
-                mean_res=mean_res, var_res=var_res, var8_res=var8_res, var64_res=var64_res).items()}
-    out.update(gain=gain, rho_t1=corr_t(1), rho_t2=corr_t(2), rho_r=rho_r, rho_c=rho_c, F64=F64, skew=skew, n_frames=float(T))
+                mean_res=mean_res, var_res=var_res, var8_res=var8_res, var64_res=var64_res, zero_movie=zero_movie,
+                act_trace=act_trace).items()}
+    zf = float(nz[valid].sum() / max(n[valid].sum(), 1))
+    out.update(gain=gain, rho_t1=corr_t(1), rho_t2=corr_t(2), rho_r=rho_r, rho_c=rho_c, F64=F64, skew=skew, zero_frac=zf,
+               n_frames=float(T))
     return out
 
 

@@ -12,11 +12,22 @@ support pixels and unlabeled (off-dendrite) pixels weight 1; labeled pixels
 outside every footprint weight ``w_unfitted`` (default 0), because their
 residual still holds activity GIAnT did not fit. In a trial without sources
 (``nSources`` 0, e.g. a GFP control without an activity sensor) the activity
-is known to be zero, so every valid pixel weighs 1.
+is known to be zero, so every valid pixel weighs 1. With ``event_mask`` > 0,
+voxels where GIAnT's activity exceeds event_mask times the pixel's activity
+RMS over the trial, and ``event_margin`` frames around them, weigh 0: there
+the target still holds the part of the events GIAnT did not fit (up to ~20%),
+which the context makes predictable (the recordings' stimuli recur every 0.5
+and 3 s, well outside the blind spot), so a network rewarded for predicting
+it puts activity into the baseline. Simulations teach the baseline during
+events, with the true baseline as target.
 
 Simulated windows (``sim=SimConfig()``): each item is a new virtual trial
 built on a random template (see ``simulate``); the target is the noise-free
-baseline, and every valid pixel and frame has weight 1.
+baseline, and every valid pixel and frame has weight 1, or ``sim_event_weight``
+where the activity exceeds half the pixel's photon-noise SD (and
+``event_margin`` frames around): a baseline that follows the activity (the
+v6 box models do, when many synapses respond to a stimulus together, which
+looks like a frame-wide brightness change) then costs more.
 
 Activity-subtracted real windows (``subtract_frac``): with this
 probability a real window's input is movie - activity too, with the
@@ -33,8 +44,10 @@ as counterexamples to "bright labeled pixels always carry activity").
 
 Every item also carries ``noisy`` (movie - activity, for the noise head), the
 whole-trial variance map and the trial's gain (``stats``), and the support and
-labeled masks for evaluation. With ``flip`` the window is flipped at random
-along rows and/or columns (the noise is symmetric under flips).
+labeled masks for evaluation. ``flip`` flips windows at random: "rows"
+(default) up/down only, along the DMD's short axis, the one flip that leaves
+the microscope's scan alike; "both" also left/right (v1-v6); "none". Never
+rotations: the image is not the same rotated (``model.ModelConfig.hp_shared``).
 """
 
 from __future__ import annotations
@@ -57,6 +70,9 @@ class WindowConfig:
     s_reach: int = 0  # set from the model: spatial_reach
     w_unfitted: float = 0.0
     min_valid_fraction: float = 0.05  # of loss pixels
+    event_mask: float = 0.0  # real windows: no loss where activity > event_mask x its RMS (0 = off)
+    event_margin: int = 8  # frames around those voxels that weigh 0 too
+    sim_event_weight: float = 1.0  # simulated windows: loss weight during events (1 = as elsewhere)
 
 
 def _crop(a: np.ndarray, r0: int, nr: int, c0: int, nc: int, fill=np.nan) -> np.ndarray:
@@ -72,7 +88,7 @@ class WindowDataset(Dataset):
     """Each item is a random window from a random trial (real or simulated)."""
 
     def __init__(self, files, cfg: WindowConfig, stats: dict, length: int = 10000, seed: int = 0,
-                 sim: SimConfig | None = None, flip: bool = True, sim_frac: float = 1.0,
+                 sim: SimConfig | None = None, flip: str | bool = "rows", sim_frac: float = 1.0,
                  subtract_frac: float = 0.0):
         self.files = [str(f) for f in files]
         self.cfg = cfg
@@ -80,7 +96,9 @@ class WindowDataset(Dataset):
         self.length = length
         self.seed = seed
         self.sim = sim
-        self.flip = flip
+        self.flip = {True: "both", False: "none"}.get(flip, flip) if isinstance(flip, bool) else flip
+        if self.flip not in ("rows", "both", "none"):
+            raise ValueError(f"flip must be rows, both or none, not {flip!r}")
         self.sim_frac = sim_frac
         self.subtract_frac = subtract_frac
         self._open: dict[str, TrialFile] = {}
@@ -122,6 +140,10 @@ class WindowDataset(Dataset):
                 mean_image, var_map, varfac, mean_act = w["mean_image"], w["var_map"], w["varfac"], w["mean_act"]
                 labeled, support = w["labeled"], w["support"]
                 weight = np.isfinite(movie).astype(np.float32)
+                if c.sim_event_weight != 1:
+                    sd = np.sqrt(np.maximum(st["gain"] * np.nan_to_num(mean_image), 1e-6))
+                    ev = _dilate_time(w["activity"] > 0.5 * sd[None], c.event_margin)
+                    weight *= np.where(ev, np.float32(c.sim_event_weight), np.float32(1.0))
             else:
                 p = tr.read(t0, nt, r0, ns, c0, ns)
                 movie, mean_image, varfac = p.movie, p.mean_image, p.varfac
@@ -138,10 +160,14 @@ class WindowDataset(Dataset):
                 weight = np.isfinite(target).astype(np.float32)
                 w_unf = c.w_unfitted if tr.attrs.get("nSources", 1) else 1.0  # no sources: no activity
                 weight *= np.where(labeled & ~support, w_unf, 1.0).astype(np.float32)[None]
+                if c.event_mask > 0:
+                    rms = np.sqrt(np.maximum(_crop(st["mean_act2"], r0, ns, c0, ns, 0.0), 0))
+                    ev = np.nan_to_num(p.activity) > c.event_mask * np.maximum(rms, 1e-6)[None]
+                    weight *= ~_dilate_time(ev & (rms > 0)[None], c.event_margin)
             if weight[sl].mean() >= c.min_valid_fraction:
                 break
-        if self.flip:
-            axes = [ax for ax in (1, 2) if rng.random() < 0.5]
+        if self.flip != "none":
+            axes = [ax for ax in ((1, 2) if self.flip == "both" else (1,)) if rng.random() < 0.5]
             if axes:
                 f3 = lambda a: np.ascontiguousarray(np.flip(a, axes))  # noqa: E731
                 f2 = lambda a: np.ascontiguousarray(np.flip(a, [ax - 1 for ax in axes]))  # noqa: E731
@@ -163,6 +189,17 @@ class WindowDataset(Dataset):
             "support": torch.from_numpy(support.astype(np.uint8)),
             "labeled": torch.from_numpy(labeled.astype(np.uint8)),
         }
+
+
+def _dilate_time(m: np.ndarray, k: int) -> np.ndarray:
+    """m (T, ...) bool, true within k frames of a true voxel."""
+    if k <= 0 or not m.any():
+        return m
+    out = m.copy()
+    for d in range(1, k + 1):
+        out[d:] |= m[:-d]
+        out[:-d] |= m[d:]
+    return out
 
 
 def loss_region(cfg: WindowConfig) -> tuple[slice, slice, slice]:

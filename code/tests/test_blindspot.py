@@ -124,13 +124,14 @@ def _activate_box(model):
 
 @pytest.mark.parametrize("which", [0, 1])  # mu, var
 @pytest.mark.parametrize("radius", [2, 4])
-def test_box_blind_spot(which, radius):
+@pytest.mark.parametrize("shared", [False, True])  # one half-plane trunk per direction, or one for all
+def test_box_blind_spot(which, radius, shared):
     """Box model: nothing inside |dt| <= gap, |dr|, |dc| <= radius reaches the
     output; the nearest pixels outside the box are used in the output frame."""
     torch.manual_seed(0)
     cfg = ModelConfig(gap=3, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 2, 1], window_reach=10,
                       full_res_blocks=1, box_radius=radius, hp_width=6, hp_temporal_dilations=[1, 2, 1],
-                      hp_spatial_dilations=[1, 1, 2], hp_full_res_blocks=1, pool_scales=[3, 0])
+                      hp_spatial_dilations=[1, 1, 2], hp_full_res_blocks=1, pool_scales=[3, 0], hp_shared=shared)
     model = SlabBlindSpotNet(cfg).double()
     _activate_box(model)
     x = torch.randn(1, cfg.n_inputs, 40, 23, 25, dtype=torch.float64)
@@ -284,3 +285,31 @@ def test_adapted_varfac_weights_keep_the_output():
         c = old(make_inputs(movie, mean, vf, s, varfac_norm="trial"), s, region=region)[0]
     assert torch.allclose(a, b, rtol=1e-4, atol=1e-5)
     assert not torch.allclose(a, c, rtol=1e-3, atol=1e-4)  # unfolded, the new input changes the output
+
+
+def test_shared_halfplane_trunk_starts_per_direction_trunks():
+    """A v6 checkpoint (one half-plane trunk for all directions) in a model with
+    one trunk per direction: the same outputs at the start; then the
+    directions can differ (they no longer share weights)."""
+    from slap2_f0.model import config_from_dict
+    from slap2_f0.train import load_compatible
+
+    torch.manual_seed(3)
+    kw = dict(gap=2, width=4, temporal_dilations=[1, 2], spatial_dilations=[1, 1], full_res_blocks=1,
+              window_reach=6, checkpoint=False, box_radius=1, hp_width=4, hp_temporal_dilations=[1, 2],
+              hp_spatial_dilations=[1, 1], hp_full_res_blocks=1, pool_scales=[2])
+    old = SlabBlindSpotNet(ModelConfig(**kw, hp_shared=True)).double().eval()
+    _activate_box(old)
+    new = SlabBlindSpotNet(ModelConfig(**kw)).double().eval()
+    assert new.hp is None and len(new.hp_views) == 4
+    load_compatible(new, old.state_dict())
+    x = torch.randn(1, 5, 20, 12, 14, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    with torch.no_grad():
+        a, b = old(x), new(x)
+        assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+        new.hp_views[1].inp.weight.add_(0.1)  # one direction changes on its own
+        assert not torch.allclose(new(x)[0], a[0])
+    # checkpoints saved before the option load as shared
+    d = {k: v for k, v in vars(ModelConfig(**kw)).items() if k != "hp_shared"}
+    assert config_from_dict(d).hp_shared

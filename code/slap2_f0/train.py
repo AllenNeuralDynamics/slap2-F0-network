@@ -44,7 +44,7 @@ import math
 import shutil
 import time
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -180,6 +180,10 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
     MSE is the baseline error itself. bias_* = mean(target - baseline).
+    sup_leak_*: the slope of (baseline - target) on the activity at support
+    pixels, 8-frame means: how much of the activity the baseline follows (0 =
+    none; for real windows, whose target still holds the activity GIAnT did
+    not fit, this is the leak minus that share).
     Calibration: z = (movie - activity - mu) / sqrt(var) should have mean 0 and
     variance 1; r8 is the variance of 8-frame averages of the residual over
     the mean predicted per-frame variance (the factor that converts the
@@ -208,6 +212,9 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
         classes = {"": w, "sup_": w * sup, "bg_": w * bg, "lab_": w * (~bg & ~sup)}
         y8, n8 = movmean_t(y, w)
         w8 = w * (n8 >= 4)
+        act = torch.nan_to_num(b["movie"][sel] / s.unsqueeze(1) - yn)  # movie - (movie - activity)
+        a8, _ = movmean_t(act, w)
+        sw8 = (w * sup * w8).float()
         for cname, cw in classes.items():
             n = cw.sum().item()
             if n == 0:
@@ -221,6 +228,11 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
                 p8, _ = movmean_t(p, w)
                 tot[f"{cname}mse8_{pname}"] += (cw8 * (y8 - p8) ** 2).sum().item()
                 tot[f"{cname}bias_{pname}"] += (cw * d).sum().item()
+                if cname == "sup_":  # leak: regression of (baseline - target) on the activity
+                    e8 = p8 - y8
+                    for k, val in (("a", a8), ("aa", a8 * a8), ("e", e8), ("ae", a8 * e8)):
+                        tot[f"leak_{k}_{pname}"] += (sw8 * val).sum().item()
+                    tot[f"leak_n_{pname}"] += sw8.sum().item()
         n = w.sum().item()
         tot["loss"] += (w * (y - m) ** 2 / _ref_var(b, region)).sum().item()
         tot["var_loss"] += gaussian_nll(yn, m, v, w).item() * n
@@ -238,6 +250,12 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     zm = tot["z"] / n
     out.update(z_mean=zm, z_var=tot["z2"] / n - zm ** 2, within_2=tot["in2"] / n,
                r8=tot["r8_num"] / max(tot["r8_den"], 1e-9), mix=tot["mix"] / n)
+    for pname in [k[len("leak_n_"):] for k in tot if k.startswith("leak_n_")]:
+        nn_ = tot[f"leak_n_{pname}"]
+        if nn_ > 0:
+            ma, me = tot[f"leak_a_{pname}"] / nn_, tot[f"leak_e_{pname}"] / nn_
+            va = tot[f"leak_aa_{pname}"] / nn_ - ma ** 2
+            out[f"sup_leak_{pname}"] = (tot[f"leak_ae_{pname}"] / nn_ - ma * me) / va if va > 1e-12 else math.nan
     for k, v in tot.items():
         if "_mse" in k or k.startswith("mse") or "bias_" in k:
             cname = k.split("mse")[0] if "mse" in k else k.split("bias_")[0]
@@ -282,6 +300,7 @@ def _model_config(args) -> ModelConfig:
         mcfg.spatial_dilations = [int(d) for d in args.spatial_dilations.split(",")]
     mcfg.box_radius, mcfg.hp_width, mcfg.hp_full_res_blocks = args.box_radius, args.hp_width, args.hp_full_res_blocks
     mcfg.varfac_norm = args.varfac_norm
+    mcfg.hp_shared = args.hp_shared
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -327,6 +346,13 @@ def load_compatible(model: torch.nn.Module, state: dict) -> str:
     Returns a summary."""
     own = model.state_dict()
     copied, grown, new = 0, [], []
+    state = dict(state)
+    if any(k.startswith("hp_views.") for k in own) and any(k.startswith("hp.") for k in state):
+        for k in own:  # a shared half-plane trunk (hp.*) starts every per-direction trunk (hp_views.<k>.*)
+            src = "hp." + k.split(".", 2)[2] if k.startswith("hp_views.") else None
+            if src in state and k not in state:
+                state[k] = state[src]
+        state = {k: v for k, v in state.items() if not k.startswith("hp.")}
     for k, v in own.items():
         if k not in state:
             new.append(k)
@@ -368,24 +394,40 @@ FAST_GLOBAL_SD, FAST_FIELD_SD = 0.06, 0.04  # real: field-wide 2-5%, per 48-px r
 FAST_SIM = dict(fast_global_sd=FAST_GLOBAL_SD, fast_field_sd=FAST_FIELD_SD)
 
 
-def eval_sim(kind: str) -> SimConfig | None:
-    """The simulation of an evaluation kind (real: None)."""
-    return {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
-            "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3))}.get(kind)
+def eval_sim(kind: str, photon_zeros: bool = False) -> SimConfig | None:
+    """The simulation of an evaluation kind (real: None). A kind may end in
+    "pz" (realistic low counts) and/or "shuf" (shuffled activity timing, no
+    stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"."""
+    base = _base_kind(kind)
+    cfg = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
+           "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3))}.get(base)
+    if cfg is not None:
+        cfg.photon_zeros = photon_zeros or "pz" in kind[len(base):]
+        cfg.shuffle_prob = 1.0 if "shuf" in kind[len(base):] else 0.0
+    return cfg
 
 
-# dark: fast simulations where 30% of the footprint pixels sit on a nearly dark baseline
+def _base_kind(kind: str) -> str:
+    for b in ("real", "sim", "free", "fast", "dark"):
+        if kind.startswith(b):
+            return b
+    return kind
+
+
+# dark: fast simulations where 30% of the footprint pixels sit on a nearly dark baseline;
+# the "pz" and "shuf" variants use their base kind's seed, so they score the same windows
 EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "dark": 60_000}
 
 
 def sim_config(args, free: bool = False) -> SimConfig:
     """Simulation settings from the arguments; free: no activity anywhere."""
     if free:
-        return SimConfig(silent_trial=1.0)
+        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros)
     lo, hi = (float(v) for v in args.silent_frac.split(","))
     dlo, dhi = (float(v) for v in args.dark_frac.split(","))
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
-                     fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi))
+                     fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi),
+                     shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros)
 
 
 def train(args) -> None:
@@ -405,6 +447,9 @@ def train(args) -> None:
     wcfg = WindowConfig(out_frames=args.out_frames, out_px=args.out_px,
                         t_reach=mcfg.gap + 1 + mcfg.temporal_reach, s_reach=mcfg.spatial_reach,
                         w_unfitted=args.w_unfitted)
+    # event masking only in training windows, so validation metrics stay comparable across runs
+    wcfg_train = replace(wcfg, event_mask=args.event_mask, event_margin=args.event_margin,
+                         sim_event_weight=args.sim_event_weight)
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     amp_dtype = None
     if device.type == "cuda" and not args.no_amp:
@@ -435,18 +480,19 @@ def train(args) -> None:
     frac = args.sim_frac if args.data == "mix" else 1.0
     kw = dict(num_workers=args.workers, persistent_workers=args.workers > 0, pin_memory=device.type == "cuda")
     mk = lambda fl, n, seed, s, fr=1.0: DataLoader(  # noqa: E731
-        WindowDataset(fl, wcfg, stats, length=n, seed=seed, sim=s, flip=seed == args.seed and not args.no_flip,
+        WindowDataset(fl, wcfg_train if seed == args.seed else wcfg, stats, length=n, seed=seed, sim=s,
+                      flip=("none" if args.no_flip else args.flip) if seed == args.seed else "none",
                       sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
         batch_size=args.batch, **kw)
     dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
     evals = {}
     if val_files:
         evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
-        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, SimConfig())
+        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, eval_sim("sim", args.photon_zeros))
         if args.val_free:
             evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
         if args.val_fast:
-            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast"))
+            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast", args.photon_zeros))
     evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
     region = loss_region(wcfg)
     sel_prefix = (args.select_on or ("real" if args.data == "mix" else args.data)) if val_files else "tr"
@@ -560,7 +606,7 @@ def evaluate_checkpoints(args) -> None:
         for sess in sorted(groups):
             for kind in args.kinds.split(","):
                 sim = eval_sim(kind)
-                seed = EVAL_SEEDS[kind] + args.seed
+                seed = EVAL_SEEDS[_base_kind(kind)] + args.seed
                 ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows, seed=seed, sim=sim, flip=False)
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                     pin_memory=device.type == "cuda")
@@ -736,6 +782,13 @@ def add_arguments(p) -> None:
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
     p.add_argument("--w_unfitted", type=float, default=0.0, help="loss weight of labeled pixels outside every footprint")
+    p.add_argument("--event_mask", type=float, default=0.0,
+                   help="real training windows: no loss where GIAnT activity exceeds this times its RMS over the trial, "
+                        "and --event_margin frames around (the target there holds unfitted activity; 0 = off)")
+    p.add_argument("--event_margin", type=int, default=8)
+    p.add_argument("--sim_event_weight", type=float, default=1.0,
+                   help="simulated training windows: loss weight where the activity exceeds half the photon-noise SD "
+                        "(and --event_margin frames around); > 1 makes a baseline that follows the activity cost more")
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=1, help="micro-batches of --batch windows per optimizer step")
     p.add_argument("--steps", type=int, default=20000)
@@ -776,7 +829,17 @@ def add_arguments(p) -> None:
                         "simulation, needs --val_free) or over all pixels (mse8), or the mean loss")
     p.add_argument("--select_on", default="", help="validation set for best.pt (real, sim, free, fast); "
                                                   "default: the training data kind (real for mix)")
-    p.add_argument("--no_flip", action="store_true", help="no random flips of training windows")
+    p.add_argument("--no_flip", action="store_true", help="no random flips of training windows (= --flip none)")
+    p.add_argument("--flip", default="rows", choices=["rows", "both", "none"],
+                   help="random flips of training windows: up/down only (rows, the DMD's short axis; default), "
+                        "also left/right (both, v1-v6), or none. Never rotations: the microscope scans")
+    p.add_argument("--hp_shared", action="store_true",
+                   help="one half-plane trunk for all four directions (v6) instead of one per direction")
+    p.add_argument("--photon_zeros", action="store_true",
+                   help="simulate realistic low counts (zero-inflated, never negative; SimConfig.photon_zeros); "
+                        "validation simulations too")
+    p.add_argument("--shuffle_prob", type=float, default=0.0,
+                   help="share of simulated trials with shuffled activity timing (no stimulus rhythm)")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)
     p.add_argument("--val_every", type=int, default=1000)

@@ -7,7 +7,9 @@ time and scaled, is added to a drifting baseline with matched noise, so the
 true sources are the template's GIAnT sources (``sources/peak_row``,
 ``peak_col``, copied into each simulated file) and the true baseline is
 ``truth/baseline``. Kinds: "sim" (the default simulator) and "fast" (with the
-fast shared brightness changes v6 was trained on). Writes
+fast shared brightness changes v6 was trained on), each optionally with
+"shuf" (shuffled activity timing: no stimulus rhythm) and/or "pz"
+(realistic low counts), e.g. "simshuf", "fastpz". Writes
 OUT_DIR/<session>_<kind><seed>/Path1/trial_001.h5, so ``slap2-f0 predict``
 names them by folder.
 """
@@ -40,7 +42,12 @@ for fn in args.trials:
         session = str(tf.attrs.get("label", Path(fn).parent.parent.name))
         tp = Template(tf, stats[str(fn)])
         for kind in args.kinds.split(","):
-            cfg = SimConfig(**FAST_SIM) if kind == "fast" else SimConfig()
+            base = dict(FAST_SIM) if kind.startswith("fast") else {}
+            if "shuf" in kind:
+                base["shuffle_prob"] = 1.0
+            if "pz" in kind:
+                base["photon_zeros"] = True
+            cfg = SimConfig(**base)
             for seed in range(args.seeds):
                 dest = out / f"{session}_{kind}{seed}" / "Path1" / "trial_001.h5"
                 dest.parent.mkdir(parents=True, exist_ok=True)

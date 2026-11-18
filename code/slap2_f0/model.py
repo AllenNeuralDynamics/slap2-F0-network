@@ -92,6 +92,12 @@ class ModelConfig:
     hp_spatial_dilations: list[int] = field(default_factory=lambda: [1, 1, 1, 2, 4])
     hp_full_res_blocks: int = 2  # the rest at half resolution
     pool_scales: list[int] = field(default_factory=lambda: [8, 16, 32, 0])
+    # one half-plane trunk for all four directions (rotated copies of the
+    # input; checkpoints up to v6) or one per direction. The microscope scans,
+    # so the image is not the same rotated by 90 degrees (rows are the DMD's
+    # short axis; only up/down flips leave it alike): separate trunks let each
+    # direction learn its own filters
+    hp_shared: bool = False
     # variance-factor input: "trial" = log of the factor relative to its median
     # over the trial's imaged pixels (``io.TrialFile``), the same in every
     # window; "window" (checkpoints up to v6) = relative to the median over the
@@ -370,7 +376,8 @@ class SlabBlindSpotNet(nn.Module):
         w = self.cfg.width
         self.past = CausalBranch(self.cfg)
         self.future = CausalBranch(self.cfg)
-        self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box else None
+        self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box and self.cfg.hp_shared else None
+        self.hp_views = nn.ModuleList([HalfPlaneBranch(self.cfg) for _ in range(4)])             if self.cfg.box and not self.cfg.hp_shared else None
         n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool if self.cfg.box else 0)
         self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
@@ -398,7 +405,9 @@ class SlabBlindSpotNet(nn.Module):
         line up (row pairs 2i, 2i + 1 in the window's own coordinates)."""
         H, W = x.shape[3:]
         xp = F.pad(x, (0, W % 2, 0, H % 2))
-        if xp.shape[3] == xp.shape[4] and torch.is_grad_enabled():  # square: one batched pass over the rotations
+        if self.hp_views is not None:  # one trunk per direction
+            outs = [torch.rot90(self.hp_views[k](torch.rot90(xp, k, (3, 4))), -k, (3, 4)) for k in range(4)]
+        elif xp.shape[3] == xp.shape[4] and torch.is_grad_enabled():  # square: one batched pass over the rotations
             # (in inference one rotation at a time, below: a quarter of the memory)
             h = self.hp(torch.cat([torch.rot90(xp, k, (3, 4)) for k in range(4)], 0))
             outs = [torch.rot90(hk, -k, (3, 4)) for k, hk in enumerate(h.chunk(4, 0))]
@@ -430,7 +439,7 @@ class SlabBlindSpotNet(nn.Module):
         hf = hf.flip(2)
         wm, wv, n = blind_window_stats(x[:, 0], x[:, 1], self.cfg.gap, self.cfg.window_reach)
         extra = []
-        if self.hp is not None:  # box blind spot: same-frame context outside the box
+        if self.cfg.box:  # box blind spot: same-frame context outside the box
             t0 = 0 if region is None or region[0].start is None else region[0].start
             t1 = T if region is None or region[0].stop is None else region[0].stop
             R = self.cfg.hp_temporal_reach
@@ -464,6 +473,7 @@ def config_from_dict(d: dict) -> ModelConfig:
     existed used the window median."""
     d = dict(d)
     d.setdefault("varfac_norm", "window")
+    d.setdefault("hp_shared", True)  # up to v6: one half-plane trunk for all directions
     return ModelConfig(**d)
 
 
