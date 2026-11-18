@@ -733,26 +733,37 @@ The old noise already pulled the moving median of dim pixels below the mean, as 
 
 ## Bias at trial edges (2026-11-17)
 
-`tools/edge_bias.py`, bias in bins of frames counted from each trial's first and last frame.
+**Method: cut trials into pieces** (`tools/edge_pieces.py`). Neither GIAnT's activity nor a residual against the movie is a sound reference near trial edges: the activity was fitted with GIAnT's own baseline, which may be biased there too, and the residual assumes activity does not change near edges. So each trial is predicted whole and again cut into 512-frame pieces, each piece predicted as a trial of its own but with the whole trial's mean image, variance maps and gain, so only the truncation in time differs. At a cut the pieces sit at a trial edge while the whole trial's prediction is in its middle: (piece − whole) / whole, by distance from the cut, is the edge bias alone, on real data as on simulated, and each cut adds two edges. It is 0 beyond the model's temporal reach (263 frames), as it must be (|piece − whole| ≤ 0.2% at 256–400 frames). On simulated trials the pieces and the whole trial are also compared with the true baseline.
 
-**Simulations, against the true baseline** (16 simulated trials, 4 sessions; % of the true baseline, background / support pixels):
+**Simulations** (8 trials: the 4 sessions' viewer trials as templates, default and fast-brightness simulations; 2–3 cuts each), piece − whole in % of the baseline (± SE over trials):
 
-| | first 16 frames (0.2 s) | middle | last 16 frames |
-|---|---|---|---|
-| v6r pretrained | +0.1 / +4.3 | −1.8 / +1.7 | −0.2 to −0.8 / +3.5 to +5.0 |
-| v6r fine-tuned | +0.5 / +3.1 | −0.9 / +1.7 | +0.1 / +4.3 to +5.4 |
-| v6s pretrained | +0.2 / +3.5 | −1.1 / +0.7 | −2.6 / −1.8 |
-| v6s fine-tuned | −0.6 / +3.7 | −2.2 / +1.0 | −2.9 / +0.1 |
-| v6f | +0.1 / +4.5 | −2.0 / +1.2 | −0.5 / +3.6 to +4.7 |
-| v6 fine-tuned | −0.7 / +3.4 | −1.1 / +2.9 | −2.4 / +2.6 to +3.1 |
+| | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| v6r pretrained, support, end of a piece | +4.1 ± 1.2 | +2.5 ± 0.9 | +0.9 ± 0.5 | +0.7 ± 0.2 | +0.5 ± 0.1 | +0.2 |
+| v6r pretrained, support, start of a piece | +1.8 ± 0.5 | +0.1 | +0.1 | +0.5 | +0.2 | +0.1 |
+| v6r pretrained, background, end | +2.2 ± 0.3 | +1.5 | +1.2 | +1.0 | +0.6 | +0.2 |
+| v6r pretrained, background, start | +1.5 ± 0.2 | +0.3 | +0.3 | +0.5 | +0.3 | +0.2 |
+| v6s fine-tuned, support, end | +0.1 | −0.6 | −0.6 | −0.1 | +0.1 | +0.1 |
+| v6s fine-tuned, support, start | +2.9 ± 0.8 | +2.9 ± 0.6 | +2.2 ± 0.5 | +1.3 ± 0.3 | +0.4 | 0.0 |
+| v6s fine-tuned, background, end | +0.4 | −0.5 | −0.2 | +0.3 | +0.3 | +0.1 |
+| v6s fine-tuned, background, start | +1.2 ± 0.3 | +1.2 | +1.0 | +0.7 | +0.3 | +0.1 |
 
-Within about the first and last 32–64 frames (0.4–0.8 s), the baseline is off by 1–4 points of the baseline relative to mid-trial. At the start it is too high in every model; at the end the sign depends on the checkpoint.
+Against the true baseline the pieces agree: at support pixels v6r is 5.1 points above its mid-trial bias in the last 8 frames before a cut, v6s 4.4 points above in the first 8 after one. **Both checkpoints put the baseline too high at trial edges, each mostly at one edge (v6r at the end, v6s at the start), by 2–4% of the baseline at footprint pixels in the first or last 0.1–0.2 s and ~1% out to 0.4–0.8 s.** A too-high baseline at the edges shrinks events there (SiLo's Z-scores, extracted amplitudes).
 
-**Real trials:** the true baseline is unknown, so the residual movie − baseline is averaged over all valid pixels and trials, relative to mid-trial (a step at the edges is bias, or a real transient the baseline does not follow).
-- **30 trial-paths of 780125 (`predict-registered` baselines), v6 fine-tuned:** +1.1 (first 8 frames), +0.8 (8–16), −0.5 (16–128), +0.2 to +0.7 at the end; standard error 0.3–0.4. **v6r pretrained:** −0.8 to −1.3 over the first 128 frames (its baseline about 1 point high there, as in the simulations), +0.4 to +0.8 from 256 to 16 frames before the end, −0.3 to −0.7 in the last 16 frames (SE 0.2–0.5). So the edge effect on real trials is about 1 point of the baseline, over up to the first 1.6 s.
-- **The five viewer trials** (noisier) show the same picture: the v6r, v6f and v6s baselines sit 2–3 points higher in the first 0.2–0.8 s; the slab models and SiLo's moving median stay within ±1–2 points with no consistent sign.
+**Real trials** (the five sessions' viewer trials, 2–3 cuts each; footprint support from the export, which only labels pixels), piece − whole in % of the baseline (± SE over trials):
 
-**Why:** uniformly placed training windows put only ~7% of their outputs in the first or last 64 frames of a trial. `--edge_frac` now makes that share of windows start or end their loss region at a trial edge (±64 frames). The v7 runs do not use it; the next run should, and `edge_bias.py` checks it.
+| | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| v6r pretrained, support, end of a piece | +5.2 ± 2.2 | +3.9 ± 2.0 | +1.9 ± 1.3 | +1.3 ± 0.7 | +0.7 ± 0.2 | +0.1 |
+| v6r pretrained, background, end | +2.3 ± 0.6 | +1.8 ± 0.5 | +1.4 ± 0.3 | +1.2 ± 0.2 | +0.7 ± 0.1 | +0.2 |
+| v6r pretrained, support / background, start | +1.6 / +1.1 | 0.0 / +0.2 | −0.1 / +0.2 | +0.4 / +0.4 | +0.2 / +0.3 | +0.1 |
+| v6s fine-tuned, support, start of a piece | +2.9 ± 1.1 | +2.8 ± 0.9 | +2.2 ± 0.7 | +1.1 ± 0.3 | +0.3 ± 0.1 | +0.1 |
+| v6s fine-tuned, background, start | +1.0 ± 0.4 | +1.1 ± 0.4 | +0.9 ± 0.3 | +0.6 ± 0.1 | +0.2 | 0.0 |
+| v6s fine-tuned, support / background, end | +0.1 / +0.7 | −0.7 / −0.3 | −0.5 / 0.0 | 0.0 / +0.4 | +0.1 / +0.3 | +0.1 |
+
+The same pattern and size as in the simulations, so the simulations' edge bias is what real trials get. It is largest in the dim 878030 (v6r, all pixels: +5.9% in the last 8 frames) and small, slightly negative, in the GFP control. (The earlier estimates from residuals against GIAnT's activity, or against the movie averaged over trials, are superseded: they depended on GIAnT's own baseline or assumed steady activity near edges.)
+
+**Why, and the fix:** uniformly placed training windows put only ~7% of their outputs in the first or last 64 frames of a trial. `--edge_frac` makes that share of windows start or end their loss region at a trial edge (±64 frames). The v7 runs do not use it; the next run should, judged with `edge_pieces.py` on simulated (against the truth) and real trials.
 
 ## Machines without a GPU (2026-11-17)
 
