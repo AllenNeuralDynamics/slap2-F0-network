@@ -730,3 +730,48 @@ The old noise already pulled the moving median of dim pixels below the mean, as 
 **Guards against the leak** (options, used in v7): `--sim_event_weight` weights simulated voxels during events (activity above half the photon-noise SD, ±8 frames) more, so following the activity costs more where the truth is known. `--event_mask` drops real training voxels during GIAnT events, where the target still holds the part of the events GIAnT did not fit. `--shuffle_prob` breaks the stimulus rhythm in a share of simulated trials.
 
 **Shuffling and the baseline.** Shuffling reorders only the activity: the true baseline of a shuffled simulation is bit-for-bit that of the same simulation in order (bleaching, slow and fast shared brightness and the slow excess stay continuous), and the v6 models track it as well (error against the truth within 1–4 points of the ordered simulations, 4 sessions × 4 checkpoints). But the activity is never zero, even at the quiet frames where it is cut, so every cut is a step in the activity pattern. The summed change of the support pixels' activity at a cut is 3.4× the usual frame-to-frame change (50 cuts in a 780125 trial, 2% of frames, carry 7.5% of all activity change). A network trained on that may learn that abrupt, lasting steps are activity, and real baselines do step (motion, fast shared brightness). And it buys little: the rhythm explains 0.01–0.03 of a 0.1–0.25 leak. So v7c is v7 without shuffling: v7 against v7c shows what training on shuffled timing costs or gains, v7c against v7b what the other two guards do. Unless v7 clearly beats v7c, shuffling stays a diagnostic.
+
+## Bias at trial edges (2026-11-17)
+
+`tools/edge_bias.py`, bias in bins of frames counted from each trial's first and last frame.
+
+**Simulations, against the true baseline** (16 simulated trials, 4 sessions; % of the true baseline, background / support pixels):
+
+| | first 16 frames (0.2 s) | middle | last 16 frames |
+|---|---|---|---|
+| v6r pretrained | +0.1 / +4.3 | −1.8 / +1.7 | −0.2 to −0.8 / +3.5 to +5.0 |
+| v6r fine-tuned | +0.5 / +3.1 | −0.9 / +1.7 | +0.1 / +4.3 to +5.4 |
+| v6s pretrained | +0.2 / +3.5 | −1.1 / +0.7 | −2.6 / −1.8 |
+| v6s fine-tuned | −0.6 / +3.7 | −2.2 / +1.0 | −2.9 / +0.1 |
+| v6f | +0.1 / +4.5 | −2.0 / +1.2 | −0.5 / +3.6 to +4.7 |
+| v6 fine-tuned | −0.7 / +3.4 | −1.1 / +2.9 | −2.4 / +2.6 to +3.1 |
+
+Within about the first and last 32–64 frames (0.4–0.8 s), the baseline is off by 1–4 points of the baseline relative to mid-trial. At the start it is too high in every model; at the end the sign depends on the checkpoint.
+
+**Real trials:** the true baseline is unknown, so the residual movie − baseline is averaged over all valid pixels and trials, relative to mid-trial (a step at the edges is bias, or a real transient the baseline does not follow).
+- **30 trial-paths of 780125 (`predict-registered` baselines), v6 fine-tuned:** +1.1 (first 8 frames), +0.8 (8–16), −0.5 (16–128), +0.2 to +0.7 at the end; standard error 0.3–0.4. **v6r pretrained:** −0.8 to −1.3 over the first 128 frames (its baseline about 1 point high there, as in the simulations), +0.4 to +0.8 from 256 to 16 frames before the end, −0.3 to −0.7 in the last 16 frames (SE 0.2–0.5). So the edge effect on real trials is about 1 point of the baseline, over up to the first 1.6 s.
+- **The five viewer trials** (noisier) show the same picture: the v6r, v6f and v6s baselines sit 2–3 points higher in the first 0.2–0.8 s; the slab models and SiLo's moving median stay within ±1–2 points with no consistent sign.
+
+**Why:** uniformly placed training windows put only ~7% of their outputs in the first or last 64 frames of a trial. `--edge_frac` now makes that share of windows start or end their loss region at a trial edge (±64 frames). The v7 runs do not use it; the next run should, and `edge_bias.py` checks it.
+
+## Machines without a GPU (2026-11-17)
+
+**CPU inference is not an option.** Forward time per output voxel on the 16-core Threadripper (fp32, all threads) against the local RTX 4060 Ti (fp16), same tiles (128 output frames × 48² px):
+
+| variant | parameters | CPU cost relative to v6 | CPU / GPU |
+|---|---|---|---|
+| v6 box | 310k | 1 | 24× |
+| v6f (reach 14) | 310k | 0.68 | 25× |
+| slab (no box, as v5) | 188k | 0.76 | 26× |
+| box, width 16 / 12 | 78k | 0.51 | 25× |
+| box, width 8 / 8 | 26k | 0.24 | 19× |
+| slab, width 16 | 48k | 0.34 | 23× |
+
+A v6 780125 trial-path takes 184 s on the RTX 4060 Ti, so about 74 min on the CPU: ~37 h for a 30-trial-path session, against 43 min for all of SILo. The smallest variant (untrained here, and certain to lose accuracy) would still need ~9 h per session. Conv3d on CPU already runs through oneDNN, and this Zen 3 CPU has no bf16 units, so runtimes such as ONNX Runtime would not close a 20× gap.
+
+**Recommendation: make a modest NVIDIA GPU mandatory for the network baseline, and keep the moving median as an explicit option, never a silent fallback.**
+- **Hardware:** any CUDA GPU supported by current PyTorch builds, 8 GB recommended. `predict` sizes its tiles to the free memory, so 4–6 GB cards work with shorter tiles, more slowly. A 780125 trial-path: 184 s on an RTX 4060 Ti 8 GB (~1.5 h per session with v6, ~55 min with the reach-14 v6f), 109 s / 68 s on an A10G. Trials are independent, so several GPUs scale linearly.
+- **GIAnT:** a parameter `localizationBaseline` = 'network' (default once validated) or 'movmedian'. With 'network', GIAnT runs `slap2-f0 predict-registered` (a configured Python environment and checkpoint) for trials without a baseline file, after motion correction and before localization. Without a usable GPU it stops with a clear message: run on a GPU machine, compute the baseline files elsewhere, or choose 'movmedian'. The current branch already fails loudly when a baseline file is missing, rather than falling back. The baseline used (and the checkpoint) should be written into the outputs, so results stay traceable.
+- **CPU-only users** get the baseline files from a GPU elsewhere (the Code Ocean GPU capsule, a cluster GPU node, a lab workstation): `predict-registered` needs only the motion-correction folder and writes one small HDF5 file per trial. Or they choose 'movmedian' knowingly. On Path 2 of 780125 a third of the moving median's sources failed the flash test, and it finds fewer real sources.
+- **A CPU-friendly distilled model** is possible (width 8 is ~4× cheaper) but would still be hours per session and less accurate. Not worth it unless many users lack GPUs.
+- Apple Silicon (PyTorch MPS) and AMD (ROCm) are untested.

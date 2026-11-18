@@ -37,6 +37,12 @@ is unchanged. In sensor sessions every bright pixel in the loss carries
 activity, and a network fine-tuned on them alone learned to set the baseline
 of bright dendrites low even without events (v4 run, GFP control).
 
+Trial edges (``edge_frac``): with this probability a window's loss region
+starts at the trial's first frame or ends at its last (within
+``edge_frames``). Uniformly placed windows put only ~7% of their outputs in the
+first or last 64 frames, and the v6 baselines are biased there by 1-4% of the
+baseline (simulations against the truth, and real trials).
+
 Mixed windows (``sim`` and ``sim_frac`` < 1): each item is simulated with
 probability ``sim_frac`` and real otherwise, so one batch can hold both
 (e.g. fine-tuning on real residuals with simulated activity-free regions
@@ -73,6 +79,8 @@ class WindowConfig:
     event_mask: float = 0.0  # real windows: no loss where activity > event_mask x its RMS (0 = off)
     event_margin: int = 8  # frames around those voxels that weigh 0 too
     sim_event_weight: float = 1.0  # simulated windows: loss weight during events (1 = as elsewhere)
+    edge_frac: float = 0.0  # share of windows whose loss region starts or ends at a trial edge (+-edge_frames)
+    edge_frames: int = 64
 
 
 def _crop(a: np.ndarray, r0: int, nr: int, c0: int, nc: int, fill=np.nan) -> np.ndarray:
@@ -128,7 +136,11 @@ class WindowDataset(Dataset):
         for _ in range(50):
             fn = self.files[rng.integers(len(self.files))]
             tr, st = self._trial(fn), self.stats[fn]
-            t0 = int(rng.integers(-c.out_frames // 2, tr.n_frames - c.out_frames // 2))
+            if c.edge_frac > 0 and rng.random() < c.edge_frac:  # the first or last frames of the trial
+                e = int(rng.integers(-c.edge_frames, c.edge_frames + 1))
+                t0 = e if rng.random() < 0.5 else tr.n_frames - c.out_frames + e
+            else:
+                t0 = int(rng.integers(-c.out_frames // 2, tr.n_frames - c.out_frames // 2))
             vr, vc = np.nonzero(tr.valid)  # centre windows on valid pixels, where the data are
             k = rng.integers(len(vr))
             r0, c0 = int(vr[k]) - c.out_px // 2 - c.s_reach, int(vc[k]) - c.out_px // 2 - c.s_reach

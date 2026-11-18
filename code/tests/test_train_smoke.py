@@ -271,3 +271,26 @@ def test_sim_event_weight(tmp_path):
         assert vals <= {0.0, 1.0, 5.0}
         seen |= 5.0 in vals
     assert seen
+
+
+def test_edge_windows(tmp_path):
+    """With edge_frac 1, every window's loss region starts at the trial's first
+    frame or ends at its last, within edge_frames."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    T = 400
+    _trial(fn, "sessA", 0, T=T)
+    with h5py.File(fn, "a") as f:  # the movie holds its frame number, so a window shows which frames it covers
+        f["movie"][...] = np.broadcast_to(np.arange(T, dtype=np.float32)[None, :, None, None] + 1.0, f["movie"].shape)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=40, out_px=10, t_reach=0, s_reach=0, edge_frac=1.0, edge_frames=5)
+    ds = WindowDataset([fn], cfg, stats, length=60, seed=3, flip="none")
+    for i in range(60):
+        m = ds[i]["movie"].numpy()
+        fr = np.nanmax(m.reshape(m.shape[0], -1), 1)  # frame number + 1 per window frame, NaN outside the trial
+        first, last = np.nanmin(fr) - 1, np.nanmax(fr) - 1
+        assert first <= 5 or last >= T - 6, (first, last)

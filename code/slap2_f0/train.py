@@ -449,7 +449,7 @@ def train(args) -> None:
                         w_unfitted=args.w_unfitted)
     # event masking only in training windows, so validation metrics stay comparable across runs
     wcfg_train = replace(wcfg, event_mask=args.event_mask, event_margin=args.event_margin,
-                         sim_event_weight=args.sim_event_weight)
+                         sim_event_weight=args.sim_event_weight, edge_frac=args.edge_frac)
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     amp_dtype = None
     if device.type == "cuda" and not args.no_amp:
@@ -786,6 +786,9 @@ def add_arguments(p) -> None:
                    help="real training windows: no loss where GIAnT activity exceeds this times its RMS over the trial, "
                         "and --event_margin frames around (the target there holds unfitted activity; 0 = off)")
     p.add_argument("--event_margin", type=int, default=8)
+    p.add_argument("--edge_frac", type=float, default=0.0,
+                   help="share of training windows whose loss region starts or ends at a trial edge (the baseline "
+                        "is biased in the first and last ~0.5 s otherwise)")
     p.add_argument("--sim_event_weight", type=float, default=1.0,
                    help="simulated training windows: loss weight where the activity exceeds half the photon-noise SD "
                         "(and --event_margin frames around); > 1 makes a baseline that follows the activity cost more")
