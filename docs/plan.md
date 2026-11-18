@@ -838,3 +838,94 @@ The guarded checkpoints follow the activity 20–30% less in 780125, 803121 and 
 - Keep v6r pretrained as the default checkpoint: v7b is no clear improvement.
 - **v8** adds `--edge_frac 0.25` to v7b's pretraining, and `--event_mask 0.5` with `--edge_frac 0.25` in fine-tuning. Judge it on leak and bias in the simulations, on the real-trial leak, and on the edge bias with `edge_pieces.py`.
 - Whether the baseline should follow the stimulus-locked shared brightening is a question about the simulator's shared-brightness statistics (`--fast_global_sd`, `--fast_field_sd`), not about the loss.
+
+## v8: edge windows and the event mask alone (2026-11-18)
+
+**Run.** v7b's recipe plus `--edge_frac 0.25` in both stages and `--event_mask 0.5` in fine-tuning: from v6r pretrained, 3000 steps on simulations and 1700 steps of fine-tuning on real and simulated windows, with realistic low counts, up/down flips and per-direction half-plane trunks, and no event weighting or shuffling. Selection kept step 2500 of pretraining and step 600 of fine-tuning, the first fine-tuning in these runs to beat its start. Validation is noisy (the selection score moves by up to 0.07 between neighbouring checkpoints), so which step won is partly luck.
+
+**Validation over training** (means of the checkpoints after step 0, as in the v7 table):
+
+| | leak, fast-brightness sims | bias, fast-brightness sims, support | bias, activity-free sims, support | leak, real windows |
+|---|---|---|---|---|
+| v7b pretraining | 0.079 | +0.041 | +0.091 | 0.023 |
+| v8 pretraining | 0.080 | +0.039 | +0.092 | 0.024 |
+| v7b fine-tuning | 0.106 | +0.001 | +0.090 | 0.051 |
+| v8 fine-tuning | 0.089 | −0.001 | +0.068 | 0.032 |
+| v7c fine-tuning (event mask and event weight) | 0.080 | +0.047 | +0.111 | 0.018 |
+
+- The edge windows leave the mid-trial validation windows unchanged, as they should.
+- **The event mask on its own** cuts fine-tuning's real-window leak from 0.051 to 0.032, and it lowers the bias on activity-free simulations rather than raising it. The event weight's further cut, to 0.018, came only with the too-low baseline.
+
+**Full evaluation** (means over sessions; bias in units of the trial's median pixel brightness, positive = baseline too low):
+
+| | v6r pretrained | v7b pretrained | v8 pretrained | v8 fine-tuned |
+|---|---|---|---|---|
+| fast-brightness sims: support error above the oracle's | +17.6% | +8.6% | **+3.6%** | +15.4% |
+| fast-brightness sims: leak | 0.136 | 0.129 | **0.106** | 0.136 |
+| fast-brightness sims: support bias | −0.061 | −0.043 | −0.037 | −0.085 |
+| activity-free sims: support / background bias | +0.050 / +0.011 | +0.055 / +0.022 | +0.049 / +0.017 | **+0.017 / +0.001** |
+| real support pixels, error vs mean image | −7.9% | −8.1% | −8.2% | −8.0% |
+| real background, error vs mean image | +0.3% | +0.5% | +0.5% | **0.0%** |
+| real background bias | +0.010 | +0.024 | +0.019 | **0.000** |
+
+- **v8 pretrained is the best checkpoint so far on simulations.** Its support error is within 4% of the oracle's and it leaks least. On real data it matches v7b: support pixels like v6r, background slightly worse.
+- **v8 fine-tuned is the first checkpoint that matches the mean image on real background**, and it is unbiased where there is no activity. But it raises the baseline everywhere by about 0.03. At support pixels with activity it ends up higher than v6r's (−0.085 against −0.061), and its leak is back at v6r's level.
+
+**Real trials** (`leak_check --real`, the viewer trials): slope of the baseline's fast part on the activity at support pixels.
+
+| | 780125 | 803121 | 878030 | 885233 |
+|---|---|---|---|---|
+| v6r pretrained | 0.031 | 0.072 | 0.002 | 0.043 |
+| v7 at the end of fine-tuning (event weight) | 0.023 | 0.056 | 0.004 | 0.030 |
+| v8 pretrained | 0.030 | 0.064 | 0.011 | 0.040 |
+| v8 fine-tuned | 0.033 | 0.054 | 0.013 | 0.041 |
+
+On real trials v8 follows the activity about as much as v6r. Only the event-weighted v7 follows it less, at the cost of the too-low baseline.
+
+**Trial edges** (`edge_pieces.py`, the same trials and cuts as before): piece − whole, in % of the baseline, by frames from the cut. SE of the first bin: about 1–1.5 at support pixels and 0.3–0.8 in background (simulations), 1.5–2.6 and 0.5–1.1 (real trials).
+
+| simulations | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| support, end of a piece: v6r pretrained | +4.1 | +2.5 | +0.9 | +0.7 | +0.5 | +0.2 |
+| v7b pretrained | +5.0 | +3.8 | +1.9 | +1.2 | +0.5 | +0.2 |
+| v8 pretrained | +4.2 | +3.3 | +1.6 | +1.0 | +0.5 | +0.3 |
+| v8 fine-tuned | +2.2 | +2.5 | +1.4 | +0.9 | +0.4 | +0.2 |
+| support, start of a piece: v6r / v7b / v8 pretrained / v8 fine-tuned | +1.8 / +1.8 / +1.2 / +0.3 | +0.1 / +0.6 / +0.2 / +0.4 | +0.1 / −0.1 / −0.5 / −0.2 | +0.5 / +0.1 / −0.1 / 0.0 | +0.2 / 0.0 / −0.1 / 0.0 | +0.1 / 0.0 / 0.0 / 0.0 |
+| background, end: v6r pretrained | +2.2 | +1.5 | +1.2 | +1.0 | +0.6 | +0.2 |
+| v7b pretrained | +2.9 | +2.4 | +1.7 | +1.3 | +0.5 | +0.2 |
+| v8 pretrained | +2.0 | +2.1 | +1.5 | +1.1 | +0.5 | +0.2 |
+| v8 fine-tuned | −0.7 | +0.2 | +0.3 | +0.4 | +0.4 | +0.2 |
+| background, start: v6r / v8 pretrained / v8 fine-tuned | +1.5 / +1.5 / +0.8 | +0.3 / +0.3 / +0.6 | +0.3 / −0.2 / +0.1 | +0.5 / 0.0 / +0.2 | +0.3 / 0.0 / +0.1 | +0.2 / +0.1 / +0.1 |
+
+| real trials | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| support, end of a piece: v6r pretrained | +5.2 | +3.9 | +1.9 | +1.3 | +0.7 | +0.1 |
+| v8 pretrained | +5.0 | +4.3 | +2.1 | +1.4 | +0.6 | +0.1 |
+| v8 fine-tuned | +2.6 | +3.1 | +1.7 | +1.2 | +0.6 | +0.1 |
+| background, end: v6r pretrained | +2.3 | +1.8 | +1.4 | +1.2 | +0.7 | +0.2 |
+| v8 pretrained | +2.2 | +2.5 | +1.9 | +1.3 | +0.6 | +0.2 |
+| v8 fine-tuned | −0.5 | +0.5 | +0.6 | +0.6 | +0.4 | +0.2 |
+| support, start: v6r / v8 pretrained / v8 fine-tuned | +1.6 / +0.8 / 0.0 | 0.0 / −0.1 / +0.2 | −0.1 / −0.6 / −0.3 | +0.4 / −0.2 / 0.0 | +0.2 / −0.2 / −0.1 | +0.1 / 0.0 / 0.0 |
+| background, start: v6r / v8 pretrained / v8 fine-tuned | +1.1 / +1.2 / +0.6 | +0.2 / +0.3 / +0.6 | +0.2 / −0.2 / +0.1 | +0.4 / −0.1 / +0.2 | +0.3 / −0.1 / 0.0 | +0.1 / +0.1 / +0.1 |
+
+- **Edge windows in pretraining help little.** Against v7b, the same run without them, the excess in the last 8 frames falls from 5.0% to 4.2% at support pixels and from 2.9% to 2.0% in background. On real trials v8 pretrained is no better than v6r.
+- **v8 fine-tuning halves the excess at the end of a trial at support pixels**, and it removes it at the start and in background. What remains is +2–3% at support pixels in the last 16 frames (0.2 s), and about 1% out to 64 frames.
+- Averaged over the training distribution, the conditional mean is unbiased at edges as anywhere else. A remaining edge bias therefore means one of two things: the network still falls short of the conditional mean at edges, or the test trials differ there from what it was trained on. A larger edge share or longer pretraining is cheap to try and to check with `edge_pieces.py`.
+
+**Localization on the simulations.** Same harness and the same 8 simulated trials with known sources as the v6 table above; pooled over trials:
+
+| baseline | default threshold (8): precision / recall / F1, fast-brightness sims | same, default sims | best single threshold: F1 (threshold), fast | same, default |
+|---|---|---|---|---|
+| v6r pretrained | 0.82 / 0.81 / 0.81 | 0.87 / 0.78 / 0.82 | 0.82 (6) | 0.82 (8) |
+| v6s fine-tuned | 0.85 / 0.82 / 0.84 | 0.87 / 0.80 / 0.83 | 0.84 (8) | 0.84 (7) |
+| v8 pretrained | 0.80 / 0.84 / 0.82 | 0.79 / 0.80 / 0.80 | 0.82 (8) | 0.80 (10) |
+| v8 fine-tuned | 0.79 / 0.80 / 0.80 | 0.82 / 0.78 / 0.80 | 0.81 (7) | 0.80 (9) |
+
+- **v8 localizes no better than v6r**, and slightly worse on the default simulations. At the default threshold, v8 pretrained finds 249 of the 304 true sources (v6r 242) but makes 63 false ones (v6r 46), most of them in the dim 878030 and 885233. The true baseline makes 95 false ones at that threshold, so more false sources at a fixed threshold partly come with a more accurate baseline. But v8 does not gain at its own best threshold either.
+- The differences are within what eight trials can resolve. Still, v8's better baseline error and leak in simulations do not carry over into localization. A checkpoint should be chosen on localization as well: these simulations, and the flash test on real trials.
+
+**Decisions.**
+
+- Keep `--event_mask 0.5` in fine-tuning and `--edge_frac 0.25` in both stages; neither costs anything measurable. `--sim_event_weight` stays dropped.
+- **Keep v6r pretrained as the default.** v8 pretrained has the more accurate, less leaky baseline in simulations, and v8 fine-tuned the unbiased background and the smaller edge bias. Neither localizes better, and on real trials both follow the activity as much as v6r does.
+- The edge bias at the end of trials is the one systematic error here that training can still plausibly reduce. At source pixels it is +2–3% in the last 0.2 s with v8 fine-tuned, and +4–5% with the other checkpoints. Next, try a larger `--edge_frac`, judged with `edge_pieces.py` and the localization simulations.
