@@ -684,3 +684,45 @@ The network adds 128 validated sources (62 + 66), loses none, and removes 36 fal
 - **The simulator's low counts should match the real data.** Real movies are never negative, and dim pixels are exactly 0 in many frames (37% at 0.5–2 counts, 27% at 2–4, 9% at 4–8), most of all at ROI edges and in small ROIs. The simulated movies are negative in 6.7% of values and never exactly 0. That is why the localization simulations gave the moving median a precision of 0.94–0.96 while on real Path 2 it is 0.66: they lack its main false-positive mode. Next simulator change: non-negative photon-count noise with the measured zero fractions, plus zero-dominated ROI edges and small ROIs. Check first that the moving median then makes edge false positives in the localization simulations, then retrain on it.
 - **Real-data localization is scored with the flash test from now on** (precision = share of a run's sources that pass; recall against the union of passing sources), not against one run's final sources.
 - **For GIAnT:** with network baselines these false sources disappear. If the moving median stays as an option, SiLo needs a guard at zero-dominated pixels: the flash test as a source-selection check, or a noise model that does not take the median there.
+
+## Realistic low counts, flips, and activity in the baseline (2026-11-17)
+
+**Realistic low counts** (`SimConfig.photon_zeros`, `train --photon_zeros`). Real movies are photon counts: never negative, and dim pixels are exactly 0 in many frames. The simulated movies were negative in 7.7% of voxels and never exactly 0. On pixels where zeros are likely, the simulator now maps its noise, voxel by voxel, onto a zero-inflated distribution with the same mean and variance: 0, or else lognormal. It uses a Gaussian copula through a correlated field with the template's noise kernels, so the noise keeps its structure in time and space. The share of zeros is exp(−mean/c), with c the template pixel's mean count per photon event, taken from its measured share of zero frames (stats v5: `zero_movie`). So ROI edges and small ROIs come out as zero-dominated as in the template. 780125 (Path 1 viewer trial):
+
+| | negative voxels | zero frames at 0.5–2 / 2–4 / 4–8 counts | moving median of 8-frame means / mean: within 2 px of the edge, 2–4 px, interior |
+|---|---|---|---|
+| real | 0 | 0.42 / 0.31 / 0.11 | 0.66 / 0.73 / 0.92 |
+| simulated, old noise | 7.7% | 0 / 0 / 0 | 0.59 / 0.63 / 0.89 |
+| simulated, photon_zeros | 0.1% (bright pixels, unchanged) | 0.45 / 0.31 / 0.11 | 0.74 / 0.75 / 0.89 |
+
+The old noise already pulled the moving median of dim pixels below the mean, as much as the real data do. So the moving median's false sources on real Path 2 come mostly from the template geometry, the zero-dominated small ROIs that only Path 2 has. The localization simulations so far used Path 1 templates only.
+
+**Augmentation.** Training windows were flipped at random along rows and columns (no rotations). Flips are now up/down only by default (`--flip rows`; rows are the DMD's short axis), because the microscope scans and only that flip leaves the image alike. The box model's half-plane branch, though, ran one trunk over all four 90° rotations of the window, which assumed the image looks the same rotated. It now has one trunk per direction (`ModelConfig.hp_shared` False). A shared v6 trunk warm-starts all four, so the start is unchanged (tested).
+
+**Activity in the baseline.** Measured three ways (`tools/leak_check.py`; `evaluate` now reports `sup_leak_*`):
+
+- **Simulations, against the true baseline:** the slope of (baseline − truth) on the activity at support pixels, 8-frame means. All v6 models follow the activity: v6 fine-tuned 0.14–0.27, v6r pretrained 0.10–0.24, v6s fine-tuned 0.10–0.22, v6f 0.09–0.24 (8 simulated trials, 4 sessions). v6r pretrained never saw real data, so the leak is not only learned in real fine-tuning.
+- **Real trials, slope** of the baseline's fast part (8-frame mean minus its 4 s running mean) on the activity's fast part at support pixels: v6 models 0.026–0.036 (780125), 0.051–0.098 (803121), 0.037–0.047 (885233); the slab models v4 and v5b −0.016 to +0.017; SiLo's moving median about 0. Fine-tuning does not change it (v6r 0.031 → 0.032, 0.072 → 0.076).
+- **Real trials, during the strongest population responses** (the 10% of frames with the largest summed activity, against the quieter half), rise of the fast part in % of the mean:
+
+| session | movie at background pixels | movie − activity at support | v6 baselines at support | v6 baselines at background | v5b at support | SiLo at support |
+|---|---|---|---|---|---|---|
+| 780125 | +1.5% (SE 0.4) | +0.9% | +2.0 to +3.2% | +1.6 to +2.1% | 0.0% | −0.1% |
+| 803121 | +5.2% (SE 0.9) | +2.6% | +2.3 to +2.5% | +1.8 to +2.0% | +0.1% | −0.1% |
+| 885233 | +5.2% (SE 0.8) | +4.7% | +3.5 to +3.7% | +3.5 to +3.8% | +0.5% | −0.3% |
+| 878030 | −0.3% (SE 0.8) | +9.0% | +2.1 to +2.6% | −0.1 to +0.2% | −0.1% | −0.4% |
+
+- **Background pixels brighten with the responses**, by up to 5%: a real shared brightening (neuropil glutamate or stimulus light). The box models follow it at background pixels, partly; the slab models and the moving median don't.
+- **At synapses the v6 baselines rise 2–4% during strong responses.** In 803121 and 885233 that is no more than the shared brightening. In 780125 and 878030 it is 1–2.5 points more: a small leak of the synapses' own activity, which matches what the viewer shows during stimuli.
+- **Mechanism:** the box model watches the same frame outside its blind box (half-planes and pooled features) to track fast shared brightness, and many synapses responding together look like a frame-wide brightening. The slab models can't see the same frame and don't leak.
+- **The stimulus rhythm (2 s at 2 Hz, then 1 s off) is used too, but it is the smaller part.** Simulations whose activity timeline is cut at quiet frames and reordered (`SimConfig.shuffle_prob`; `locnet_sims.py` kind "simshuf"; events stay whole, the rest of the simulation is the same) against the same simulations in the original order, leak against the true baseline:
+
+| | v6r pretrained | v6r fine-tuned | v6s pretrained | v6s fine-tuned |
+|---|---|---|---|---|
+| 780125, rhythm kept / shuffled | 0.159 / 0.148 | 0.179 / 0.169 | 0.096 / 0.082 | 0.140 / 0.129 |
+| 803121 (clearest rhythm: summed activity correlates +0.28 at 1.5 s, +0.19 at 3 s) | 0.142 / 0.114 | 0.195 / 0.172 | 0.067 / 0.046 | 0.102 / 0.083 |
+
+  The rhythm accounts for 0.01 (780125) to 0.02–0.03 (803121) of the leak; most of it remains without any rhythm.
+- **Real fine-tuning adds leak**: +0.02 to +0.05 against the true baseline in both sessions (v6r and v6s pretrained → fine-tuned). Its target, movie − activity, still holds the part of the events GIAnT did not fit, which the context makes predictable. The checkpoint with the least leak is v6s pretrained (simulations only, from scratch).
+
+**Guards against the leak** (options, used in v7): `--sim_event_weight` weights simulated voxels during events (activity above half the photon-noise SD, ±8 frames) more, so following the activity costs more where the truth is known. `--event_mask` drops real training voxels during GIAnT events, where the target still holds the part of the events GIAnT did not fit. `--shuffle_prob` breaks the stimulus rhythm in a share of simulated trials.
