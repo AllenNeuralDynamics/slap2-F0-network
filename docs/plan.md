@@ -721,8 +721,10 @@ The old noise already pulled the moving median of dim pixels below the mean, as 
 |---|---|---|---|---|
 | 780125, rhythm kept / shuffled | 0.159 / 0.148 | 0.179 / 0.169 | 0.096 / 0.082 | 0.140 / 0.129 |
 | 803121 (clearest rhythm: summed activity correlates +0.28 at 1.5 s, +0.19 at 3 s) | 0.142 / 0.114 | 0.195 / 0.172 | 0.067 / 0.046 | 0.102 / 0.083 |
+| 885233 | 0.242 / 0.226 | 0.267 / 0.252 | 0.187 / 0.161 | 0.223 / 0.199 |
+| 878030 (5 sources, no clear rhythm) | 0.100 / 0.124 | 0.148 / 0.173 | 0.118 / 0.124 | 0.170 / 0.188 |
 
-  The rhythm accounts for 0.01 (780125) to 0.02–0.03 (803121) of the leak; most of it remains without any rhythm.
-- **Real fine-tuning adds leak**: +0.02 to +0.05 against the true baseline in both sessions (v6r and v6s pretrained → fine-tuned). Its target, movie − activity, still holds the part of the events GIAnT did not fit, which the context makes predictable. The checkpoint with the least leak is v6s pretrained (simulations only, from scratch).
+  The rhythm accounts for 0.01 (780125) to 0.02–0.03 (803121, 885233) of the leak; most of it remains without any rhythm. In 878030, with 5 sources and no clear rhythm, shuffling makes no consistent difference (the leak there rests on few events).
+- **Real fine-tuning adds leak**: +0.02 to +0.05 against the true baseline in every session (v6r and v6s pretrained → fine-tuned). Its target, movie − activity, still holds the part of the events GIAnT did not fit, which the context makes predictable. The checkpoint with the least leak is v6s pretrained (simulations only, from scratch).
 
 **Guards against the leak** (options, used in v7): `--sim_event_weight` weights simulated voxels during events (activity above half the photon-noise SD, ±8 frames) more, so following the activity costs more where the truth is known. `--event_mask` drops real training voxels during GIAnT events, where the target still holds the part of the events GIAnT did not fit. `--shuffle_prob` breaks the stimulus rhythm in a share of simulated trials.
