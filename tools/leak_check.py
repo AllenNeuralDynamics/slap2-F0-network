@@ -15,12 +15,15 @@ comes from the rhythm.
 
 Real trials (``--real``: the viewer's prediction folder; each session file
 has movie, activity and baselines, model subfolders add baselines): the true
-baseline is unknown, so the leak is the slope of the baseline's fast part
-(8-frame mean minus its 4 s running mean) on the activity's fast part at
-support pixels. For reference, the slope of the background pixels' fast part
-on the summed activity, for the movie itself (stimulus-locked brightness, such
-as stimulus light, that a correct baseline should follow) and for the
-baseline (x1000).
+baseline is unknown, so each baseline's rise during the strongest population
+responses (the 10% of frames with the largest summed activity, against the
+quieter half; fast parts: 8-frame means minus their 4 s running mean) is
+compared, in % of its mean, with the movie's own rise at background pixels
+(a real shared brightening, e.g. neuropil or stimulus light, which a baseline
+may follow) and with movie - activity at the support pixels. A baseline that
+rises more than the shared brightening at support pixels follows the
+synapses' own activity. Also the slope of the baseline's fast part on the
+activity's fast part at support pixels.
 """
 import argparse
 from pathlib import Path
@@ -35,6 +38,7 @@ def mean8(x):
 
 
 def fast(x):
+    x = np.where(np.isfinite(x), x, np.nanmean(x, 0, keepdims=True))  # discarded frames
     x8 = mean8(x)
     return x8 - uniform_filter1d(x8, 320, axis=0, mode="nearest")
 
@@ -61,8 +65,13 @@ def sim_leak(pred_fn, truth_fn, models):
     return out
 
 
+def rise(x, hi, lo):
+    """Mean fast part over frames hi minus over frames lo, in % of the mean."""
+    fb = np.nanmean(fast(x), 1)
+    return 100 * (np.nanmean(fb[hi]) - np.nanmean(fb[lo])) / np.nanmean(x)
+
+
 def real_leak(fn, pred_files, models):
-    out = {}
     with h5py.File(fn, "r") as f:
         rows, cols = f["rows"][()], f["cols"][()]
         sup = f["mask/footprint_support"][()][rows, cols].astype(bool)
@@ -70,17 +79,24 @@ def real_leak(fn, pred_files, models):
         keep = f["frame/discard"][()] == 0
         act = f["activity"][()].astype(np.float32)
         mov = f["movie"][()].astype(np.float32)
+    if not sup.any():
+        return {}
+    pop = fast(np.nansum(act[:, sup], 1)[:, None])[:, 0]
+    pop[~keep] = np.nan
+    hi, lo = pop >= np.nanquantile(pop, 0.9), pop <= np.nanquantile(pop, 0.5)
+    out = {"movie, background: rise in strong responses (%)": rise(mov[:, bg], hi, lo),
+           "movie, support (%)": rise(mov[:, sup], hi, lo),
+           "movie - activity, support (%)": rise((mov - act)[:, sup], hi, lo)}
     a_s = fast(act[:, sup])[keep]
-    pop = np.repeat(fast(np.nansum(act[:, sup], 1, keepdims=True))[keep], bg.sum(), 1)
-    out["movie: background on summed activity (x1e3)"] = 1e3 * slope(fast(mov[:, bg])[keep], pop)
     for pf in pred_files:
         with h5py.File(pf, "r") as g:
             for m in g["baseline"].keys():
-                if models and m not in models or m in out:
+                if (models and m not in models) or f"{m}, support (%)" in out:
                     continue
                 b = g[f"baseline/{m}"][()].astype(np.float32)
-                out[m] = slope(fast(b[:, sup])[keep], a_s)
-                out[m + ": background on summed activity (x1e3)"] = 1e3 * slope(fast(b[:, bg])[keep], pop)
+                out[f"{m}, support (%)"] = rise(b[:, sup], hi, lo)
+                out[f"{m}, background (%)"] = rise(b[:, bg], hi, lo)
+                out[f"{m}, support: slope on activity"] = slope(fast(b[:, sup])[keep], a_s)
     return out
 
 
