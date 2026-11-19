@@ -1058,3 +1058,80 @@ The SD is 0.25 px per axis. The baseline's motion part m = moved − static base
    - pooled displacement and blur features: the deviation from the mean image projected on its gradient and second derivatives, over the existing rings, box excluded;
    - the mean image's derivatives as inputs.
 3. Keep a whole-field correction with shrinkage as a separate cheap step for rigid motion.
+
+## v9: twice the edge windows (2026-11-18)
+
+**Run.** v8's recipe with `--edge_frac 0.5` in both stages instead of 0.25: from v6r pretrained, 3000 steps on simulations, then 1700 steps of fine-tuning with `--event_mask 0.5`. Selection kept step 2500 of pretraining and the last step of fine-tuning. Fine-tuning barely moved the selection score (0.905, against 0.913 at its start).
+
+**Full evaluation** (as in the v8 table: means over sessions; bias in units of the trial's median pixel brightness, positive = baseline too low):
+
+| | v6r pretrained | v8 pretrained | v8 fine-tuned | v9 pretrained | v9 fine-tuned |
+|---|---|---|---|---|---|
+| fast-brightness sims: support error above the oracle's | +17.6% | +3.6% | +15.4% | +2.4% | **+1.7%** |
+| fast-brightness sims: leak | 0.136 | 0.106 | 0.136 | **0.098** | 0.122 |
+| fast-brightness sims: support bias | −0.061 | −0.037 | −0.085 | −0.028 | −0.029 |
+| activity-free sims: support / background bias | +0.050 / +0.011 | +0.049 / +0.017 | **+0.017 / +0.001** | +0.053 / +0.019 | +0.070 / +0.015 |
+| real support pixels, error vs mean image | −7.9% | −8.2% | −8.0% | −8.2% | **−8.7%** |
+| real background, error vs mean image | +0.3% | +0.5% | 0.0% | +0.5% | 0.0% |
+| real background bias | +0.010 | +0.019 | 0.000 | +0.021 | +0.015 |
+
+- **v9 fine-tuned is the most accurate checkpoint so far, on simulations and on real data.** Unlike v8's, its fine-tuning keeps the simulation accuracy (within 2% of the oracle). On real support pixels it beats v6r by 0.8 points against the mean image, and on real background it matches the mean image.
+- **But it is biased low where nothing happens:** +0.070 at support pixels of activity-free simulations (v6r +0.050, v8 fine-tuned +0.017). v8 fine-tuned's unbiased baseline is not reproduced. It came from that run's checkpoint (step 600) or its edge share, not from fine-tuning as such.
+- v9 pretrained is slightly better than v8 pretrained on fast-brightness simulations (error, leak, bias), slightly worse on activity-free ones, and the same on real data.
+
+**Real trials** (`leak_check --real`): slope of the baseline's fast part on the activity at support pixels.
+
+| | 780125 | 803121 | 878030 | 885233 |
+|---|---|---|---|---|
+| v6r pretrained | 0.031 | 0.072 | 0.002 | 0.043 |
+| v8 fine-tuned | 0.033 | 0.054 | 0.013 | 0.041 |
+| v9 pretrained | 0.027 | 0.063 | 0.014 | 0.039 |
+| v9 fine-tuned | 0.030 | 0.056 | 0.027 | 0.043 |
+
+As with v8: on real trials v9 follows the activity about as much as v6r.
+
+**Trial edges** (`edge_pieces.py`, same trials and cuts): piece − whole, in % of the baseline, by frames from the cut; positive = the piece's baseline is higher. SEs as in the v8 section (first bin about 1–1.5 at support pixels in simulations, 1.5–2.6 on real trials).
+
+| simulations | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| support, end of a piece: v8 pretrained | +4.2 | +3.3 | +1.6 | +1.0 | +0.5 | +0.3 |
+| v9 pretrained | +3.8 | +3.0 | +1.5 | +1.0 | +0.4 | +0.2 |
+| v8 fine-tuned | +2.2 | +2.5 | +1.4 | +0.9 | +0.4 | +0.2 |
+| v9 fine-tuned | +4.3 | +3.5 | +2.1 | +1.4 | +0.5 | +0.2 |
+| support, start: v8 / v9 pretrained, v8 / v9 fine-tuned | +1.2 / +1.0, +0.3 / +1.2 | +0.2 / +0.2, +0.4 / +0.5 | −0.5 / −0.4, −0.2 / −0.2 | −0.1 / −0.1, 0.0 / 0.0 | −0.1 / −0.1, 0.0 / 0.0 | 0.0 |
+| background, end: v8 / v9 pretrained | +2.0 / +1.9 | +2.1 / +2.2 | +1.5 / +1.6 | +1.1 / +1.2 | +0.5 / +0.5 | +0.2 / +0.2 |
+| background, end: v8 / v9 fine-tuned | −0.7 / +1.9 | +0.2 / +1.9 | +0.3 / +1.4 | +0.4 / +1.0 | +0.4 / +0.4 | +0.2 / +0.2 |
+| background, start: v8 / v9 pretrained, v8 / v9 fine-tuned | +1.5 / +1.3, +0.8 / +1.2 | +0.3 / +0.4, +0.6 / +0.7 | −0.2 / −0.2, +0.1 / +0.2 | 0.0 / 0.0, +0.2 / +0.2 | 0.0 / 0.0, +0.1 / +0.1 | +0.1 |
+
+| real trials | 0–8 frames | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| support, end of a piece: v6r pretrained | +5.2 | +3.9 | +1.9 | +1.3 | +0.7 | +0.1 |
+| v8 / v9 pretrained | +5.0 / +4.6 | +4.3 / +4.0 | +2.1 / +2.1 | +1.4 / +1.4 | +0.6 / +0.6 | +0.1 / +0.1 |
+| v8 / v9 fine-tuned | +2.6 / +4.6 | +3.1 / +4.0 | +1.7 / +2.4 | +1.2 / +1.6 | +0.6 / +0.6 | +0.1 / +0.1 |
+| background, end: v8 / v9 pretrained | +2.2 / +2.2 | +2.5 / +2.6 | +1.9 / +2.0 | +1.3 / +1.4 | +0.6 / +0.7 | +0.2 / +0.2 |
+| background, end: v8 / v9 fine-tuned | −0.5 / +2.1 | +0.5 / +2.1 | +0.6 / +1.6 | +0.6 / +1.1 | +0.4 / +0.5 | +0.2 / +0.2 |
+| support, start: v9 pretrained / fine-tuned | +0.7 / +0.8 | −0.1 / +0.2 | −0.6 / −0.4 | −0.2 / −0.1 | −0.2 / 0.0 | 0.0 / 0.0 |
+| background, start: v9 pretrained / fine-tuned | +1.1 / +1.1 | +0.3 / +0.7 | −0.2 / +0.2 | −0.1 / +0.2 | −0.1 / +0.1 | +0.1 / +0.1 |
+
+Against the true baseline (simulations), the support pixels in the last 8 frames of a piece sit 4.7 (v9 pretrained) and 5.3 points (v9 fine-tuned) above the checkpoint's mid-trial bias, as v8 pretrained's did (5.1).
+
+- **Twice the edge windows does nothing measurable.** In the last 8 frames of a piece at support pixels, simulations show 5.0 (v7b, no edge windows), 4.2 (v8, a quarter) and 3.8 (v9, half). That trend is well inside the SE. Real trials show 5.2 (v6r), 5.0 and 4.6.
+- **v9 fine-tuned has the edge bias of the pretrained checkpoints**, not v8 fine-tuned's halved one, so that came with v8's checkpoint, not with fine-tuning on edge windows.
+- **So the edge bias is not a shortage of edge examples.** The mean loss is minimized by the conditional mean, and these simulations come from the training simulator. Yet the baseline sits about 5 points above the truth at the ends of pieces and close to it mid-trial. The network falls short of the conditional mean at edges however often it sees them. Next places to look: how the model represents frames beyond the trial edge (padding, validity input), or else a fixed correction. Real trials show the same profile as the simulations, so a correction calibrated on simulations would transfer. Until then, the first and last ~16 frames (0.2 s) of a trial carry a baseline that is 2–5% too high at source pixels.
+
+**Localization on the simulations** (same harness and 8 trials as the v8 table):
+
+| baseline | default threshold (8): precision / recall / F1, fast-brightness sims | same, default sims | best single threshold: F1 (threshold), fast | same, default |
+|---|---|---|---|---|
+| v6r pretrained | 0.82 / 0.81 / 0.81 | 0.87 / 0.78 / 0.82 | 0.82 (6) | 0.82 (8) |
+| v8 pretrained | 0.80 / 0.84 / 0.82 | 0.79 / 0.80 / 0.80 | 0.82 (8) | 0.80 (10) |
+| v8 fine-tuned | 0.79 / 0.80 / 0.80 | 0.82 / 0.78 / 0.80 | 0.81 (7) | 0.80 (9) |
+| v9 pretrained | 0.80 / 0.83 / 0.81 | 0.79 / 0.80 / 0.79 | 0.81 (9) | 0.80 (7) |
+| v9 fine-tuned | 0.82 / 0.83 / 0.83 | 0.82 / 0.80 / 0.81 | 0.83 (7) | 0.83 (9) |
+
+- **v9 fine-tuned localizes best among the v8 and v9 checkpoints, and about as well as v6r.** At the default threshold it finds 248 of the 304 true sources (v6r 242), with 53 false ones (v6r 46, v8 pretrained 63). As before, the differences are within what eight trials can resolve. v6s fine-tuned, an older checkpoint, still scores highest (0.84 / 0.83).
+
+**Decisions.**
+
+- **Keep v6r pretrained as the default for now; v9 fine-tuned is the candidate to replace it.** It is the most accurate baseline on simulations and on real data, and it localizes about as well on the simulations. Against it: the activity-free bias (+0.070 against +0.050), and an edge bias about as large as v6r's. Switch once the flash test on real trials (780125 Path 2, as for v6r) shows it finds as many real sources with no more false ones.
+- Keep `--edge_frac 0.5`: it costs nothing, and v9 pretrained is marginally better than v8 pretrained. But more edge windows will not remove the edge bias.
