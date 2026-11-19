@@ -1135,3 +1135,72 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 
 - **Keep v6r pretrained as the default for now; v9 fine-tuned is the candidate to replace it.** It is the most accurate baseline on simulations and on real data, and it localizes about as well on the simulations. Against it: the activity-free bias (+0.070 against +0.050), and an edge bias about as large as v6r's. Switch once the flash test on real trials (780125 Path 2, as for v6r) shows it finds as many real sources with no more false ones.
 - Keep `--edge_frac 0.5`: it costs nothing, and v9 pretrained is marginally better than v8 pretrained. But more edge windows will not remove the edge bias.
+
+## Motion-correction offsets as predictors (2026-11-19)
+
+**Question.** Could the motion-correction offsets predict baseline changes, and could a network learn the relation at each location? The exports carry, per frame: the microscope's online offsets (x, y, z, from the line headers); the offline registration's shifts (rows, columns); and its error (`frame/onlineMotion{X,Y,Z}shift`, `frame/motion_row`, `frame/motion_col`, `frame/rec_neg_err`). GIAnT's newest registration (compensated registration, GIAnT-MATLAB #43) corrects each line for its own online offset; these exports predate it.
+
+**Test** (`tools/motion_covariates.py`, the five viewer trials). Covariates: the six offsets, their frame-to-frame changes, the offline motion's squared speed and the registration error.
+
+**A. The frame's own fit** (brightness a, residual shift d and blur b per frame, as in `residual_motion.py --blur`). Correlations are noise-free, from the two halves:
+
+- **Fast brightness** follows the registration error (r −0.48 to −0.91). That error is computed from the image itself. Fast brightness also follows the online z velocity (+0.36 to +0.61, in four trials). The network already sees a frame's brightness in the surround.
+- **Fast blur follows the squared speed of the motion the registration removed:** r +0.38 to +0.51 along rows, in four trials. The R² of fast blur on all covariates is 0.2–0.33. The earlier finding ("not in-plane motion blur") holds for the residual motion only. Motion that registration corrects frame by frame still blurs each frame.
+- **Frames in which the online offset switches have more fast blur:** row blur SD 0.155 against 0.089 px² in 780125, and higher in all five trials. The residual shift is the same in both kinds of frame. A switch within a frame blurs that frame, and compensated registration removes this.
+- Slow brightness, shift and blur follow the online offsets in 780125 (R² 0.6–0.85: drift), less in the others.
+
+**B. Per pixel, out of sample.** The residual after v9 fine-tuned's baseline (8-frame means, fraction of the baseline) is regressed per pixel on the covariates. The fit uses alternate 128-frame blocks and is scored on the others. The same regression with the covariates circularly shifted gives the chance level, which is subtracted. Share of the residual's variance explained, quarter of pixels with the steepest mean image:
+
+| trial | frame's own fit (5) | offsets (12) | both | fast band (minus a 33-frame mean): own fit / offsets / both |
+|---|---|---|---|---|
+| 780125 | 0.6% | 1.7% | 1.8% | 0.5 / 0.8 / 0.9% |
+| 803121 | 5.1% | 7.2% | 10.5% | 2.9 / 3.3 / 5.6% |
+| 847983 (GFP) | 1.1% | 0.9% | 1.4% | 0.8 / 0.5 / 1.1% |
+| 878030 | 0.7% | 0.5% | 1.0% | 0.5 / 0.9 / 1.5% |
+| 885233 | 0.5% | 0.9% | 1.2% | 0.2 / 1.5 / 1.5% |
+
+- **The offsets carry some information per location** beyond the frame's own fit, but little: at most 1.5% of the fast residual's variance, except in 803121 (3–6%).
+- Much of the fast part comes from the online offsets, where 878030 and 885233 switch in 62–72% of frames. That is the switch blur above, which is fixed upstream.
+- The slow part is drift. The network can follow it from its temporal context once it is trained on slow motion (v10).
+
+**How a network would learn it per location.**
+
+- The covariates would enter as frame-level input channels, spread over the window.
+- The coefficients differ at every location, so the network would also need a per-pixel regression fitted in context: blind ridge regression on the context frames outside ±8. The convolutional trunks have no multiplicative path to fit those coefficients themselves.
+- The simulator would have to produce covariates consistent with its motion.
+- Every input path would have to carry them: exports, and `predict-registered` reading them from the alignment files.
+
+**Decision: dropped.** It is too unwieldy for at most 1.5% of the residual variance in four of the five trials. Most of that is either fixed upstream (online switches) or visible in the images.
+
+- v10b gets the physical version from the images instead: the surround's displacement and blur, mapped through the pixel's own mean-image derivatives (below).
+- New exports should use GIAnT's compensated registration (`params.compensateOnline`).
+
+## v10: motion in the simulations, motion features (2026-11-19)
+
+**Simulator: local motion** (`local_sd_px`, `local_px`, `n_local_fields`, `local_tau_frames`). On top of the rigid shift there is now a smooth displacement field per frame. It has three smooth spatial fields per axis (spacing 20–60 px), each weighted by a fast (1.5–8 frames) and a slow (40–320 frames) OU process. The fields are scaled so that the drawn SD is the displacement's SD per pixel on average. Each frame of the baseline and activity is cubic-spline warped, like the rigid shift.
+
+- Without it the simulator's output is bit-identical to before, with or without rigid motion and focus.
+- The warp is exact (unit test).
+- Moved − static baseline against −D · ∇B: slope 1.00, correlation 0.97 (780125 template, 0.4 px).
+- A 718 × 94 × 94 training window takes 3.6 s to simulate with rigid motion, focus and local motion (1.35 s without). The 12 data workers keep up with the GPU.
+
+**Training options:** `--motion_sd`, `--motion_tau`, `--focus_sd`, `--local_sd`. `--val_motion` and the evaluation kind `motion` (`motionpz` with realistic low counts) use the measured sizes (`train.MOTION_SIM`):
+
+- rigid SD 0–0.2 px per axis, τ 0.5–40 frames;
+- focus 0–0.25 px²;
+- local motion 0–0.2 px each for its fast and its slow part.
+
+**Model: motion features** (`--motion_features`, box model). For each pool scale (squares minus the box, as for the pooled features), each frame's deviation from the mean image M is fitted by weighted least squares as a M − d · ∇M + b_r ∂²M/∂row² + b_c ∂²M/∂col². The feature is the change the fitted shift and blur make at the pixel itself, for the frame and for the 8 frames around it. The pixel's own ∇M / M and ∂²M / M are also inputs.
+
+- A shift brightens one side of a structure and darkens the other, which the fractional pooled features average away. These features keep it.
+- They are computed in float32 outside autocast.
+- They keep the box blind spot (gradient test), and a checkpoint without them warm-starts a model with them exactly.
+- On a scene of Gaussian blobs shifted by (0.25, −0.15) px, the feature matches the true change at each pixel (slope within 15%, r > 0.95).
+
+**Runs.** Both arms start from v6r pretrained, as v9 did, with v9's recipe and steps (3000 pretraining, 1700 fine-tuning), plus motion, focus and local motion in all simulated windows. Pretraining selects on the motion simulations.
+
+- v10a: no other change.
+- v10b: v10a plus the motion features.
+- Both evaluate on real, free, fast, fastpz and motionpz windows. v10a also re-scores v9 (the v9 run is now a data asset) so the motion simulations compare like with like.
+
+**Status (2026-11-19 morning).** Every run with a data asset attached fails on Code Ocean within 20–35 s, with no log or results; a probe run without assets, on the same code, succeeds. The runs are relaunched automatically once asset mounting works again.
