@@ -8,6 +8,9 @@ mean and variance of the residual movie - activity, of single frames and of
 pixels the residual varies more than photon noise explains, both frame to
 frame and over seconds, and the simulator adds that excess).
 
+`slap2-f0 stats` stores them next to each trial file (``sidecar_path``), where
+training finds them first; otherwise they are cached in a stats folder.
+
 Per trial, measured on background pixels (valid and unlabeled, where there is
 no fitted activity), on the residual movie - activity:
     gain    variance / mean in counts (photon noise times detector gain,
@@ -180,29 +183,74 @@ def _key(fn: Path) -> str:
     return hashlib.sha1(f"{fn.resolve()}|{st.st_size}|{int(st.st_mtime)}|v{VERSION}".encode()).hexdigest()[:16]
 
 
-def _cached(args) -> dict:
-    fn, cache = args
+def sidecar_path(fn: str | Path) -> Path:
+    """Where `slap2-f0 stats` stores a trial's stats: next to it, so they travel
+    with the exported data (e.g. in its Code Ocean data asset), whatever path
+    it is mounted at."""
     fn = Path(fn)
+    return fn.with_name(f"{fn.stem}_stats_v{VERSION}.npz")
+
+
+def _from_npz(p: Path) -> dict:
+    d = np.load(p)
+    return {k: (d[k] if k in MAPS else float(d[k])) for k in d.files if k != "file_size"}
+
+
+def _cached(args) -> dict:
+    """Stats of one file: from its sidecar (if made for this version and file
+    size), else from the cache folder, else computed (and then cached, and
+    written as a sidecar if asked)."""
+    fn, cache, write_sidecar = args
+    fn = Path(fn)
+    side = sidecar_path(fn)
+    size = fn.stat().st_size
+    if side.exists():
+        with np.load(side) as d:
+            ok = "file_size" in d.files and int(d["file_size"]) == size
+        if ok:
+            return _from_npz(side)
+    p = None
     if cache is not None:
         p = Path(cache) / f"{fn.stem}_{_key(fn)}.npz"
         if p.exists():
-            d = np.load(p)
-            return {k: (d[k] if k in MAPS else float(d[k])) for k in d.files}
+            s = _from_npz(p)
+            if write_sidecar:
+                np.savez(side, file_size=size, **s)
+            return s
     s = trial_stats(fn)
-    if cache is not None:
+    if p is not None:
         Path(cache).mkdir(parents=True, exist_ok=True)
         np.savez(p, **s)
+    if write_sidecar:
+        np.savez(side, file_size=size, **s)
     return s
 
 
-def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0) -> dict[str, dict]:
-    """Stats for each file, keyed by str(path); computed in parallel, cached as .npz."""
+def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0, max_workers: int = 6,
+               write_sidecars: bool = False) -> dict[str, dict]:
+    """Stats for each file, keyed by str(path); computed in parallel, cached as
+    .npz in cache_dir and/or (write_sidecars) next to each file, where they
+    are found first."""
     files = [str(f) for f in files]
-    jobs = [(f, None if cache_dir is None else str(cache_dir)) for f in files]
+    jobs = [(f, None if cache_dir is None else str(cache_dir), write_sidecars) for f in files]
     if workers and len(files) > 1:
         # each worker holds a few float32 chunks of a trial (up to ~1 GB for large crops)
-        with ProcessPoolExecutor(max_workers=min(workers, 6, len(files), os.cpu_count() or 1)) as ex:
+        with ProcessPoolExecutor(max_workers=min(workers, max_workers, len(files), os.cpu_count() or 1)) as ex:
             res = list(ex.map(_cached, jobs))
     else:
         res = [_cached(j) for j in jobs]
     return dict(zip(files, res))
+
+
+def run(args) -> None:
+    """`slap2-f0 stats`: compute every exported trial's stats under a folder and
+    store them next to the trials (sidecars), e.g. at the end of an export run."""
+    import time
+
+    from .io import list_trials
+
+    files = list_trials(args.root)
+    t0 = time.time()
+    stats = load_stats(files, None, workers=args.workers, max_workers=args.workers, write_sidecars=True)
+    print(f"stats of {len(files)} trial files under {args.root} in {time.time() - t0:.0f} s; gain "
+          + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)

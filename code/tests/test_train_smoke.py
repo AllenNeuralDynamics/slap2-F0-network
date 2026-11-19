@@ -320,3 +320,32 @@ def test_train_with_motion_simulation_and_features(tmp_path):
     main(["evaluate", str(tmp_path / "data"), "--ckpt", f"m={out / 'best.pt'}", "--out", str(ev), "--windows", "2",
           "--workers", "0", "--kinds", "motion", "--stats_from", str(out / "stats")])
     assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 3
+
+
+def test_stats_sidecars(tmp_path):
+    """`slap2-f0 stats` stores each trial's stats next to it; training finds them
+    there wherever the data are mounted, and ignores them if the file changed."""
+    from slap2_f0.stats import load_stats, sidecar_path
+
+    d = tmp_path / "export" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_001.h5"
+    _trial(fn, "sessA", 0)
+    main(["stats", str(tmp_path / "export"), "--workers", "0"])
+    side = sidecar_path(fn)
+    assert side.exists()
+    ref = load_stats([fn])[str(fn)]
+    moved = tmp_path / "mounted" / "sessA" / "Path1"  # e.g. a data asset at another path
+    moved.mkdir(parents=True)
+    for p in (fn, side):
+        (moved / p.name).write_bytes(p.read_bytes())
+    fn2 = moved / fn.name
+    side_mtime = sidecar_path(fn2).stat().st_mtime
+    got = load_stats([fn2], tmp_path / "cache")[str(fn2)]
+    assert not (tmp_path / "cache").exists()  # read from the sidecar, nothing computed
+    assert sidecar_path(fn2).stat().st_mtime == side_mtime
+    assert set(got) == set(ref) and all(np.allclose(got[k], ref[k], equal_nan=True) for k in ref)
+    with h5py.File(fn2, "a") as f:  # a changed file: the sidecar no longer applies
+        f["extra"] = np.zeros(1000)
+    load_stats([fn2], tmp_path / "cache")
+    assert any((tmp_path / "cache").glob("*.npz"))

@@ -1,4 +1,4 @@
-"""Command line: ``slap2-f0 inspect|train|evaluate|predict|predict-registered|view|probe|ceiling|simcheck ...``."""
+"""Command line: ``slap2-f0 inspect|train|evaluate|predict|predict-registered|view|probe|ceiling|simcheck|stats ...``."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from . import ceiling as ceiling_mod
 from . import predict as predict_mod
 from . import registered as registered_mod
 from . import simulate as simulate_mod
+from . import stats as stats_mod
 from . import train as train_mod
 from . import view as view_mod
 from .io import TrialFile, list_trials
@@ -62,6 +63,10 @@ def main(argv=None) -> None:
     pc = sub.add_parser("ceiling", help="reference baselines: how much there is for the network to learn")
     ceiling_mod.add_arguments(pc)
     pc.set_defaults(func=ceiling_mod.run)
+    pq = sub.add_parser("stats", help="compute trial stats and store them next to the trial files (end of an export)")
+    pq.add_argument("root")
+    pq.add_argument("--workers", type=int, default=8)
+    pq.set_defaults(func=stats_mod.run)
     ps = sub.add_parser("simcheck", help="simulate trials from templates and compare their noise statistics")
     simulate_mod.add_check_arguments(ps)
     ps.set_defaults(func=simulate_mod.check)

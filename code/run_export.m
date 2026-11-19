@@ -5,9 +5,18 @@ function run_export(varargin)
 %     run_export('giantDir','/scratch/giant','maxDuration_s','180', ...)
 %
 %   For each attached SLAP2 session (<asset>/slap2/dynamic_data/*.dat):
-%     buildTrialTableSLAP2 -> trimTrialTableSLAP2 (first maxDuration_s) ->
+%     selectAcquisitionsSLAP2 -> buildTrialTableSLAP2 ->
+%     trimTrialTableSLAP2 (first maxDuration_s; 0 = all) ->
 %     MultiRoiRegistration -> SILo -> exportF0TrainingData
-%   with the same GIAnT settings as the GIAnT integration-test capsule.
+%   with the same GIAnT settings as the GIAnT integration-test capsule,
+%   except registration with the online motion correction undone
+%   (compensateOnline) and sources seeded by the whitened matched filter
+%   (peakMethod 'wmf', wmfPeakth). Registered movies are written as
+%   deflated HDF5 (saveTif 0): they are mostly NaN outside the ROIs and
+%   shrink about 9x, which matters for long sessions (GIAnT's working files
+%   are several hundred GB per 30 min). selectAcquisitionsSLAP2 leaves out
+%   reference stacks, and the whole session if it has any integration scan
+%   (run_info.json says what was left out and why; status 'excluded').
 %   Outputs go to resultsDir/<session>/: the exported trials
 %   (Path<k>/trial_<NNN>.h5), export_summary.json (per-trial QC),
 %   run_info.json (status, stage timings) and SiLo's trial_table.h5 and
@@ -19,7 +28,11 @@ str = @(x) ischar(x) || isstring(x);
 p = inputParser;
 addParameter(p, 'giantDir', '/opt/GIAnT-MATLAB', str);
 addParameter(p, 'giantRef', '', str);
-addParameter(p, 'maxDuration_s', 180);
+addParameter(p, 'maxDuration_s', 1800);
+addParameter(p, 'compensateOnline', 1);
+addParameter(p, 'saveTif', 0);
+addParameter(p, 'peakMethod', 'wmf', str);
+addParameter(p, 'wmfPeakth', 3);
 addParameter(p, 'datasets', 'all', str);
 addParameter(p, 'nWorkers', 0);
 addParameter(p, 'channels', '1', str);
@@ -30,6 +43,10 @@ addParameter(p, 'scratchDir', '/root/capsule/scratch', str);
 parse(p, varargin{:});
 opts = p.Results;
 opts.maxDuration_s = num(opts.maxDuration_s);
+opts.compensateOnline = logical(num(opts.compensateOnline));
+opts.saveTif = logical(num(opts.saveTif));
+opts.peakMethod = char(opts.peakMethod);
+opts.wmfPeakth = num(opts.wmfPeakth);
 opts.nWorkers = num(opts.nWorkers);
 if opts.nWorkers <= 0
     opts.nWorkers = min(32, feature('numcores'));
@@ -82,39 +99,59 @@ outDir = fullfile(opts.resultsDir, s.name);
 % integration-test capsule; /scratch filled up after 3 trials. They are
 % deleted once the export has read them.
 work = fullfile(opts.resultsDir, '_work', s.name);
+linkDir = fullfile(work, 'raw'); % links to the session's usable acquisitions
+removeLinkDir(linkDir); % before any recursive delete of work
 for dd = {outDir, work}
     if exist(dd{1}, 'dir'), rmdir(dd{1}, 's'); end
     mkdir(dd{1});
 end
 info = struct('session', s.name, 'source_path', s.path, 'status', 'running', 'failed_stage', '', ...
-    'error', '', 'stages', struct(), 'trim', struct(), ...
+    'error', '', 'stages', struct(), 'acquisitions', struct(), 'trim', struct(), ...
     'start_time', char(datetime('now', 'Format', 'yyyy-MM-dd''T''HH:mm:ss')));
 fprintf('\n===== %s =====\n', s.name);
 stage = '';
 try
-    tt = fullfile(work, 'trial_table.h5');
-    stage = 'trial_table'; t = tic;
-    buildTrialTableSLAP2(s.path, work, 1);
-    info.stages.trial_table = toc(t);
+    stage = 'select_acquisitions'; t = tic;
+    [rawDir, info.acquisitions] = selectAcquisitionsSLAP2(s.path, linkDir);
+    info.stages.select_acquisitions = toc(t);
+    for a = 1:numel(info.acquisitions.acquisitions)
+        q = info.acquisitions.acquisitions{a};
+        if q.used, how = 'used'; else, how = ['left out: ' strjoin(q.reasons, '; ')]; end
+        fprintf('  acquisition %s (%d .dat files): %s\n', q.name, q.n_dat, how);
+    end
+    if isempty(rawDir)
+        info.status = 'excluded';
+        fprintf('Session left out: %s\n', info.acquisitions.reason);
+    else
+        tt = fullfile(work, 'trial_table.h5');
+        stage = 'trial_table'; t = tic;
+        buildTrialTableSLAP2(rawDir, work, 1);
+        info.stages.trial_table = toc(t);
 
-    stage = 'trim'; t = tic;
-    info.trim = trimTrialTableSLAP2(tt, opts.maxDuration_s);
-    info.stages.trim = toc(t);
+        stage = 'trim'; t = tic;
+        if opts.maxDuration_s > 0 && isfinite(opts.maxDuration_s)
+            info.trim = trimTrialTableSLAP2(tt, opts.maxDuration_s);
+        else
+            info.trim = struct('maxDuration_s', 0, 'note', 'not trimmed');
+        end
+        info.stages.trim = toc(t);
 
-    stage = 'motion_correction'; t = tic;
-    MultiRoiRegistration(tt, struct('nWorkers', opts.nWorkers, 'overwriteExisting', true));
-    info.stages.motion_correction = toc(t);
+        stage = 'motion_correction'; t = tic;
+        MultiRoiRegistration(tt, struct('nWorkers', opts.nWorkers, 'overwriteExisting', true, ...
+            'compensateOnline', opts.compensateOnline, 'saveTif', opts.saveTif));
+        info.stages.motion_correction = toc(t);
 
-    stage = 'source_extraction'; t = tic;
-    SILo(tt, struct('isSLAP2', true, 'drawUserRois', true, 'allowAnnotationGUI', false, ...
-        'nWorkers', opts.nWorkers));
-    info.stages.source_extraction = toc(t);
+        stage = 'source_extraction'; t = tic;
+        SILo(tt, struct('isSLAP2', true, 'drawUserRois', true, 'allowAnnotationGUI', false, ...
+            'nWorkers', opts.nWorkers, 'peakMethod', opts.peakMethod, 'wmfPeakth', opts.wmfPeakth));
+        info.stages.source_extraction = toc(t);
 
-    stage = 'export'; t = tic;
-    info.export = exportF0TrainingData(tt, outDir, 'channels', opts.channels, ...
-        'label', s.name, 'giantRef', giantCommit);
-    info.stages.export = toc(t);
-    info.status = 'ok';
+        stage = 'export'; t = tic;
+        info.export = exportF0TrainingData(tt, outDir, 'channels', opts.channels, ...
+            'label', s.name, 'giantRef', giantCommit);
+        info.stages.export = toc(t);
+        info.status = 'ok';
+    end
 catch err
     info.status = 'failed';
     info.failed_stage = stage;
@@ -140,7 +177,12 @@ if ~strcmpi(opts.keepGiantOutputs, 'none')
     end
 end
 writeJson(fullfile(outDir, 'run_info.json'), info);
-rmdir(work, 's');
+try
+    removeLinkDir(linkDir); % the links first: rmdir(..., 's') could follow them
+    rmdir(work, 's');
+catch err
+    fprintf(2, 'Could not clean up %s: %s\n', work, err.message);
+end
 if exist(fileparts(work), 'dir') && numel(dir(fileparts(work))) <= 2
     rmdir(fileparts(work));
 end
@@ -159,6 +201,10 @@ prov.matlab_version = version;
 prov.num_cores = feature('numcores');
 prov.n_workers = opts.nWorkers;
 prov.max_duration_s = opts.maxDuration_s;
+prov.compensate_online = opts.compensateOnline;
+prov.save_tif = opts.saveTif;
+prov.peak_method = opts.peakMethod;
+prov.wmf_peakth = opts.wmfPeakth;
 prov.channels = opts.channels;
 prov.date = char(datetime('now', 'Format', 'yyyy-MM-dd''T''HH:mm:ss'));
 end

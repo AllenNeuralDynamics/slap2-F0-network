@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
-# Capsule entry point. Five modes:
+# Capsule entry point. Modes:
 #
 # export (default): make F0-network training data from every attached SLAP2
 # session (GIAnT registration and SiLo, then exportF0TrainingData).
-#   ./run [--mode export] [--giant_ref main] [--max_duration_s 180]
+#   ./run [--mode export] [--giant_ref main] [--max_duration_s 1800]
 #         [--datasets all] [--n_workers 0] [--channels 1]
-#         [--keep_giant_outputs summary]
+#         [--keep_giant_outputs summary] [--compensate_online 1]
+#         [--peak_method wmf] [--wmf_peakth 3] [--save_tif 0] [--stats 1]
 #   giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
-#   training target. datasets is "all" or comma-separated mount names.
+#   training target. max_duration_s caps each session (0: no cap). datasets
+#   is "all" or comma-separated mount names. Reference stacks are left out,
+#   and so is any session with an integration scan (selectAcquisitionsSLAP2).
 #   keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
-#   per_trial_summary) or none.
+#   per_trial_summary) or none. compensate_online, peak_method and wmf_peakth
+#   are GIAnT's compensateOnline (registration), peakMethod and wmfPeakth
+#   (SiLo). save_tif 0 writes the registered movies as deflated HDF5 (lossless,
+#   much smaller). stats 1 then stores each trial's stats next to it
+#   (`slap2-f0 stats`). logs/disk_usage.txt follows the disk every 5 min.
+#
+# disktest: how far /root/capsule/results grows: writes 10 GB files up to
+#   --disk_gb (default 1500) or the first failure, logging df after each
+#   (logs/disktest.txt), then deletes them.
 #
 # probe: peak GPU memory and time per step over a grid of model settings
 #   (--train_args holds probe options, e.g. "--batches 2,4 --widths 32").
@@ -42,7 +53,13 @@ set -uo pipefail
 
 mode=export
 giant_ref=main
-max_duration_s=180
+max_duration_s=1800
+compensate_online=1
+save_tif=0
+peak_method=wmf
+wmf_peakth=3
+stats=1
+disk_gb=1500
 datasets=all
 n_workers=0
 channels=1
@@ -59,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -114,8 +131,23 @@ elif [[ "$mode" == "probe" ]]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli probe --out "$RESULTS/probe" $train_args \
         2>&1 | tee "$RESULTS/logs/probe.log"
     exit "${PIPESTATUS[0]}"
+elif [[ "$mode" == "disktest" ]]; then
+    mkdir -p "$RESULTS/_disktest"
+    n=0
+    while (( n * 10 < disk_gb )); do
+        if ! dd if=/dev/zero of="$RESULTS/_disktest/f$n" bs=64M count=160 oflag=direct status=none; then
+            echo "$(date +%T) write of file $n failed" | tee -a "$RESULTS/logs/disktest.txt"
+            break
+        fi
+        n=$((n + 1))
+        echo "$(date +%T) $((n * 10)) GB written: $(df -BG --output=size,used,avail /root/capsule/results | tail -1)" | tee -a "$RESULTS/logs/disktest.txt"
+    done
+    rm -f "$RESULTS/_disktest"/f*
+    rmdir "$RESULTS/_disktest"
+    df -BG /root/capsule/results | tee -a "$RESULTS/logs/disktest.txt"
+    exit 0
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, train, eval, predict or probe)"
+    echo "Unknown mode: $mode (use export, train, eval, predict, probe or disktest)"
     exit 2
 fi
 
@@ -134,7 +166,17 @@ else
 fi
 echo "GIAnT: $giant_ref -> $(git -C "$dest" rev-parse HEAD)"
 
+# disk use every 5 min (GIAnT's working files for a 30 min session are a few hundred GB)
+(while true; do echo "$(date +%T) $(df -BG --output=size,used,avail /root/capsule/results | tail -1) work $(du -sBG "$RESULTS/_work" 2>/dev/null | cut -f1)"; sleep 300; done) \
+    > "$RESULTS/logs/disk_usage.txt" 2>&1 &
+disk_pid=$!
+
 esc() { printf '%s' "${1//\'/\'\'}"; }
-(cd "$CODE" && matlab -batch "run_export('giantDir','$dest','giantRef','$(esc "$giant_ref")','maxDuration_s','$max_duration_s','datasets','$(esc "$datasets")','nWorkers','$n_workers','channels','$(esc "$channels")','keepGiantOutputs','$(esc "$keep_giant_outputs")','dataDir','$DATA','resultsDir','$RESULTS','scratchDir','$SCRATCH')") \
+(cd "$CODE" && matlab -batch "run_export('giantDir','$dest','giantRef','$(esc "$giant_ref")','maxDuration_s','$max_duration_s','datasets','$(esc "$datasets")','nWorkers','$n_workers','channels','$(esc "$channels")','keepGiantOutputs','$(esc "$keep_giant_outputs")','compensateOnline','$compensate_online','saveTif','$save_tif','peakMethod','$(esc "$peak_method")','wmfPeakth','$wmf_peakth','dataDir','$DATA','resultsDir','$RESULTS','scratchDir','$SCRATCH')") \
     2>&1 | tee "$RESULTS/logs/matlab.log"
-exit "${PIPESTATUS[0]}"
+status="${PIPESTATUS[0]}"
+if [[ "$stats" == "1" ]]; then  # each trial's stats, next to it, for training
+    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli stats "$RESULTS" --workers 16 2>&1 | tee "$RESULTS/logs/stats.log"
+fi
+kill "$disk_pid" 2>/dev/null
+exit "$status"
