@@ -1222,3 +1222,25 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 - The sources only one of the two runs finds pass the test as often as the shared ones (93–100%). The two baselines differ at the margin, and both margins are mostly real synapses.
 
 **Decision: v9 fine-tuned replaces v6r pretrained as the default.** It meets the condition set in the v9 section: as many validated real sources (more), and no more false ones. It is also the most accurate checkpoint on simulations and real windows. What remains against it: a low baseline at support pixels of activity-free simulations (+0.070 against +0.050), and an edge bias as large as v6r's. v10 is judged against v9 fine-tuned from here on.
+
+## Data available: iGluSnFR4f multiROI sessions on aind-open-data (2026-11-19)
+
+**Survey** (`sessions/survey/survey_durations.py`; list in `sessions/slap2_iglusnfr4f_multiroi.csv`).
+
+- Every bare `<subject>_<date>_<time>` prefix on the bucket (5,199) has its `data_description.json` read: 252 are SLAP2.
+- 39 of those were not in the 2026-11-14 list. They are 9 iGluSnFR4s sessions, 10 ASAP7y (OpenScope) sessions, 15 iGluSnFR4f sessions holding only structural reference stacks, 4 new iGluSnFR4f multi-roi raster sessions (2026-11-17/18, "indicator testing") and one legacy duplicate.
+- Recording time comes from every experiment `.dat` file's first and last line timestamps (52,427 files). Checks: a 780125 trial reads 28.0 s (2254 frames at 80 Hz), and 803121 reads 1,740 s on both paths.
+
+**What qualifies** (iGluSnFR4f, multiROI raster, 2025 onward):
+
+| | sessions | mice | recording | path-time (two DMD paths at once) | raw .dat |
+|---|---|---|---|---|---|
+| continuous | 98 | | 60.6 h | | |
+| triggered trials | 42 | | 32.5 h | | |
+| **all** | **140** | **32** | **93.0 h** | **186 h (669,451 s)** | **8.9 TB** |
+
+- Sessions last 6–77 min (median 29.5). Per mouse: 0.3–14 h, most 1–5 h.
+- Processed assets on the bucket: 69 sessions (52 h) are motion-corrected, 62 source-extracted, 11 processed. 68 sessions have none yet.
+- Left out: 6 iGluSnFR4s multiROI sessions (2.3 h); 5 iGluSnFR4f sessions whose scan mode is in doubt (1.9 h); the voltage (ASAP, FORCEB) and GFP sessions.
+
+**Against what the network trains on.** v9 trained on 1,015 s of path-time, from three sessions. Those three sessions alone hold 15,100 s, and the validation session 7,600 s. Each export was capped at 180 s per path (`--max_duration_s 180`). All qualifying sessions together hold about 660 times the current training data, from 32 mice instead of 3.
