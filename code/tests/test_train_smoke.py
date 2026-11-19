@@ -294,3 +294,29 @@ def test_edge_windows(tmp_path):
         fr = np.nanmax(m.reshape(m.shape[0], -1), 1)  # frame number + 1 per window frame, NaN outside the trial
         first, last = np.nanmin(fr) - 1, np.nanmax(fr) - 1
         assert first <= 5 or last >= T - 6, (first, last)
+
+
+def test_train_with_motion_simulation_and_features(tmp_path):
+    """Simulated residual motion, focus and local motion in training, the motion
+    validation set and evaluation kind, and the motion features: it trains,
+    selects on motion windows, and evaluate rebuilds the model."""
+    for k, label in enumerate(["sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "2", "--batch", "1",
+          "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_windows", "2",
+          "--val_every", "2", "--box_radius", "2", "--hp_width", "4", "--hp_temporal_dilations", "1,2",
+          "--hp_spatial_dilations", "1,1", "--hp_full_res_blocks", "1", "--pool_scales", "4,0",
+          "--motion_sd", "0,0.2", "--focus_sd", "0,0.25", "--local_sd", "0,0.2", "--val_motion",
+          "--select_on", "motion", "--motion_features"])
+    cfg = json.loads((out / "config.json").read_text())
+    assert cfg["model"]["motion_features"] and cfg["sim"]["local_sd_px"] == [0.0, 0.2]
+    rows = list(csv.DictReader(open(out / "metrics.csv")))
+    assert any(k.startswith("motion_") for k in rows[0])
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", f"m={out / 'best.pt'}", "--out", str(ev), "--windows", "2",
+          "--workers", "0", "--kinds", "motion", "--stats_from", str(out / "stats")])
+    assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 3

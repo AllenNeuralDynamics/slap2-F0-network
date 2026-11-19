@@ -301,6 +301,7 @@ def _model_config(args) -> ModelConfig:
     mcfg.box_radius, mcfg.hp_width, mcfg.hp_full_res_blocks = args.box_radius, args.hp_width, args.hp_full_res_blocks
     mcfg.varfac_norm = args.varfac_norm
     mcfg.hp_shared = args.hp_shared
+    mcfg.motion_features = getattr(args, "motion_features", False)
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -392,6 +393,11 @@ def stats_cache(args, out: Path) -> Path:
 # trials' (evaluate --kinds fast): field-wide and regional, 1.5-20 frames
 FAST_GLOBAL_SD, FAST_FIELD_SD = 0.06, 0.04  # real: field-wide 2-5%, per 48-px region 2-4% per frame
 FAST_SIM = dict(fast_global_sd=FAST_GLOBAL_SD, fast_field_sd=FAST_FIELD_SD)
+# residual motion, focus and local motion at the sizes measured on the viewer trials
+# (plan.md, "Residual motion and blur"): rigid 0.05-0.17 px per axis, mostly fast;
+# blur 0.10-0.32 px^2 per axis; local 0.07-0.22 px beyond the simulator's level
+MOTION_SIM = dict(motion_sd_px=(0.0, 0.2), motion_tau_frames=(0.5, 40.0), focus_sd_px2=(0.0, 0.25),
+                  local_sd_px=(0.0, 0.2))
 
 
 def eval_sim(kind: str, photon_zeros: bool = False) -> SimConfig | None:
@@ -400,7 +406,8 @@ def eval_sim(kind: str, photon_zeros: bool = False) -> SimConfig | None:
     stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"."""
     base = _base_kind(kind)
     cfg = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
-           "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3))}.get(base)
+           "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3)),
+           "motion": SimConfig(**FAST_SIM, **MOTION_SIM)}.get(base)
     if cfg is not None:
         cfg.photon_zeros = photon_zeros or "pz" in kind[len(base):]
         cfg.shuffle_prob = 1.0 if "shuf" in kind[len(base):] else 0.0
@@ -408,7 +415,7 @@ def eval_sim(kind: str, photon_zeros: bool = False) -> SimConfig | None:
 
 
 def _base_kind(kind: str) -> str:
-    for b in ("real", "sim", "free", "fast", "dark"):
+    for b in ("real", "sim", "free", "fast", "dark", "motion"):
         if kind.startswith(b):
             return b
     return kind
@@ -416,7 +423,7 @@ def _base_kind(kind: str) -> str:
 
 # dark: fast simulations where 30% of the footprint pixels sit on a nearly dark baseline;
 # the "pz" and "shuf" variants use their base kind's seed, so they score the same windows
-EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "dark": 60_000}
+EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "dark": 60_000, "motion": 70_000}
 
 
 def sim_config(args, free: bool = False) -> SimConfig:
@@ -425,9 +432,12 @@ def sim_config(args, free: bool = False) -> SimConfig:
         return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros)
     lo, hi = (float(v) for v in args.silent_frac.split(","))
     dlo, dhi = (float(v) for v in args.dark_frac.split(","))
+    pair = lambda s: tuple(float(v) for v in s.split(","))  # noqa: E731
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
                      fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi),
-                     shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros)
+                     shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros,
+                     motion_sd_px=pair(args.motion_sd), motion_tau_frames=pair(args.motion_tau),
+                     focus_sd_px2=pair(args.focus_sd), local_sd_px=pair(args.local_sd))
 
 
 def train(args) -> None:
@@ -493,6 +503,8 @@ def train(args) -> None:
             evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
         if args.val_fast:
             evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast", args.photon_zeros))
+        if args.val_motion:
+            evals["motion"] = mk(val_files, args.val_windows, 70_000 + args.seed, eval_sim("motion", args.photon_zeros))
     evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
     region = loss_region(wcfg)
     sel_prefix = (args.select_on or ("real" if args.data == "mix" else args.data)) if val_files else "tr"
@@ -668,7 +680,7 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--out", default="results/eval")
     p.add_argument("--kinds", default="real,sim",
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
-                        "shared brightness changes)")
+                        "shared brightness changes), motion (fast plus residual motion, focus and local motion)")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
@@ -816,6 +828,16 @@ def add_arguments(p) -> None:
                         "down by 0.02-0.3 (sources on nearly dark pixels)")
     p.add_argument("--val_fast", action="store_true",
                    help="also validate on held-out windows simulated with fast shared brightness changes (fast_*)")
+    p.add_argument("--motion_sd", default="0,0",
+                   help="lo,hi: simulated rigid residual motion, SD per axis uniform in this range (px; 0,0 = none)")
+    p.add_argument("--motion_tau", default="0.5,40", help="lo,hi: its time constant, log-uniform (frames)")
+    p.add_argument("--focus_sd", default="0,0",
+                   help="lo,hi: simulated focus fluctuations, SD of the isotropic blur change (px^2; 0,0 = none)")
+    p.add_argument("--local_sd", default="0,0",
+                   help="lo,hi: simulated local (non-rigid) motion, SD of its fast and of its slow part (px; 0,0 = none)")
+    p.add_argument("--val_motion", action="store_true",
+                   help="also validate on held-out windows simulated with fast brightness changes, residual motion, "
+                        "focus fluctuations and local motion at the measured sizes (motion_*)")
     p.add_argument("--exclude", default="", help="comma-separated sessions to leave out of training and validation")
     p.add_argument("--val_free", action="store_true",
                    help="also validate on held-out windows simulated without activity (free_*)")
@@ -830,12 +852,15 @@ def add_arguments(p) -> None:
                    help="best.pt criterion on held-out windows: 8-frame MSE vs the mean image, averaged over "
                         "support and background (balanced; balanced_free adds labeled pixels of the activity-free "
                         "simulation, needs --val_free) or over all pixels (mse8), or the mean loss")
-    p.add_argument("--select_on", default="", help="validation set for best.pt (real, sim, free, fast); "
+    p.add_argument("--select_on", default="", help="validation set for best.pt (real, sim, free, fast, motion); "
                                                   "default: the training data kind (real for mix)")
     p.add_argument("--no_flip", action="store_true", help="no random flips of training windows (= --flip none)")
     p.add_argument("--flip", default="rows", choices=["rows", "both", "none"],
                    help="random flips of training windows: up/down only (rows, the DMD's short axis; default), "
                         "also left/right (both, v1-v6), or none. Never rotations: the microscope scans")
+    p.add_argument("--motion_features", action="store_true",
+                   help="box model: also the local displacement and blur seen in the surround, as the change they "
+                        "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
     p.add_argument("--hp_shared", action="store_true",
                    help="one half-plane trunk for all four directions (v6) instead of one per direction")
     p.add_argument("--photon_zeros", action="store_true",

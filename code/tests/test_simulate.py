@@ -244,3 +244,28 @@ def test_shuffled_timing(tmp_path):
     on = np.flatnonzero(w["activity"][:, 11, 11] > 0)  # the 10-frame event stays in one piece
     assert len(on) == 10 and on[-1] - on[0] == 9
     assert not np.array_equal(w["activity"], plain["activity"])
+
+
+def test_local_motion(tmp_path):
+    """Local motion: without it the draws are unchanged; with it each frame's
+    truth is the static truth warped by the drawn displacement field
+    (out[x] = static[x - D(x)]), and the field's SD per pixel is about the
+    drawn SD."""
+    from scipy import ndimage
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn, T=800, R=40, C=48)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    base = SimConfig(excess=0.0, motion_sd_px=(0.1, 0.1))
+    a = draw(tp, base, np.random.default_rng(3))
+    b = draw(tp, SimConfig(excess=0.0, motion_sd_px=(0.1, 0.1), local_sd_px=(0.3, 0.3)), np.random.default_rng(3))
+    assert np.array_equal(a["motion"], b["motion"]) and "local_fields" not in a
+    assert b["local_fields"].shape == (2, 3, tp.R, tp.C) and b["local_proc"].shape == (2, 3, tp.T)
+    r = draw(tp, SimConfig(excess=0.0, local_sd_px=(0.3, 0.3), local_px=(15, 15)), np.random.default_rng(5))
+    D = np.einsum("ajt,ajrc->tarc", r["local_proc"], r["local_fields"])
+    assert 0.15 < D.std(0).mean() < 0.7  # fast and slow parts of 0.3 each: about 0.42
+    w = window(tp, r, 0, 50, 0, tp.R, 0, tp.C, np.random.default_rng(6))
+    rr, cc = np.indices((tp.R, tp.C), dtype=np.float32)
+    for t in (0, 17, 49):
+        ref = ndimage.map_coordinates(w["truth_static"][t], [rr - D[t, 0], cc - D[t, 1]], order=3, mode="nearest")
+        assert np.allclose(w["truth"][t], ref, rtol=1e-4, atol=1e-4)

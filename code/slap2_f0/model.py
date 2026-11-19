@@ -31,7 +31,14 @@ motion, defocus) can be followed. Two additions see them:
   around each pixel minus the box, the fractional deviation of the movie from
   the mean image, sum(valid * (movie - mean image)) / sum(valid * mean image),
   in the output frame and averaged over the 8 frames around it (integral
-  images, exact and cheap; 0 = the whole window).
+  images, exact and cheap; 0 = the whole window);
+* **motion features** (optional, ``motion_features``): over the same squares
+  minus the box, each frame's deviation from the mean image M fitted as a
+  brightness change plus a shift and a blur (a M - d . grad M + b_r d2M/drow2 +
+  b_c d2M/dcol2, weighted by photon noise), and the change the shift and blur
+  make at the pixel itself. Residual motion and focus changes move the
+  baseline by -d . grad M + b . d2M; a shift brightens one side of a structure
+  and darkens the other, which the fractional deviations average away.
 
 Inputs to the branches (``make_inputs``): the movie, its validity flag and
 three whole-trial maps (mean image, SiLo's variance factor relative to its
@@ -98,6 +105,9 @@ class ModelConfig:
     # short axis; only up/down flips leave it alike): separate trunks let each
     # direction learn its own filters
     hp_shared: bool = False
+    # box model only: also the local displacement and blur seen in the surround
+    # (``motion_features``), as the change they make at the pixel, per pool scale
+    motion_features: bool = False
     # variance-factor input: "trial" = log of the factor relative to its median
     # over the trial's imaged pixels (``io.TrialFile``), the same in every
     # window; "window" (checkpoints up to v6) = relative to the median over the
@@ -159,6 +169,10 @@ class ModelConfig:
     @property
     def n_pool(self) -> int:
         return 2 * len(self.pool_scales) if self.box else 0
+
+    @property
+    def n_motion(self) -> int:
+        return 2 * len(self.pool_scales) + 4 if self.box and self.motion_features else 0
 
 
 def _residual(x: torch.Tensor, alpha: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
@@ -344,6 +358,83 @@ def pooled_features(x: torch.Tensor, t0: int, t1: int, radius: int, scales: list
     return torch.stack(out, 1)
 
 
+def mean_image_derivs(mi: torch.Tensor) -> torch.Tensor:
+    """d/drow, d/dcol, d2/drow2, d2/dcol2 of the mean image (B, H, W) by
+    central differences: (B, 4, H, W), 0 where a neighbour is not imaged
+    (mean image 0) and at the window's edge."""
+    ok = mi > 0
+    z = torch.zeros_like(mi)
+    up, dn = F.pad(mi[:, :-1], (0, 0, 1, 0)), F.pad(mi[:, 1:], (0, 0, 0, 1))  # mi[r-1], mi[r+1]
+    lf, rt = F.pad(mi[:, :, :-1], (1, 0)), F.pad(mi[:, :, 1:], (0, 1))  # mi[c-1], mi[c+1]
+    okr = ok & (up > 0) & (dn > 0)
+    okc = ok & (lf > 0) & (rt > 0)
+    return torch.stack([torch.where(okr, (dn - up) / 2, z), torch.where(okc, (rt - lf) / 2, z),
+                        torch.where(okr, dn - 2 * mi + up, z), torch.where(okc, rt - 2 * mi + lf, z)], 1)
+
+
+def motion_features(x: torch.Tensor, t0: int, t1: int, radius: int, scales: list[int],
+                    ridge: float = 0.05) -> torch.Tensor:
+    """Local displacement and blur seen in the surround, as the change they make
+    at the pixel. Over the same squares minus the box as ``pooled_features``,
+    each frame's deviation from the mean image M is fitted by weighted least
+    squares (weights 1 / M, photon noise) as a M + th_1 dM/drow + th_2 dM/dcol +
+    th_3 d2M/drow2 + th_4 d2M/dcol2 (th_1,2 = -displacement, th_3,4 = blur);
+    the feature is (th_1 dM/drow + ... + th_4 d2M/dcol2) / M at the pixel itself,
+    for the frame and for the mean of frames t-3..t+4, clamped to +-1. A shift
+    brightens one side of a structure and darkens the other, which the
+    fractional deviations of ``pooled_features`` average away; this keeps it.
+    Also returned (last 4 channels): the pixel's own dM/drow / M, dM/dcol / M,
+    d2M/drow2 / M, d2M/dcol2 / M (clamped to +-1), constant in time. Output
+    (B, 2 * len(scales) + 4, t1 - t0, H, W); x as from ``make_inputs``. The
+    mean image is a whole-trial map, so the derivatives leak nothing; the
+    movie enters only outside the box. Computed in float32 (outside autocast:
+    the small solves need the precision)."""
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        return _motion_features(x.float(), t0, t1, radius, scales, ridge)
+
+
+def _motion_features(x, t0, t1, radius, scales, ridge):
+    B, _, T, H, W = x.shape
+    a, b = max(0, t0 - 3), min(T, t1 + 4)
+    m, v = x[:, 0, a:b], x[:, 1, a:b]
+    mi = x[:, 2, 0]  # (B, H, W), constant in time
+    D = mean_image_derivs(mi)  # (B, 4, H, W)
+    X = torch.cat([mi[:, None], D], 1)  # (B, 5, H, W) basis
+    ok = (mi > 0).float()
+    w = ok / mi.clamp_min(0.05)
+    nb = X.shape[1]
+    iu = [(k, l) for k in range(nb) for l in range(k, nb)]
+    gram_terms = torch.stack([w * X[:, k] * X[:, l] for k, l in iu], 1).reshape(-1, H, W)  # (B * 15, H, W)
+    y = v * (m - mi[:, None])  # (B, t, H, W); 0 where no data
+    num_terms = (w[:, None, None] * X[:, :, None] * y[:, None]).reshape(-1, H, W)  # (B * 5 * t, H, W)
+    fr = (v.flatten(2).amax(2) > 0).float()  # (B, t): frames with data
+    gb, nbx = _box_sums(gram_terms, radius), _box_sums(num_terms, radius)
+    own = (D / mi[:, None].clamp_min(0.05)).clamp(-1, 1)  # (B, 4, H, W)
+    t = torch.arange(t0, t1, device=x.device)
+    lo, hi = (t - 3).clamp(a, b) - a, (t + 5).clamp(a, b) - a
+    out = []
+    for s in scales:
+        half = s if s > 0 else max(H, W)
+        g = (_box_sums(gram_terms, half) - gb).view(B, len(iu), H, W)
+        G = torch.zeros(B, H, W, nb, nb, device=x.device)
+        for j, (k, l) in enumerate(iu):
+            G[..., k, l] = g[:, j]
+            G[..., l, k] = g[:, j]
+        dg = torch.diagonal(G, dim1=-2, dim2=-1)
+        G = G + torch.diag_embed(ridge * dg + 1e-6)
+        Gi = torch.linalg.inv(G)  # (B, H, W, 5, 5)
+        n = (_box_sums(num_terms, half) - nbx).view(B, nb, b - a, H, W)
+        cn = F.pad(n.cumsum(2), (0, 0, 0, 0, 1, 0))
+        cf = F.pad(fr.cumsum(1), (1, 0))
+        n8 = (cn[:, :, hi] - cn[:, :, lo]) / (cf[:, hi] - cf[:, lo]).clamp_min(1).view(B, 1, -1, 1, 1)
+        for nn_ in (n[:, :, t0 - a: t1 - a], n8):
+            th = torch.einsum("bhwkl,blthw->bkthw", Gi, nn_)
+            f = (th[:, 1:] * D[:, :, None]).sum(1) / mi[:, None].clamp_min(0.05)
+            out.append(torch.where(ok[:, None] > 0, f, torch.zeros_like(f)).clamp(-1, 1))
+    out += [own[:, k, None].expand(-1, t1 - t0, -1, -1) for k in range(4)]
+    return torch.stack(out, 1)
+
+
 def soft_cap(x: torch.Tensor, cap: float) -> torch.Tensor:
     """cap * tanh(x / cap): the identity near 0, smoothly bounded by +-cap."""
     return cap * torch.tanh(x / cap)
@@ -378,7 +469,7 @@ class SlabBlindSpotNet(nn.Module):
         self.future = CausalBranch(self.cfg)
         self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box and self.cfg.hp_shared else None
         self.hp_views = nn.ModuleList([HalfPlaneBranch(self.cfg) for _ in range(4)])             if self.cfg.box and not self.cfg.hp_shared else None
-        n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool if self.cfg.box else 0)
+        n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool + self.cfg.n_motion if self.cfg.box else 0)
         self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
         self.head_mix = nn.Conv3d(w, 1, 1)
@@ -446,10 +537,13 @@ class SlabBlindSpotNet(nn.Module):
             a, b = max(0, t0 - R), min(T, t1 + R)
             hh = self._half_planes(x[:, :, a:b])[:, :, t0 - a: t1 - a]
             pf = pooled_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales)
+            extra = [hh, pf]
+            if self.cfg.motion_features:  # last, so a checkpoint without them warm-starts exactly (load_compatible)
+                extra.append(motion_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales))
             if region is not None:
                 sp = (slice(None), slice(None), slice(None)) + tuple(region[1:])
-                hh, pf = hh[sp], pf[sp]
-            extra = [hh, pf.to(hh.dtype)]
+                extra = [e[sp] for e in extra]
+            extra = [e.to(hh.dtype) for e in extra]
         if region is not None:
             x = x[sel]
             wm, wv, n = (a[(slice(None),) + tuple(region)] for a in (wm, wv, n))

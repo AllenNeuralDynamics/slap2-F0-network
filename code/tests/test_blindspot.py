@@ -313,3 +313,68 @@ def test_shared_halfplane_trunk_starts_per_direction_trunks():
     # checkpoints saved before the option load as shared
     d = {k: v for k, v in vars(ModelConfig(**kw)).items() if k != "hp_shared"}
     assert config_from_dict(d).hp_shared
+
+
+@pytest.mark.parametrize("which", [0, 1])  # mu, var
+def test_box_blind_spot_with_motion_features(which):
+    """The surround's displacement and blur features keep the box blind spot."""
+    torch.manual_seed(1)
+    cfg = ModelConfig(gap=3, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 2, 1], window_reach=10,
+                      full_res_blocks=1, box_radius=2, hp_width=6, hp_temporal_dilations=[1, 2, 1],
+                      hp_spatial_dilations=[1, 1, 2], hp_full_res_blocks=1, pool_scales=[3, 0], motion_features=True)
+    model = SlabBlindSpotNet(cfg).double()
+    _activate_box(model)
+    torch.nn.init.normal_(model.fuse[0].weight, std=0.5)  # every fusion input counts, the new features included
+    x = torch.randn(1, cfg.n_inputs, 40, 23, 25, dtype=torch.float64)
+    x[:, 1] = (torch.rand(1, 40, 23, 25) > 0.1).double()
+    x[:, 0] = x[:, 0] * x[:, 1]
+    x[:, 2] = x[:, 2].abs() + 1
+    x.requires_grad_(True)
+    t0, r0, c0 = 20, 11, 12
+    model(x)[which][0, t0, r0, c0].backward()
+    g = x.grad[0, :2].abs().sum(0)
+    assert torch.count_nonzero(g[t0 - 3: t0 + 4, r0 - 2: r0 + 3, c0 - 2: c0 + 3]) == 0
+    assert g[t0, r0 + 3, c0] > 0 and g[t0, r0, c0 - 3] > 0
+
+
+def test_motion_features_warm_start_and_read_a_shift():
+    """A box model without motion features warm-starts one with them exactly;
+    the feature reads a small shift of the scene as the change it makes at the pixel."""
+    from slap2_f0.model import motion_features
+    from slap2_f0.train import load_compatible
+
+    torch.manual_seed(2)
+    kw = dict(gap=2, width=6, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6, full_res_blocks=1,
+              box_radius=2, hp_width=4, hp_temporal_dilations=[1, 2], hp_spatial_dilations=[1, 1], hp_full_res_blocks=1,
+              pool_scales=[3, 0])
+    old = SlabBlindSpotNet(ModelConfig(**kw)).double()
+    _activate_box(old)
+    new = SlabBlindSpotNet(ModelConfig(**kw, motion_features=True)).double()
+    load_compatible(new, old.state_dict())
+    x = torch.randn(1, 5, 20, 12, 12, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    a, b = old(x), new(x)
+    assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+    # a smooth scene of Gaussian blobs, shifted by d in frame 1 (exact), not in frame 0
+    H = W = 40
+    rr, cc = torch.meshgrid(torch.arange(H, dtype=torch.float64), torch.arange(W, dtype=torch.float64), indexing="ij")
+    blobs = [(8, 9, 2.0, 6), (20, 25, 2.5, 4), (30, 12, 1.8, 5), (14, 32, 2.2, 7), (31, 31, 3.0, 3)]
+
+    def scene(dr, dc):
+        s = torch.full((H, W), 1.0, dtype=torch.float64)
+        for r0, c0, sg, amp in blobs:
+            s = s + amp * torch.exp(-((rr - r0 - dr) ** 2 + (cc - c0 - dc) ** 2) / (2 * sg ** 2))
+        return s
+
+    d = (0.25, -0.15)
+    mi, moved = scene(0, 0), scene(*d)
+    x = torch.zeros(1, 5, 9, H, W, dtype=torch.float64)
+    x[:, 0] = mi
+    x[:, 0, 4] = moved
+    x[:, 1] = 1.0
+    x[:, 2] = mi
+    f = motion_features(x, 4, 5, 2, [0])  # (1, 2 + 4, 1, H, W): whole-window scale, frame and 8-frame mean
+    true = ((moved - mi) / mi)[4:-4, 4:-4]
+    est = f[0, 0, 0, 4:-4, 4:-4].double()
+    slope = (est * true).sum() / (true * true).sum()
+    assert abs(slope - 1) < 0.15 and torch.corrcoef(torch.stack([est.flatten(), true.flatten()]))[0, 1] > 0.95

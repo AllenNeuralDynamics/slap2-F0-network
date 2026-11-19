@@ -65,7 +65,12 @@ geometry, brightness, events and noise statistics:
   blurred by the displacements' spread within the kernel (to second order);
 * **focus fluctuations** (optional, ``focus_sd_px2``): the frames' blur
   changes over time, b_r d2/drow2 + b_c d2/dcol2 of the scene, with an
-  isotropic part (focus) and a part per axis, each fast and slow.
+  isotropic part (focus) and a part per axis, each fast and slow;
+* **local motion** (optional, ``local_sd_px``): on top of the rigid
+  displacement, a smooth displacement field that changes over time (a few
+  smooth spatial fields per axis, each weighted by a fast and a slow OU
+  process), applied per frame by cubic-spline warping like the rigid shift.
+  Registration removes rigid motion; what is left is mostly local.
 
 Each draw is a new virtual trial; the window generator returns everything the
 training windows of real data have (movie, activity, mean image, variance map,
@@ -157,6 +162,17 @@ class SimConfig:
     focus_sd_px2: tuple[float, float] = (0.0, 0.0)
     focus_aniso: float = 0.7
     focus_tau_frames: tuple[tuple[float, float], tuple[float, float]] = ((1.5, 8.0), (40.0, 320.0))
+    # local (non-rigid) motion (0 = none): per axis, n_local_fields smooth spatial
+    # fields (spacing uniform in local_px) weighted by OU processes, a fast and a
+    # slow one each (local_tau_frames, log-uniform), whose SDs are drawn uniform in
+    # local_sd_px; the fields are scaled so that the local displacement's SD per
+    # pixel is that SD on average. Measured on the viewer trials beyond the
+    # simulator's level (local_motion.py, 64 px blocks): slow 0.07-0.22 px in all,
+    # fast 0.12-0.2 px in 803121 and 878030
+    local_sd_px: tuple[float, float] = (0.0, 0.0)
+    local_px: tuple[float, float] = (20.0, 60.0)
+    n_local_fields: int = 3
+    local_tau_frames: tuple[tuple[float, float], tuple[float, float]] = ((1.5, 8.0), (40.0, 320.0))
 
 
 def _fill_nearest(valid: np.ndarray):
@@ -189,11 +205,28 @@ def _blur(img: np.ndarray, c) -> np.ndarray:
     return (img + 0.5 * (c[0] * drr + c[1] * dcc) + c[2] * drc).astype(np.float32)
 
 
-def _move(img: np.ndarray, r: dict, t: int, fill) -> np.ndarray:
-    """img as frame t sees it: moved to its displacement, blurred by the
+def _warp(img: np.ndarray, d, loc: np.ndarray, w: np.ndarray, fill) -> np.ndarray:
+    """img (R, C) moved by the rigid displacement d (rows, cols) plus the local
+    displacement field sum_j loc[:, j] * w[:, j] (loc (2, J, R, C), w (2, J)):
+    out[x] = img[x - D(x)], cubic spline, edges continued."""
+    from scipy import ndimage
+    if fill is not None:
+        img = img[fill[0], fill[1]]
+    D = np.einsum("aj,ajrc->arc", w.astype(np.float32), loc)
+    if d is not None:
+        D = D + np.asarray(d, np.float32)[:, None, None]
+    rr, cc = np.indices(img.shape, dtype=np.float32)
+    return ndimage.map_coordinates(img, [rr - D[0], cc - D[1]], order=3, mode="nearest").astype(np.float32)
+
+
+def _move(img: np.ndarray, r: dict, t: int, fill, loc=None) -> np.ndarray:
+    """img as frame t sees it: moved to its displacement (rigid, plus the local
+    field when loc, the local fields on img's region, is given), blurred by the
     displacement's spread within the frame (motion with substeps) and by the
     focus change."""
-    if "motion" in r:
+    if loc is not None:
+        out = _warp(img, r["motion"][:, t] if "motion" in r else None, loc, r["local_proc"][:, :, t], fill)
+    elif "motion" in r:
         out = _shift(img, r["motion"][:, t], fill)
     else:
         out = (img[fill[0], fill[1]] if fill is not None else img).astype(np.float32)
@@ -511,6 +544,17 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
         for lo_hi in cfg.focus_tau_frames:  # fast and slow, equal variance
             b = b + _ou(T, np.exp(rng.uniform(*np.log(lo_hi), 3)), sds, rng)
         r["focus"] = np.stack([b[0] + b[1], b[0] + b[2]]).astype(np.float32)  # (2, T): b_r, b_c in px^2
+    if cfg.local_sd_px[1] > 0 and cfg.n_local_fields > 0:  # drawn last, see above
+        J = cfg.n_local_fields
+        flds = np.stack([np.stack([_field(tp.R, tp.C, rng.uniform(*cfg.local_px), rng) for _ in range(J)])
+                         for _ in range(2)])  # (2, J, R, C), unit SD each
+        flds /= np.sqrt(J)  # unit-variance weights then give a displacement of unit SD per pixel on average
+        w = 0.0
+        for lo_hi in cfg.local_tau_frames:  # fast and slow, each with its own SD
+            w = w + _ou(T, np.exp(rng.uniform(*np.log(lo_hi), 2 * J)),
+                        np.full(2 * J, rng.uniform(*cfg.local_sd_px)), rng)
+        r["local_fields"] = flds.astype(np.float32)
+        r["local_proc"] = w.reshape(2, J, T).astype(np.float32)  # (2, J, T)
     if cfg.photon_zeros and tp.zc is not None:
         r["photon_zeros"] = True
     return r
@@ -546,9 +590,13 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     valid = tf.valid[rs:re, cs:ce]
     # the scene is computed on the window plus the margin that motion can move into it
     mo = r.get("motion")
-    moving = mo is not None or "focus" in r
-    m = int(np.ceil(np.abs(mo).max())) + 3 if mo is not None else (2 if moving else 0)
+    moving = mo is not None or "focus" in r or "local_fields" in r
+    reach = np.abs(mo).max() if mo is not None else 0.0
+    if "local_fields" in r:  # bound on the local displacement: max |field| times the summed max |weight|
+        reach += float(np.abs(r["local_fields"]).max() * np.abs(r["local_proc"]).max(2).sum(1).max())
+    m = int(np.ceil(reach)) + 3 if reach > 0 else (2 if moving else 0)
     xs, xe, ys, ye = max(rs - m, 0), min(re + m, R), max(cs - m, 0), min(ce + m, C)
+    loc = r["local_fields"][:, :, xs:xe, ys:ye] if "local_fields" in r else None
     wr, wc = slice(rs - xs, re - xs), slice(cs - ys, ce - ys)  # the window within that region
     valid_x = tf.valid[xs:xe, ys:ye]
     B = np.nan_to_num(tp.B[xs:xe, ys:ye])
@@ -585,8 +633,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
         fill = _fill_nearest(valid_x)
         out["truth_static"] = np.full((nt, nr, nc), np.nan, np.float32)
         out["truth_static"][dt, dr, dc] = np.where(valid[None], truth[:, wr, wc], np.nan)
-        truth = np.stack([_move(truth[i], r, ts + i, fill)[wr, wc] for i in range(te - ts)])
-        act = np.stack([_move(np.nan_to_num(act[i]), r, ts + i, fill)[wr, wc] for i in range(te - ts)])
+        truth = np.stack([_move(truth[i], r, ts + i, fill, loc)[wr, wc] for i in range(te - ts)])
+        act = np.stack([_move(np.nan_to_num(act[i]), r, ts + i, fill, loc)[wr, wc] for i in range(te - ts)])
         act[:, ~valid] = 0
     else:  # the region is the window
         truth, act = truth[:, wr, wc], act[:, wr, wc]
@@ -623,7 +671,7 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
         if "slow_fields" in r:
             Mx = Mx + np.tensordot(r["slow_mean"], sg, 1)
         kept = np.flatnonzero(~tf.discard) if (~tf.discard).any() else np.arange(T)
-        sh = np.stack([_move(Mx, r, k, fill)[wr, wc] for k in kept[np.linspace(0, len(kept) - 1, 128).astype(int)]])
+        sh = np.stack([_move(Mx, r, k, fill, loc)[wr, wc] for k in kept[np.linspace(0, len(kept) - 1, 128).astype(int)]])
         M, vmot = sh.mean(0), sh.var(0)
     var_mean = tp.gain * np.maximum(M, 0) * fac * tp.Ft / tp.n_valid
     g = rng.standard_normal((re - rs + 2 * ps_r, ce - cs + 2 * ps_c)).astype(np.float32)[None]
@@ -672,6 +720,9 @@ def write_trial(tp: Template, out_fn, cfg: SimConfig | None = None, seed: int = 
                 f["truth/motion_cov"] = r["motion_cov"]
         if "focus" in r:  # focus change per frame (px^2: b_r, b_c)
             f["truth/focus"] = r["focus"]
+        if "local_fields" in r:  # local displacement = sum_j fields[:, j] * proc[:, j, t] (rows, cols; pixels)
+            f["truth/local_fields"] = r["local_fields"].astype(np.float16)
+            f["truth/local_proc"] = r["local_proc"]
         f["mean_image"] = w["mean_image"][None]
         f["varfac"] = tf.varfac
         f["mask/valid"] = tf.valid.astype(np.uint8)
