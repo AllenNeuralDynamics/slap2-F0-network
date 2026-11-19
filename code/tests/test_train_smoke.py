@@ -349,3 +349,33 @@ def test_stats_sidecars(tmp_path):
         f["extra"] = np.zeros(1000)
     load_stats([fn2], tmp_path / "cache")
     assert any((tmp_path / "cache").glob("*.npz"))
+
+
+def test_named_sessions_caps_and_kept_steps(tmp_path):
+    """--val_sessions/--train_sessions pick the sessions, --max_train_s keeps the first
+    trials of each session and path, --keep_every keeps the model at every N steps, and
+    evaluate scores all kept steps from a glob."""
+    for k, (label, path) in enumerate([("sessA", 1), ("sessA", 1), ("sessA", 2), ("sessB", 1), ("sessC", 1)]):
+        d = tmp_path / "data" / label / f"Path{path}"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)  # 160 frames = 2 s each
+    out = tmp_path / "out"
+    small = ["--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+             "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0"]
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "real", "--steps", "3", "--batch", "2",
+          "--val_sessions", "sessB", "--train_sessions", "sessA", "--max_train_s", "1", "--keep_every", "2",
+          "--val_every", "2", "--val_windows", "2"] + small)
+    cfg = json.load(open(out / "config.json"))
+    names = sorted(p.split("data")[-1].replace("\\", "/") for p in cfg["train_files"])
+    assert names == ["/sessA/Path1/trial_000.h5", "/sessA/Path2/trial_002.h5"]  # first trial of each path
+    assert [p.split("data")[-1].replace("\\", "/") for p in cfg["val_files"]] == ["/sessB/Path1/trial_003.h5"]
+    assert abs(cfg["train_seconds"]["sessA"] - 4.0) < 1e-6
+    steps = sorted(p.name for p in (out / "steps").glob("*.pt"))
+    assert steps == ["step_000000.pt", "step_000002.pt", "step_000003.pt"]
+    main(["evaluate", str(tmp_path / "data"), "--out", str(tmp_path / "eval"), "--ckpt",
+          f"run={out / 'steps' / 'step_*.pt'}", "--kinds", "real", "--windows", "2", "--workers", "0"])
+    rows = list(csv.DictReader(open(tmp_path / "eval" / "eval.csv")))
+    assert sorted({r["checkpoint"] for r in rows}) == ["run@step_000000", "run@step_000002", "run@step_000003"]
+    with pytest.raises(SystemExit):  # a session in both roles
+        main(["train", str(tmp_path / "data"), "--out", str(tmp_path / "bad"), "--steps", "1",
+              "--val_sessions", "sessA", "--train_sessions", "sessA"] + small)

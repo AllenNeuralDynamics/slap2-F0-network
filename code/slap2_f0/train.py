@@ -32,8 +32,13 @@ can't pick checkpoints on real data: photon noise buries the 1-3% that can be
 learned (v2 run). The untrained network (step 0, which predicts the mean
 image, score 1) is a candidate, so best.pt is never worse than the start.
 
+Validation sessions can be named (``--val_sessions``, and ``--train_sessions``
+for the training ones), and the training data capped per session and path
+(``--max_train_s``), for data-scaling experiments.
+
 Outputs in --out: config.json, metrics.csv (one row per validation),
-last.pt, best.pt and stats/ (cached whole-trial statistics).
+last.pt, best.pt, steps/step_<N>.pt with ``--keep_every`` (model only), and
+stats/ (cached whole-trial statistics).
 """
 
 from __future__ import annotations
@@ -86,6 +91,50 @@ def split_files(files: list[Path], val_fraction: float, seed: int = 0) -> tuple[
     val = [files[i] for i in idx[:n_val]]
     train = [files[i] for i in idx[n_val:]] or val
     return train, val, f"by trial ({len(groups)} session(s))"
+
+
+def explicit_split(groups: dict[str, list[Path]], val_sessions: str, train_sessions: str = ""
+                   ) -> tuple[list[Path], list[Path], str]:
+    """Training and validation files from named sessions (comma-separated):
+    validation = val_sessions; training = train_sessions, or all other sessions."""
+    val_names = [s for s in val_sessions.split(",") if s]
+    train_names = [s for s in train_sessions.split(",") if s] or [s for s in groups if s not in val_names]
+    missing = [s for s in val_names + train_names if s not in groups]
+    if missing:
+        raise SystemExit(f"sessions not found: {', '.join(missing)} (have: {', '.join(sorted(groups))})")
+    both = set(val_names) & set(train_names)
+    if both:
+        raise SystemExit(f"sessions in both training and validation: {', '.join(sorted(both))}")
+    val = [f for s in val_names for f in groups[s]]
+    train = [f for s in train_names for f in groups[s]]
+    return train, val, f"by session (validation: {', '.join(val_names) or 'none'}; training: {', '.join(train_names)})"
+
+
+def cap_seconds(files: list[Path], max_s: float, fps: float = 80.0) -> list[Path]:
+    """The first trials of each session and path (in file order) up to max_s
+    seconds of movie: a trial is kept if the ones before it make less than max_s
+    (so the total exceeds max_s by less than one trial). 0 keeps all."""
+    if not max_s:
+        return list(files)
+    used: dict[tuple[str, str], float] = defaultdict(float)
+    out = []
+    for f in files:
+        with TrialFile(f) as tr:
+            key = (str(tr.attrs.get("label", f.parent.parent.name)), f.parent.name)
+            n = tr.n_frames
+        if used[key] < max_s:
+            out.append(f)
+            used[key] += n / fps
+    return out
+
+
+def seconds_by_session(files: list[Path], fps: float = 80.0) -> dict[str, float]:
+    """Movie seconds per session, summed over paths."""
+    tot: dict[str, float] = defaultdict(float)
+    for f in files:
+        with TrialFile(f) as tr:
+            tot[str(tr.attrs.get("label", f.parent.parent.name))] += tr.n_frames / fps
+    return dict(tot)
 
 
 def _ref_var(b, region):
@@ -450,7 +499,19 @@ def train(args) -> None:
         files = [f for s, fl in groups.items() if s not in skip for f in fl]
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
-    train_files, val_files, how = split_files(files, args.val_fraction, args.seed)
+    if args.val_sessions or args.train_sessions:
+        if not args.val_sessions:
+            raise SystemExit("--train_sessions needs --val_sessions")
+        train_files, val_files, how = explicit_split(session_groups(files), args.val_sessions, args.train_sessions)
+    else:
+        train_files, val_files, how = split_files(files, args.val_fraction, args.seed)
+    if args.max_train_s:
+        train_files = cap_seconds(train_files, args.max_train_s)
+        how += f"; training capped at {args.max_train_s:g} s per session and path"
+    files = train_files + val_files  # only these are read
+    secs = seconds_by_session(train_files)
+    print(f"training data: {sum(secs.values()):.0f} s of path-time from {len(secs)} sessions ("
+          + ", ".join(f"{s} {v:.0f} s" for s, v in sorted(secs.items())) + ")", flush=True)
     mcfg = _model_config(args)
     if mcfg.gap + mcfg.window_reach > mcfg.gap + 1 + mcfg.temporal_reach:
         raise SystemExit("window_reach must not exceed the temporal reach + 1 (the window would run out)")
@@ -516,6 +577,7 @@ def train(args) -> None:
         "model": asdict(mcfg), "window": asdict(wcfg), "args": vars(args), "n_params": n_params,
         "device": str(device), "amp": str(amp_dtype), "split": how, "sim": asdict(sim or SimConfig()),
         "train_files": [str(f) for f in train_files], "val_files": [str(f) for f in val_files],
+        "train_seconds": secs,
     }, indent=2, default=str))
     print(f"{len(files)} trial files; split {how}: {len(train_files)} train, {len(val_files)} validation; "
           f"training on {args.data} data, selecting on {sel_key}")
@@ -529,6 +591,12 @@ def train(args) -> None:
     def save(name, step):
         torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "config": asdict(mcfg),
                     "window": asdict(wcfg), "step": step}, out / name)
+
+    def keep(step):  # --keep_every: the model at this step, for later selection studies (no optimizer state)
+        if args.keep_every:
+            (out / "steps").mkdir(exist_ok=True)
+            torch.save({"model": model.state_dict(), "config": asdict(mcfg), "window": asdict(wcfg), "step": step},
+                       out / "steps" / f"step_{step:06d}.pt")
 
     def validate(step):
         nonlocal fields, best
@@ -553,6 +621,7 @@ def train(args) -> None:
             save("best.pt", step)
 
     validate(0)
+    keep(0)
     step = 0
     opt.zero_grad(set_to_none=True)
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
@@ -578,6 +647,8 @@ def train(args) -> None:
             validate(step)
         if step % args.save_every == 0 or last_step:
             save("last.pt", step)
+        if args.keep_every and (step % args.keep_every == 0 or last_step):
+            keep(step)
         if last_step:
             break
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
@@ -607,8 +678,17 @@ def evaluate_checkpoints(args) -> None:
           + ", ".join(f"{s} ({len(f)} trials)" for s, f in sorted(groups.items())), flush=True)
     excess_report(groups, stats, out / "excess.csv")
     rows = []
-    for spec in args.ckpt:
+    specs = []
+    for spec in args.ckpt:  # name=path, or name=folder/step_*.pt for all kept steps (named name@step_<N>)
         name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
+        if any(c in path for c in "*?["):
+            matches = sorted(Path(path).parent.glob(Path(path).name))
+            if not matches:
+                raise SystemExit(f"no checkpoints match {path}")
+            specs += [(f"{name}@{m.stem}", str(m)) for m in matches]
+        else:
+            specs.append((name, path))
+    for name, path in specs:
         ck = torch.load(path, map_location=device, weights_only=False)
         model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device)
         model.load_state_dict(ck["model"])
@@ -676,7 +756,9 @@ def excess_report(groups: dict, stats: dict, path: Path) -> None:
 
 def add_eval_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
-    p.add_argument("--ckpt", nargs="+", required=True, help="checkpoints to score, each path or name=path")
+    p.add_argument("--ckpt", nargs="+", required=True,
+                   help="checkpoints to score, each path or name=path; a path may be a glob (e.g. "
+                        "run=/data/run/train/steps/step_*.pt), each match named name@<file stem>")
     p.add_argument("--out", default="results/eval")
     p.add_argument("--kinds", default="real,sim",
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
@@ -839,6 +921,17 @@ def add_arguments(p) -> None:
                    help="also validate on held-out windows simulated with fast brightness changes, residual motion, "
                         "focus fluctuations and local motion at the measured sizes (motion_*)")
     p.add_argument("--exclude", default="", help="comma-separated sessions to leave out of training and validation")
+    p.add_argument("--val_sessions", default="",
+                   help="comma-separated validation sessions (best.pt is chosen on these); default: drawn at random "
+                        "(--val_fraction)")
+    p.add_argument("--train_sessions", default="",
+                   help="comma-separated training sessions (needs --val_sessions); default: all other sessions")
+    p.add_argument("--max_train_s", type=float, default=0.0,
+                   help="use only the first trials of each training session and path, up to this many seconds "
+                        "(0: all)")
+    p.add_argument("--keep_every", type=int, default=0,
+                   help="also keep the model every this many steps (and at step 0 and the last) as "
+                        "steps/step_<N>.pt (0: off)")
     p.add_argument("--val_free", action="store_true",
                    help="also validate on held-out windows simulated without activity (free_*)")
     p.add_argument("--init", default="", help="start from this checkpoint (e.g. a simulation-pretrained best.pt)")
