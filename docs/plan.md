@@ -1204,3 +1204,21 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 - Both evaluate on real, free, fast, fastpz and motionpz windows. v10a also re-scores v9 (the v9 run is now a data asset) so the motion simulations compare like with like.
 
 **Status (2026-11-19 morning).** Every run with a data asset attached fails on Code Ocean within 20–35 s, with no log or results; a probe run without assets, on the same code, succeeds. The runs are relaunched automatically once asset mounting works again.
+
+## Flash test: v9 fine-tuned on 780125 (2026-11-19)
+
+**Run.** As for v6r: `slap2-f0 predict-registered` with v9 fine-tuned for all 30 registered movies of 780125, then SILo with those localization baselines (GIAnT branch `localization-network-baseline`, 3460 s against 3252 s for v6r). Then `source_patches.py` and `source_flash_check.py` on v6r's sources and v9 fine-tuned's (one-to-one matches within 1.5 px), both paths.
+
+| | Path 1: sources, passing | Path 2: sources, passing |
+|---|---|---|
+| found by both | 186, 183 | 139, 133 |
+| only v6r pretrained | 12, 12 | 11, 10 |
+| only v9 fine-tuned | 19, 19 | 15, 14 |
+| **v6r pretrained** | 198, 195 (98.5%) | 150, 143 (95.3%) |
+| **v9 fine-tuned** | 205, 202 (98.5%) | 154, 147 (95.5%) |
+| for comparison: v6 fine-tuned (earlier test) | 192, 188 | 146, 141 |
+
+- **v9 fine-tuned finds 11 more validated sources than v6r (349 against 338), with the same number that fail (10 each).** Against the union of passing sources, its recall is 0.94 on both paths, against 0.91 for v6r.
+- The sources only one of the two runs finds pass the test as often as the shared ones (93–100%). The two baselines differ at the margin, and both margins are mostly real synapses.
+
+**Decision: v9 fine-tuned replaces v6r pretrained as the default.** It meets the condition set in the v9 section: as many validated real sources (more), and no more false ones. It is also the most accurate checkpoint on simulations and real windows. What remains against it: a low baseline at support pixels of activity-free simulations (+0.070 against +0.050), and an edge bias as large as v6r's. v10 is judged against v9 fine-tuned from here on.
