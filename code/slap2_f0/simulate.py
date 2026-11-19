@@ -49,7 +49,23 @@ geometry, brightness, events and noise statistics:
   median sits far below the mean and makes false sources;
 * **shuffled activity timing** (optional, ``shuffle_prob``): the template's
   activity timeline is cut into blocks at quiet frames and reordered, which
-  breaks the recordings' stimulus rhythm while keeping every event.
+  breaks the recordings' stimulus rhythm while keeping every event;
+* **residual motion** (optional, ``motion_sd_px``): the sample moves rigidly
+  by a sub-pixel displacement d(t) (rows, columns; one Ornstein-Uhlenbeck
+  process per axis). The baseline and the activity move with it (cubic
+  spline shift of each frame); the scan does not, so the valid pixels and
+  the noise stay where they are. Before the shift, pixels outside the valid
+  ones take the nearest valid pixel's value: the sample there is only
+  unscanned, not dark. ``truth`` is the moved baseline, ``truth_static`` the
+  baseline without motion, and the whole-trial maps are those of the moving
+  trial (the mean image is blurred by the motion). With ``motion_substeps``
+  the motion is drawn at several steps per frame and each frame pools them
+  through the frame-formation kernel, as the 80 Hz frames pool 200 Hz
+  samples: the frame sees the kernel-weighted mean displacement and is
+  blurred by the displacements' spread within the kernel (to second order);
+* **focus fluctuations** (optional, ``focus_sd_px2``): the frames' blur
+  changes over time, b_r d2/drow2 + b_c d2/dcol2 of the scene, with an
+  isotropic part (focus) and a part per axis, each fast and slow.
 
 Each draw is a new virtual trial; the window generator returns everything the
 training windows of real data have (movie, activity, mean image, variance map,
@@ -121,6 +137,89 @@ class SimConfig:
     # never negative and dim pixels are exactly 0 in many frames, most of all at
     # ROI edges and in small ROIs, where SiLo's moving median makes false sources
     photon_zeros: bool = False
+    # residual motion (0 = none): per axis (rows, columns) an OU process with SD
+    # uniform in motion_sd_px (pixels) and time constant log-uniform in
+    # motion_tau_frames; the baseline and activity move, the scan does not
+    motion_sd_px: tuple[float, float] = (0.0, 0.0)
+    motion_tau_frames: tuple[float, float] = (1.5, 20.0)
+    # 0: each frame sees one displacement and no blur. n > 0: the motion is drawn at
+    # n steps per frame and pooled through the frame-formation kernel (the
+    # template's temporal noise kernel, interpolated): a frame sees the kernel-
+    # weighted mean displacement, blurred by the displacements' spread in the kernel
+    motion_substeps: int = 0
+    # focus fluctuations (0 = none): the frame's blur changes by b(t) per axis,
+    # frame = scene + b_r d2/drow2 + b_c d2/dcol2 (px^2; > 0 blurrier than the
+    # mean, < 0 sharper). b = an isotropic part with SD uniform in focus_sd_px2
+    # plus a part per axis with focus_aniso times that SD; each the sum of a fast
+    # and a slow OU process of equal variance (time constants log-uniform in
+    # focus_tau_frames). Measured on the viewer trials: 0.1-0.3 px^2 in all,
+    # slow part mostly isotropic, fast part not
+    focus_sd_px2: tuple[float, float] = (0.0, 0.0)
+    focus_aniso: float = 0.7
+    focus_tau_frames: tuple[tuple[float, float], tuple[float, float]] = ((1.5, 8.0), (40.0, 320.0))
+
+
+def _fill_nearest(valid: np.ndarray):
+    """Index arrays that give every pixel the nearest valid pixel (None if
+    all or none are valid)."""
+    if valid.all() or not valid.any():
+        return None
+    from scipy import ndimage
+    return ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+
+
+def _shift(img: np.ndarray, d, fill) -> np.ndarray:
+    """img (R, C) moved by d = (rows, cols) pixels: out[x] = img[x - d], cubic
+    spline, edges continued; fill (from _fill_nearest) first replaces the
+    pixels outside the valid ones."""
+    from scipy import ndimage
+    if fill is not None:
+        img = img[fill[0], fill[1]]
+    return ndimage.shift(img, (float(d[0]), float(d[1])), order=3, mode="nearest").astype(np.float32)
+
+
+def _blur(img: np.ndarray, c) -> np.ndarray:
+    """img (R, C) blurred by a small displacement covariance c = (rows, cols,
+    rows-cols) in px^2: img + c_rr/2 d2/drow2 + c_cc/2 d2/dcol2 + c_rc d2/drow dcol
+    (second order in the displacement; edges continued)."""
+    p = np.pad(img, 1, mode="edge")
+    drr = p[2:, 1:-1] - 2 * img + p[:-2, 1:-1]
+    dcc = p[1:-1, 2:] - 2 * img + p[1:-1, :-2]
+    drc = (p[2:, 2:] - p[2:, :-2] - p[:-2, 2:] + p[:-2, :-2]) / 4
+    return (img + 0.5 * (c[0] * drr + c[1] * dcc) + c[2] * drc).astype(np.float32)
+
+
+def _move(img: np.ndarray, r: dict, t: int, fill) -> np.ndarray:
+    """img as frame t sees it: moved to its displacement, blurred by the
+    displacement's spread within the frame (motion with substeps) and by the
+    focus change."""
+    if "motion" in r:
+        out = _shift(img, r["motion"][:, t], fill)
+    else:
+        out = (img[fill[0], fill[1]] if fill is not None else img).astype(np.float32)
+    c = r["motion_cov"][:, t].astype(np.float64) if "motion_cov" in r else None
+    if "focus" in r:
+        f = np.array([2 * r["focus"][0, t], 2 * r["focus"][1, t], 0.0])
+        c = f if c is None else c + f
+    if c is not None:
+        out = _blur(out, c)
+    return out
+
+
+def _pooled_motion(d: np.ndarray, kt: np.ndarray, n: int, T: int):
+    """Frame displacements from motion drawn at n steps per frame, d (2, T n + 2 h):
+    each frame pools the steps within the temporal kernel kt (taps at whole
+    frames, interpolated to the steps; h = n * (len(kt) // 2)). Returns the
+    weighted mean (2, T) and the weighted covariance (3, T): rows, cols, rows-cols."""
+    k = len(kt) // 2
+    h = n * k
+    w = np.interp(np.arange(-h, h + 1) / n, np.arange(-k, k + 1), kt)
+    w = w / w.sum()
+    win = np.lib.stride_tricks.sliding_window_view(d, 2 * h + 1, axis=1)[:, ::n][:, :T]  # (2, T, 2h+1)
+    mean = win @ w
+    dev = win - mean[..., None]
+    cov = np.stack([(dev[0] ** 2) @ w, (dev[1] ** 2) @ w, (dev[0] * dev[1]) @ w])
+    return mean.astype(np.float32), cov.astype(np.float32)
 
 
 def _spatial_tap(rho: float) -> float:
@@ -395,6 +494,23 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
         r["dark"] = dark
     if cfg.shuffle_prob > 0 and rng.random() < cfg.shuffle_prob:  # drawn last, see above
         r["tmap"] = _shuffle_map(tp, cfg.shuffle_frames, rng)
+    if cfg.motion_sd_px[1] > 0:  # drawn last, see above
+        taus_m = np.exp(rng.uniform(*np.log(cfg.motion_tau_frames), 2))
+        sds_m = rng.uniform(*cfg.motion_sd_px, 2)
+        n = int(cfg.motion_substeps)
+        if n <= 0:
+            r["motion"] = _ou(T, taus_m, sds_m, rng).astype(np.float32)  # (2, T): rows, cols in pixels
+        else:  # drawn at n steps per frame, pooled by the frame-formation kernel
+            h = n * (len(tp.kt) // 2)
+            d = _ou(T * n + 2 * h, taus_m * n, sds_m, rng)
+            r["motion"], r["motion_cov"] = _pooled_motion(d, tp.kt, n, T)
+    if cfg.focus_sd_px2[1] > 0:  # drawn last, see above
+        sd = rng.uniform(*cfg.focus_sd_px2)
+        sds = np.array([sd, cfg.focus_aniso * sd, cfg.focus_aniso * sd]) / np.sqrt(2)  # isotropic, rows, cols
+        b = 0.0
+        for lo_hi in cfg.focus_tau_frames:  # fast and slow, equal variance
+            b = b + _ou(T, np.exp(rng.uniform(*np.log(lo_hi), 3)), sds, rng)
+        r["focus"] = np.stack([b[0] + b[1], b[0] + b[2]]).astype(np.float32)  # (2, T): b_r, b_c in px^2
     if cfg.photon_zeros and tp.zc is not None:
         r["photon_zeros"] = True
     return r
@@ -428,35 +544,52 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     dt, dr, dc = slice(ts - t0, te - t0), slice(rs - r0, re - r0), slice(cs - c0, ce - c0)
     rows, cols = np.arange(rs, re), np.arange(cs, ce)
     valid = tf.valid[rs:re, cs:ce]
-    B = np.nan_to_num(tp.B[rs:re, cs:ce])
-    dk = r["dark"][rs:re, cs:ce] if "dark" in r else None
+    # the scene is computed on the window plus the margin that motion can move into it
+    mo = r.get("motion")
+    moving = mo is not None or "focus" in r
+    m = int(np.ceil(np.abs(mo).max())) + 3 if mo is not None else (2 if moving else 0)
+    xs, xe, ys, ye = max(rs - m, 0), min(re + m, R), max(cs - m, 0), min(ce + m, C)
+    wr, wc = slice(rs - xs, re - xs), slice(cs - ys, ce - ys)  # the window within that region
+    valid_x = tf.valid[xs:xe, ys:ye]
+    B = np.nan_to_num(tp.B[xs:xe, ys:ye])
+    dk = r["dark"][xs:xe, ys:ye] if "dark" in r else None
     if dk is not None:  # dark sources: less baseline, the same activity
         B = B * dk
     # drift factor on the window
-    f = r["fields"][:, rs:re, cs:ce]
+    f = r["fields"][:, xs:xe, ys:ye]
     p = r["proc"][:, ts:te]
     d = 1.0 + p[0][:, None, None] + (np.tensordot(p[1:].T, f, 1) if len(f) else 0.0)
     truth = B[None] * d
     # the excess's slow part: baseline fluctuations with the template's per-pixel variance
-    sa = np.sqrt(tp.slow[rs:re, cs:ce] * r.get("excess", 0.0))
+    sa = np.sqrt(tp.slow[xs:xe, ys:ye] * r.get("excess", 0.0))
     if dk is not None:
         sa = sa * dk  # the slow excess scales with the baseline it rides on
     if "slow_fields" in r:
-        sg = r["slow_fields"][:, rs:re, cs:ce] * sa[None]
+        sg = r["slow_fields"][:, xs:xe, ys:ye] * sa[None]
         truth = truth + np.tensordot(r["slow_proc"][:, ts:te].T, sg, 1)
     # activity, shifted circularly in time
     src = (np.arange(ts, te) - r["shift"]) % T
     if "tmap" in r:  # shuffled timeline
         src = r["tmap"][src]
-    act = np.empty((te - ts, re - rs, ce - cs), np.float32)
+    act = np.empty((te - ts, xe - xs, ye - ys), np.float32)
     brk = np.flatnonzero(np.diff(src) != 1)
     pieces = np.split(np.arange(te - ts), brk + 1)
     for idx in pieces:
         a, b = src[idx[0]], src[idx[-1]] + 1
-        act[idx] = tf._f["activity"][tf.channel, a:b, rs:re, cs:ce]
-    amask = r["act_mask"][rs:re, cs:ce] if "act_mask" in r else np.float32(1.0)  # 0 in silent regions
+        act[idx] = tf._f["activity"][tf.channel, a:b, xs:xe, ys:ye]
+    amask = r["act_mask"][xs:xe, ys:ye] if "act_mask" in r else np.float32(1.0)  # 0 in silent regions
     act *= r["amp"] * amask
-    act[:, ~valid] = 0
+    act[:, ~valid_x] = 0
+    fill = None
+    if moving:  # the sample moves (or changes focus), the scan does not
+        fill = _fill_nearest(valid_x)
+        out["truth_static"] = np.full((nt, nr, nc), np.nan, np.float32)
+        out["truth_static"][dt, dr, dc] = np.where(valid[None], truth[:, wr, wc], np.nan)
+        truth = np.stack([_move(truth[i], r, ts + i, fill)[wr, wc] for i in range(te - ts)])
+        act = np.stack([_move(np.nan_to_num(act[i]), r, ts + i, fill)[wr, wc] for i in range(te - ts)])
+        act[:, ~valid] = 0
+    else:  # the region is the window
+        truth, act = truth[:, wr, wc], act[:, wr, wc]
     S = np.where(valid[None], truth + act, 0).astype(np.float32)
     # photon noise through the kernel; the signal itself is not blurred
     pt, ps_r, ps_c = len(tp.kt) // 2, len(tp.kr) // 2, len(tp.kc) // 2
@@ -475,17 +608,28 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     out["activity"][dt, dr, dc] = act
     # whole-trial inputs from the virtual trial's statistics plus sampling noise
     dmean, dvar = _drift_maps(r, rows, cols)
-    mact, vact = tp.mean_act[rs:re, cs:ce] * r["amp"] * amask, tp.var_act[rs:re, cs:ce] * (r["amp"] * amask) ** 2
+    am = amask[wr, wc] if np.ndim(amask) else amask
+    mact, vact = tp.mean_act[rs:re, cs:ce] * r["amp"] * am, tp.var_act[rs:re, cs:ce] * (r["amp"] * am) ** 2
+    Bx, B = B, B[wr, wc]
     M = B * (1 + dmean) + mact
     svar = np.zeros_like(M)
     if "slow_fields" in r:
-        M = M + np.tensordot(r["slow_mean"], sg, 1)
-        svar = np.maximum(np.einsum("kl,kij,lij->ij", r["slow_cov"], sg, sg), 0)
+        M = M + np.tensordot(r["slow_mean"], sg[:, wr, wc], 1)
+        svar = np.maximum(np.einsum("kl,kij,lij->ij", r["slow_cov"], sg[:, wr, wc], sg[:, wr, wc]), 0)
+    vmot = 0.0
+    if moving:  # the moving trial's mean and variance: the static mean moved by 128 of its displacements
+        dmx, _ = _drift_maps(r, np.arange(xs, xe), np.arange(ys, ye))
+        Mx = Bx * (1 + dmx) + tp.mean_act[xs:xe, ys:ye] * r["amp"] * amask
+        if "slow_fields" in r:
+            Mx = Mx + np.tensordot(r["slow_mean"], sg, 1)
+        kept = np.flatnonzero(~tf.discard) if (~tf.discard).any() else np.arange(T)
+        sh = np.stack([_move(Mx, r, k, fill)[wr, wc] for k in kept[np.linspace(0, len(kept) - 1, 128).astype(int)]])
+        M, vmot = sh.mean(0), sh.var(0)
     var_mean = tp.gain * np.maximum(M, 0) * fac * tp.Ft / tp.n_valid
     g = rng.standard_normal((re - rs + 2 * ps_r, ce - cs + 2 * ps_c)).astype(np.float32)[None]
     g = _filter(g, np.ones(1), tp.kr, tp.kc)[0] / np.sqrt((tp.kr ** 2).sum() * (tp.kc ** 2).sum())
     mi = M + np.sqrt(var_mean) * g
-    vm = (B ** 2 * dvar + svar + vact + tp.gain * np.maximum(M, 0) * fac) * \
+    vm = (B ** 2 * dvar + svar + vact + vmot + tp.gain * np.maximum(M, 0) * fac) * \
         np.maximum(1 + np.sqrt(2 * tp.Ft / tp.n_valid) * rng.standard_normal(M.shape), 0.1)
     out["mean_image"][dr, dc] = np.where(valid, mi, np.nan)
     out["mean_act"][dr, dc] = np.where(valid, mact, np.nan)  # the virtual trial's mean activity
@@ -519,6 +663,15 @@ def write_trial(tp: Template, out_fn, cfg: SimConfig | None = None, seed: int = 
         f.create_dataset("activity", data=w["activity"][None], **kw)
         f.create_dataset("truth/baseline", data=w["truth"], chunks=kw["chunks"][1:],
                          **{k: v for k, v in kw.items() if k != "chunks"})
+        if "truth_static" in w:  # the baseline without motion and focus changes; the displacement (rows, cols; pixels)
+            f.create_dataset("truth/baseline_static", data=w["truth_static"], chunks=kw["chunks"][1:],
+                             **{k: v for k, v in kw.items() if k != "chunks"})
+        if "motion" in r:
+            f["truth/motion"] = r["motion"]
+            if "motion_cov" in r:  # spread of the displacement within each frame's kernel (px^2: rows, cols, rows-cols)
+                f["truth/motion_cov"] = r["motion_cov"]
+        if "focus" in r:  # focus change per frame (px^2: b_r, b_c)
+            f["truth/focus"] = r["focus"]
         f["mean_image"] = w["mean_image"][None]
         f["varfac"] = tf.varfac
         f["mask/valid"] = tf.valid.astype(np.uint8)

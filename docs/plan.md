@@ -929,3 +929,132 @@ On real trials v8 follows the activity about as much as v6r. Only the event-weig
 - Keep `--event_mask 0.5` in fine-tuning and `--edge_frac 0.25` in both stages; neither costs anything measurable. `--sim_event_weight` stays dropped.
 - **Keep v6r pretrained as the default.** v8 pretrained has the more accurate, less leaky baseline in simulations, and v8 fine-tuned the unbiased background and the smaller edge bias. Neither localizes better, and on real trials both follow the activity as much as v6r does.
 - The edge bias at the end of trials is the one systematic error here that training can still plausibly reduce. At source pixels it is +2–3% in the last 0.2 s with v8 fine-tuned, and +4–5% with the other checkpoints. Next, try a larger `--edge_frac`, judged with `edge_pieces.py` and the localization simulations.
+
+## Residual motion and blur (2026-11-18)
+
+Can the network see small, fast motion left after registration and follow it in the baseline? In principle it could: pixels 5 px or more from the predicted one are visible in the output frame, so a frame's displacement can be read from the surround within the 94 × 94 window. Nothing time-varying from beyond the window enters: the whole-trial inputs are constant. The pooled features cannot carry motion either. They are fractional deviations from the mean image, averaged over rings, and a shift brightens one edge and darkens the opposite one, which cancel.
+
+**Simulator** (all off by default; without them the output is bit-identical to before):
+
+- `motion_sd_px`, `motion_tau_frames`: rigid displacement d(t), one OU process per axis.
+  - The baseline and the activity move (cubic-spline shift of each frame). The scan does not, so the valid pixels and the noise stay where they are.
+  - `truth/baseline` is the moved baseline; `truth/baseline_static` and `truth/motion` are written too.
+  - The mean image and the variance map are those of the moving trial (the static mean moved by 128 of the displacements).
+  - Motion is drawn last, so the same seed without motion gives the static baseline exactly.
+  - Check: moved − static baseline against −d · ∇B has slope 1.01 and correlation 0.99.
+- `motion_substeps`: the motion is drawn at n steps per frame and pooled through the frame-formation kernel, as the 80 Hz frames pool 200 Hz samples. The kernel is the template's temporal noise kernel, interpolated to the steps.
+  - Each frame sees the kernel-weighted mean displacement. It is blurred by the displacements' spread within the kernel, applied to second order: ½ c_rr ∂²/∂row² + ½ c_cc ∂²/∂col² + c_rc ∂²/∂row∂col.
+  - Against brute-force pooling of spline-shifted frames, the second-order blur leaves 15% of the blur (2% or less of the motion's effect).
+  - At SD 0.25 px, in-plane blur is 4% of the shift's effect on the baseline for τ 1.5–4 frames, and 15% for jitter at τ 0.3–1 frames.
+- `focus_sd_px2`: focus fluctuations, b_r ∂²/∂row² + b_c ∂²/∂col² of each frame (px²), with b = an isotropic part plus a part per axis (`focus_aniso` × its SD). Each part is a fast (τ 1.5–8 frames) plus a slow (40–320 frames) OU process. Check: drawn SDs of 0.19 / 0.21 px² read 0.16 / 0.20 with `residual_motion.py --blur`, and a rows–cols correlation of 0.71 slow and 0.60 fast (drawn 0.76). On the steepest quarter of pixels it changes the baseline by 2.3–3.0%, as in the real trials.
+
+**Test** (`tools/motion_test.py`). One trial each of 780125, 803121, 878030 and 885233 is the template; the fast-brightness simulator with realistic low counts, as v6–v9 were trained on. Each template gives four trials from the same seed:
+
+- none;
+- fast: τ 1.5–4 frames, inside the 8 hidden frames;
+- medium: τ 8–30 frames;
+- slow: τ 80–320 frames, 1–4 s.
+
+The SD is 0.25 px per axis. The baseline's motion part m = moved − static baseline is 6–10% of the baseline (RMS) on the quarter of pixels where it varies most ("moving" pixels). "Followed" is the slope of (baseline of the moving trial − baseline of the no-motion trial) on m, after removing each pixel's mean; 1 means the baseline follows the motion, 0 that it ignores it. A 17-frame running mean splits the slow part from the fast part. Moving pixels, mean ± SE over the four trials:
+
+| motion | checkpoint | all | slow part | fast part |
+|---|---|---|---|---|
+| fast | v6r pretrained | 0.05 ± 0.03 | 0.12 ± 0.05 | 0.04 ± 0.03 |
+| | v8 pretrained | 0.04 ± 0.03 | 0.11 ± 0.05 | 0.04 ± 0.02 |
+| | v8 fine-tuned | 0.03 ± 0.02 | 0.09 ± 0.04 | 0.03 ± 0.02 |
+| medium | v6r pretrained | 0.14 ± 0.05 | 0.20 ± 0.06 | 0.03 ± 0.03 |
+| | v8 pretrained | 0.14 ± 0.05 | 0.20 ± 0.06 | 0.02 ± 0.02 |
+| | v8 fine-tuned | 0.11 ± 0.04 | 0.16 ± 0.05 | 0.02 ± 0.02 |
+| slow | v6r pretrained | 0.47 ± 0.09 | 0.49 ± 0.09 | 0.03 ± 0.03 |
+| | v8 pretrained | 0.50 ± 0.09 | 0.52 ± 0.09 | 0.01 ± 0.02 |
+| | v8 fine-tuned | 0.38 ± 0.07 | 0.40 ± 0.07 | −0.01 ± 0.02 |
+
+- **No checkpoint follows fast motion.** The fast part is followed by 0.04 or less, whatever the motion's time constant.
+- **Even motion over seconds is followed only halfway** (0.4–0.5), and less in background (0.21–0.30). The rest stays in data − baseline.
+- The networks never saw motion in pretraining. Fine-tuning on real data, where it is small, does not teach it: v8 fine-tuned follows least.
+- Without the no-motion trial, the slope of (baseline − static baseline) on m gives the same numbers within 0.03–0.08. The baseline's other errors correlate with m by chance, most in the slow part.
+
+**Residual motion in the real trials** (`tools/residual_motion.py`, the five viewer trials).
+
+- **Method.** Each kept frame of data − activity is fitted as the trial's mean image M, scaled and shifted: (1 + a) M − d_r ∂M/∂row − d_c ∂M/∂col, by least squares weighted by 1 / M.
+- **Removing the noise.** Each half of the pixels (8 × 8 checkerboard) gets its own fit. Rigid motion is shared by the halves and noise is not, so their covariance gives the motion's variance free of noise.
+- **Validation.** On the motion simulations the estimates match the true SDs to within 0.01 px; without motion they read 0.03–0.05 px.
+
+| trial | rigid motion SD, rows / cols (px) | fast part | slow part | brightness a |
+|---|---|---|---|---|
+| 780125 | 0.10 / 0.04 | 0.06 / 0.03 | 0.08 / 0.03 | 4.6% |
+| 803121 | 0.15 / 0.13 | 0.14 / 0.13 | 0.06 / 0.04 | 3.7% |
+| 847983 (GFP) | 0.05 / 0.06 | 0.04 / 0.06 | 0.02 / 0.02 | 2.2% |
+| 878030 | 0.18 / 0.20 | 0.16 / 0.17 | 0.06 / 0.09 | 4.2% |
+| 885233 | 0.06 / 0.07 | 0.06 / 0.07 | 0.02 / 0.03 | 4.3% |
+
+- **803121 and 878030 have rigid fast motion of 0.13–0.17 px SD per axis.** It is the same in the top and bottom halves of the field, and in the left and right halves. It is unchanged when the fit gets a free additive offset per frame.
+- **Its power is spread over 0.5–40 Hz, most at 10–40 Hz**, up to the 80 Hz frames' limit. A flat spectrum like that is what per-frame errors of the registration would give; so would fast motion that the registration does not track. Either one shifts the whole frame.
+- The other three trials have 0.05–0.1 px. 780125's slow row motion is not rigid: the top and bottom halves covary negatively, and so do the left and right halves.
+- This agrees with the earlier per-frame shifts (`diag_gfp_motion`: 0.20 / 0.17 px in 803121 and 0.39 / 0.41 px in 878030). Those included the estimates' own noise, which is most of the per-frame variance.
+
+**Local motion** (`tools/local_motion.py`, per block of 32 and 64 px: the block's displacement minus the field's; noise removed with two halves on a checkerboard within each block). The same estimator on the no-motion simulations is not zero: it reads 0.08–0.19 px fast and 0.04–0.12 px slow. Within a block, a brightness change that varies across a structure is indistinguishable from a shift of it: for a Gaussian blob, (x − x₀) G ∝ ∂G. The simulator's brightness fields therefore read as local motion. Real trials read more (64 px blocks, rows / cols):
+
+| trial | fast: real / no-motion simulation | slow: real / simulation |
+|---|---|---|
+| 780125 | 0.11 / 0.12 vs 0.08 / 0.09 | 0.18 / 0.19 vs 0.04 / 0.07 |
+| 803121 | 0.15 / 0.18 vs 0.10 / 0.13 | 0.19 / 0.23 vs 0.06 / 0.07 |
+| 878030 | 0.27 / 0.22 vs 0.15 / 0.12 | 0.13 / 0.18 vs 0.09 / 0.05 |
+| 885233 | 0.12 / 0.12 vs 0.11 / 0.12 | 0.11 / 0.09 vs 0.07 / 0.05 |
+
+- **Slow local changes of this shape are 1.5–4× the simulator's in every session.** Over the simulator's level, they are about 0.07–0.22 px. That is more than the rigid slow motion.
+- Fast local changes clearly exceed the simulator's only in 803121 and 878030 (by about 0.12 and 0.2 px), slightly in 780125. In 803121 and 878030 that is about as much as the rigid fast motion.
+- Whether they are local motion, local brightness gradients or misfit of GIAnT's activity at edges, a block cannot tell. For the baseline, the first two are the same.
+
+**Blur** (`residual_motion.py --blur`: second derivatives of M added to the per-frame fit, + b_r ∂²M/∂row² + b_c ∂²M/∂col², px²).
+
+- **Motion within a frame should blur it along the motion,** by half the displacement's variance within the frame-formation kernel.
+- **In the simulations the blur term is what it should be.** Without motion it reads 0.02 px². With rigid motion it is the shift's own second-order term, ½ d²: 0.05 px², correlation with d² 0.67.
+- **The real trials have much more:**
+
+| trial | blur SD rows / cols (px²) | isotropic / anisotropic | b_r–b_c correlation, slow / fast | effect on the steepest quarter of pixels: shift / blur (% of baseline) |
+|---|---|---|---|---|
+| 780125 | 0.15 / 0.11 | 0.11 / 0.08 | +0.59 / −0.03 | 3.3 / 3.6 (rows) |
+| 803121 | 0.32 / 0.27 | 0.25 / 0.16 | +0.71 / +0.18 | 4.4 / 4.6 |
+| 847983 (GFP) | 0.10 / 0.13 | 0.09 / 0.07 | +0.51 / +0.11 | 2.1 / 2.7 |
+| 878030 | 0.19 / 0.15 | 0.11 / 0.13 | −0.21 / −0.16 | 5.1 / 3.8 |
+| 885233 | 0.12 / 0.14 | 0.10 / 0.09 | +0.28 / +0.11 | 2.2 / 2.9 |
+
+- **Blur changes the baseline as much as the displacement does,** slow and fast alike.
+- **It is not in-plane motion blur.** It does not follow the frame's squared speed (correlation −0.06 to +0.11, and +0.25 in GFP) or d².
+- **Sub-frame motion cannot make this much.** In a simulated trial with sub-frame jitter (τ 0.3–1 frames, seen SD 0.13–0.14 px, spread 0.21 px within the kernel), the blur fluctuates by 0.012 px² SD. That is 0.4% at the steepest pixels, against 3.9% for the shift. The real blur would need spreads of 0.5–0.8 px within frames.
+- **The slow part is mostly isotropic** in four sessions, which is what focus (z) changes do. In 780125 it moves with the row displacement (+0.72) and dims the frame (correlation with brightness −0.61), as tissue moving obliquely would.
+- **The fast part is not isotropic,** and its source is open.
+- **It is not GIAnT's activity misfit:** its correlation with the field's total activity is weak (|r| ≤ 0.27), and GFP has it too.
+
+**Whole-field correction afterwards** (scratch test on the motion simulations).
+
+- **Method.** Estimate d(t) per frame from the whole field, from the raw movie; removing the true activity first changes nothing. Add the fast part of −d · ∇M to the network's baseline, shrunk by s² / (s² + n²). s² is the shared variance of the two halves' estimates and n² the field estimate's noise.
+- **Precision.** The field estimate's error is 0.03 px (780125, 803121), 0.05–0.07 px (885233) and 0.09–0.11 px (878030).
+- **Result.** RMS error of v8 fine-tuned against the moved truth, fast band, all pixels, in % of the baseline (v6r and v8 pretrained alike):
+
+| motion | before | corrected | corrected, shrunk |
+|---|---|---|---|
+| none | 6.15 | 6.57 | 6.17 |
+| fast | 10.92 | 7.68 | 7.61 |
+| medium | 7.99 | 7.08 | 6.92 |
+| slow | 6.43 | 6.67 | 6.36 |
+
+- **The correction removes about three quarters of the excess error that fast motion adds.** With shrinkage it costs nothing without motion.
+- **On the real trials the shrinkage factors are:** 0.97 (803121), 0.71 (878030), 0.86 / 0.54 (780125, rows / cols), 0.73 / 0.77 (GFP) and 0.52 / 0.44 (885233). That is the share of the rigid fast motion's variance that the correction would remove.
+- The field-wide blur term could be corrected the same way (not tested).
+
+**What this means.**
+
+- Real displacement and blur each change the baseline by 1–5% (RMS) at the steepest pixels. The networks follow none of the fast part and about half of the slow part.
+- Fast changes are zero-mean noise at edges, unless they are locked to the stimulus or to behaviour. Then they would show as activity in event-triggered averages; that is not checked yet.
+- **Per-frame local detection is limited by photon counts.** From the field-wide fits, one frame's displacement is known to 0.07–0.1 px (780125, 803121, GFP), 0.2 px (885233) and 0.3 px (878030) from a 45 × 45 px neighbourhood (the network's reach), and 0.2–0.8 px from 20 px. The motion is 0.05–0.17 px. Even an ideal local detector would recover about two thirds of the fast motion's variance in 803121 and 10–30% elsewhere. Rigid motion is better estimated from the whole field.
+- **Slow changes are detectable** (averages over 17 frames cut the noise 3–4×). The network can already see them, but it was never trained on them.
+
+**Next.**
+
+1. Pretraining with motion and focus in the simulations, at the measured sizes: rigid motion, smooth local motion, sub-frame pooling and focus fluctuations. Judge it with `motion_test.py`.
+2. In the same retrain, try inputs that build in −d · ∇F0 and b ∇²F0:
+   - pooled displacement and blur features: the deviation from the mean image projected on its gradient and second derivatives, over the existing rings, box excluded;
+   - the mean image's derivatives as inputs.
+3. Keep a whole-field correction with shrinkage as a separate cheap step for rigid motion.
