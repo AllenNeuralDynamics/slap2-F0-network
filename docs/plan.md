@@ -1244,3 +1244,79 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 - Left out: 6 iGluSnFR4s multiROI sessions (2.3 h); 5 iGluSnFR4f sessions whose scan mode is in doubt (1.9 h); the voltage (ASAP, FORCEB) and GFP sessions.
 
 **Against what the network trains on.** v9 trained on 1,015 s of path-time, from three sessions. Those three sessions alone hold 15,100 s, and the validation session 7,600 s. Each export was capped at 180 s per path (`--max_duration_s 180`). All qualifying sessions together hold about 660 times the current training data, from 32 mice instead of 3.
+
+## Export plan: more real data, scaling and held-out tests (2026-11-19; not started)
+
+**What may be used.** iGluSnFR4f multiROI raster recordings from 2025 onward, with two exclusions:
+
+- **No reference stacks**, whatever the metadata says. Some sessions keep `refstack_*` acquisitions inside `dynamic_data`, and the export would take them today: `run_export.m` passes every `.dat` there to `buildTrialTableSLAP2`. An acquisition is a reference stack if its name says so (refstack, refStack, structure, reference), its annotation says `type: ref_stack` or `full-field raster`, or its `.meta` is a simple raster or has `enableStack` set. One session whose metadata calls it multiROI is dropped for this reason (838410_2026-03-19, annotation `type: ref_stack`).
+- **No session with an integration scan in any acquisition.** That is any Integrate ROI in any `.meta`, even alongside raster ROIs. This drops 15 sessions: 11 already listed (mice 880917, 880918, 890921, with 1–11 Integrate ROIs each), and all 4 new sessions of 2026-11-17/18 (1–9 Integrate ROIs on at least one path).
+
+**What remains:** 125 sessions from 26 mice, 90.4 h of recording, 650,000 s of path-time (`sessions/slap2_iglusnfr4f_multiroi.csv`, minus the sessions above). The mice fall into five cohorts:
+
+- 2025, jRGECO1a, triggered: 776266, 776270, 780125, 787725, 794237;
+- 2025, RCaMP3, triggered: 796630, 801381, 828408, 828409, 829704;
+- 2025, no red channel, continuous: 803496, 804730, 804733, 810196;
+- 2025, RCaMP3, continuous: 803121, 809047;
+- 2026, RCaMP3, continuous: 826033, 834788, 838410, 867430, 876767, 878029, 878030, 885233, 885234, 885235.
+
+**Phase 1** (`sessions/export_phase1.csv`): 17 sessions from 17 mice, one session each.
+
+| role | mice | cap per path | path-time |
+|---|---|---|---|
+| training | the 3 current training mice (780125, 803121, 885233) and 6 new ones, one per cohort (776266, 828408, 803496, 809047, 826033, 867430) | 30 min | 30,700 s (30× the current 1,015 s) |
+| validation (selects checkpoints) | 878030 (as now), 794237, 804730, 834788 | 10 min | 4,800 s |
+| test (reported only, never used to select) | 776270, 810196, 829704, 876767 | 10 min | 4,800 s |
+
+- Every cohort has mice in training, in validation and in test. No mouse is in more than one role.
+- The GFP session 847983 stays the separate activity-free control.
+- About 12 MB of export per path-second, so 0.5 TB in total.
+- Compute: the capped exports took up to 12 machine-seconds per path-second, fixed costs included. That makes at most about 130 machine-hours, run as one computation per session; the longest is about 12 h.
+- The remaining 108 sessions (17 training-pool mice) wait for the scaling result.
+
+**Export changes needed first** (none made yet):
+
+1. **Acquisition filter in `run_export.m`.** Build a folder of links to the allowed acquisitions and pass it to `buildTrialTableSLAP2`. The rules are those above. A session with any integration ROI is skipped whole. `run_info.json` lists every acquisition dropped and why.
+2. **Caps per session from the manifest**, and 0 = no cap.
+3. **Current GIAnT main with compensated registration** (`params.compensateOnline`; other new options off). The online offsets switching within a frame blur that frame; compensated registration removes this. The three current training sessions and 878030 are exported again the same way, so all runs see one kind of data.
+4. **Trial statistics computed in the export run and stored with it.** Training spent 935 s on stats for 71 files, and phase 1 has about 1,500 files.
+
+**Training changes needed:**
+
+- Explicit splits: `--val_sessions` (today one session is drawn at random), with the test sessions never loaded.
+- Keep every checkpoint (`step_<N>.pt` every 250 steps; today only `last.pt` and `best.pt`).
+- An evaluation of all checkpoints on every held-out session, with bootstrap intervals over mice and windows.
+
+**Experiment 1: does more data help, and is it amount or diversity?** All runs use the same recipe (v10's winner), steps, validation mice and test mice:
+
+| run | training data | path-time | question |
+|---|---|---|---|
+| S0 | 3 mice, first 180 s per path (the current data, from the new export) | 1,000 s | baseline |
+| S1 | the same 3 mice, up to 30 min per path | 10,000 s | more data, same mice |
+| S2 | all 9 training mice, about 9 min per path each | 10,000 s | same amount, 3× the mice |
+| S3 | all 9 training mice, up to 30 min per path | 30,700 s | both |
+| S3-long | S3 with twice the steps | 30,700 s | is the step budget the limit? |
+| S0, S3 seed 2 | repeats | | run-to-run noise |
+
+- **Readouts on the test mice:**
+  - real windows: error against the mean image, at support pixels and background;
+  - simulations from test-mouse templates: error against the oracle, leak, bias without activity, edge bias, motion following (`motion_test.py`), localization;
+  - the flash test on two test sessions, for the final candidates only.
+- **Decisions:**
+  - If S1 or S3 beats S0 by more than the seed-to-seed spread, export the rest (phase 2).
+  - If S2 beats S1, diversity matters more than amount. Phase 2 then takes one or two sessions from every mouse before whole sessions.
+  - If S3-long beats S3, longer training comes with more data.
+
+**Experiment 2: do more held-out sessions help?** Today one validation session (48 windows) picks the checkpoint, and neighbouring checkpoints' scores differ by up to 0.07. From every checkpoint of every Experiment 1 run, scored on all 8 held-out mice:
+
+- **Selection regret:** pick the checkpoint with 1 (878030 alone), 2 or 4 validation mice, and with 48 or 192 windows per mouse. Measure how much worse each pick scores on the test mice than the best checkpoint.
+- **Agreement:** rank correlation of checkpoints and of runs between validation mice and test mice.
+- **Resolution:** how many mice it takes to separate S0–S3 beyond the seed-to-seed spread.
+- **Outcome:** how many held-out mice and windows are worth using from then on.
+
+**Order:**
+
+1. Export filter, caps and stats, and the training splits and checkpoints. Test them on one session.
+2. Export phase 1.
+3. Run S0–S3 and the repeats (about 9 GPU runs of about 6 h each; at most a few run at once on Code Ocean).
+4. Evaluate, then decide on phase 2.
