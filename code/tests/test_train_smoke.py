@@ -373,8 +373,19 @@ def test_named_sessions_caps_and_kept_steps(tmp_path):
     steps = sorted(p.name for p in (out / "steps").glob("*.pt"))
     assert steps == ["step_000000.pt", "step_000002.pt", "step_000003.pt"]
     main(["evaluate", str(tmp_path / "data"), "--out", str(tmp_path / "eval"), "--ckpt",
-          f"run={out / 'steps' / 'step_*.pt'}", "--kinds", "real", "--windows", "2", "--workers", "0"])
+          f"run={out / 'steps' / 'step_*.pt'}", "--kinds", "real", "--windows", "2", "--workers", "0",
+          "--per_window"])
     rows = list(csv.DictReader(open(tmp_path / "eval" / "eval.csv")))
+    win = list(csv.DictReader(open(tmp_path / "eval" / "windows.csv")))
+    assert len(win) == 3 * 3 * 2  # checkpoints x sessions x windows
+    for r in rows:  # the window sums add up to the session's score
+        w = [q for q in win if q["checkpoint"] == r["checkpoint"] and q["session"] == r["session"]]
+        for c in ("sup_", "bg_"):
+            n = sum(float(q[f"{c}n8"]) for q in w)
+            if n > 0:
+                for b_ in ("net", "mean_image"):
+                    se = sum(float(q[f"{c}se8_{b_}"]) for q in w)
+                    assert abs(se / n - float(r[f"{c}mse8_{b_}"])) < 1e-4 * max(1.0, se / n)
     assert sorted({r["checkpoint"] for r in rows}) == ["run@step_000000", "run@step_000002", "run@step_000003"]
     with pytest.raises(SystemExit):  # a session in both roles
         main(["train", str(tmp_path / "data"), "--out", str(tmp_path / "bad"), "--steps", "1",

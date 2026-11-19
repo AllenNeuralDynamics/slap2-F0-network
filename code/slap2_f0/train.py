@@ -211,7 +211,7 @@ def silo_baseline(movie: torch.Tensor, scale: torch.Tensor, region, smooth: int 
 
 
 @torch.no_grad()
-def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]:
+def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | None = None) -> dict[str, float]:
     """Mean loss, noise calibration and baseline errors on fixed windows.
 
     Baselines compared against the target (the true baseline for simulated
@@ -236,7 +236,12 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
     Calibration: z = (movie - activity - mu) / sqrt(var) should have mean 0 and
     variance 1; r8 is the variance of 8-frame averages of the residual over
     the mean predicted per-frame variance (the factor that converts the
-    network's sigma to SiLo's)."""
+    network's sigma to SiLo's).
+
+    per_window, if a list, gets one dict per window with its 8-frame squared-
+    error sums and weights at support and background pixels (sup_n8,
+    sup_se8_<baseline>, bg_n8, bg_se8_<baseline> for net, mean_image, silo
+    and oracle), so scores can be bootstrapped over windows."""
     model.eval()
     sel = (slice(None),) + region
     tot = defaultdict(float)
@@ -264,6 +269,17 @@ def evaluate(model, loader, region, device, amp_dtype, args) -> dict[str, float]
         act = torch.nan_to_num(b["movie"][sel] / s.unsqueeze(1) - yn)  # movie - (movie - activity)
         a8, _ = movmean_t(act, w)
         sw8 = (w * sup * w8).float()
+        if per_window is not None:
+            pw = [dict() for _ in range(y.shape[0])]
+            for cname in ("sup_", "bg_"):
+                cw8 = (classes[cname] * w8).float()
+                for i, val in enumerate(cw8.sum((1, 2, 3)).tolist()):
+                    pw[i][f"{cname}n8"] = val
+                for pname in ("net", "mean_image", "silo", "oracle"):
+                    p8, _ = movmean_t(preds[pname], w)
+                    for i, val in enumerate((cw8 * (y8 - p8) ** 2).sum((1, 2, 3)).tolist()):
+                        pw[i][f"{cname}se8_{pname}"] = val
+            per_window.extend(pw)
         for cname, cw in classes.items():
             n = cw.sum().item()
             if n == 0:
@@ -660,7 +676,8 @@ def evaluate_checkpoints(args) -> None:
     kind in <out>/eval.csv. The windows depend only on the seed and the
     session's files, so every checkpoint is scored on the same ones; with the
     training seed, the first ``val_windows`` of a held-out session are the
-    ones its training validation used."""
+    ones its training validation used. With --per_window, windows.csv has
+    each window's error sums (see ``evaluate``)."""
     files = list_trials(args.root)
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
@@ -703,9 +720,20 @@ def evaluate_checkpoints(args) -> None:
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                     pin_memory=device.type == "cuda")
                 t1 = time.time()
-                r = evaluate(model, loader, region, device, amp_dtype, args)
+                pw = [] if args.per_window else None
+                r = evaluate(model, loader, region, device, amp_dtype, args, per_window=pw)
                 rows.append({"checkpoint": name, "step": ck.get("step"), "session": sess, "kind": kind,
                              "trials": len(groups[sess]), "windows": args.windows, **r})
+                if pw:  # one row per window, for bootstrap intervals over windows and sessions
+                    new = not (out / "windows.csv").exists()
+                    with open(out / "windows.csv", "a", newline="") as fh:
+                        wr = csv.DictWriter(fh, fieldnames=["checkpoint", "step", "session", "kind", "window"]
+                                            + list(pw[0]))
+                        if new:
+                            wr.writeheader()
+                        for i, q in enumerate(pw):
+                            wr.writerow({"checkpoint": name, "step": ck.get("step"), "session": sess, "kind": kind,
+                                         "window": i, **q})
                 fields = list(dict.fromkeys(k for row in rows for k in row))
                 with open(out / "eval.csv", "w", newline="") as fh:
                     wr = csv.DictWriter(fh, fieldnames=fields, restval=float("nan"))
@@ -764,6 +792,9 @@ def add_eval_arguments(p) -> None:
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
                         "shared brightness changes), motion (fast plus residual motion, focus and local motion)")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
+    p.add_argument("--per_window", action="store_true",
+                   help="also write windows.csv: each window's 8-frame squared errors at support and background "
+                        "pixels (for bootstrap intervals over windows and sessions)")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
     p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. a training run's)")
