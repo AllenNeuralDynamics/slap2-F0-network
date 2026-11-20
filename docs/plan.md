@@ -1417,7 +1417,9 @@ Over 15 min the QC is better than in the 120 s diagnostic on 780125 (gain 0.66 a
 
 Every dataset, attribute and summary value is identical to the old exporter's (deflate changes only the file bytes).
 
-**Experiment 1, S0 and S1.** Their training mice (780125, 803121, 885233) are exported, so they can start before the rest. Launch files use v9's recipe (from v6r pretrained; 3000 + 1700 steps), `--train_sessions`, `--val_sessions 878030,794237,834788` for best.pt in every run (804730 joins the held-out evaluation), `--keep_every 250`, `--max_train_s 180` for S0, and `--max_hours` 5 and 4 (v10 was cut short at 3). A local run checked the arguments, the split and the checkpoints. They wait for the GPU capsule, which refused the update: it has uncommitted changes in the Code Ocean IDE.
+On Code Ocean, 794237 (15 min, 2 paths, 64 trials) re-exported with the new code, same GIAnT commit and machine: the export took 9.7 min instead of 67, and the whole run 2.12 h instead of 3.05. Reading the footprints took 5 and 1 s per path, and memory peaked at 98 GB during the export (8 trials at once). All 27 per-trial QC values of all 64 trials are identical to phase 1. 794237 was one of the quicker exports (1.1 h); the slow ones (up to 7 h) should gain more, not measured. Notes for others: AllenNeuralDynamics/slap2-dev#63.
+
+**Experiment 1, S0 and S1.** Their training mice (780125, 803121, 885233) are exported, so they can start before the rest. Launch files use v9's recipe (from v6r pretrained; 3000 + 1700 steps), `--train_sessions`, `--val_sessions 878030,794237,834788` for best.pt in every run (804730 joins the held-out evaluation), `--keep_every 250`, `--max_train_s 180` for S0, and `--max_hours` 5 and 4 (v10 was cut short at 3). A local run checked the arguments, the split and the checkpoints. The GPU capsule refused the update until its pending IDE change (Code Ocean deleting `.codeocean/environment.json`, since the Dockerfile had been edited by hand; the Dockerfile keeps the same packages) was committed. S0 started 2026-11-20 10:52; S1's first launch found no free GPU machine and is retried every 15 min.
 
 ## v10 results (2026-11-19)
 
