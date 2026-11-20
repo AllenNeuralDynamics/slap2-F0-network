@@ -1381,6 +1381,22 @@ Two to three times the sources, and GIAnT's activity now overshoots the 80 Hz mo
 
 **Disk test (finished after the launch).** Code Ocean's results volume grows as it fills: from 300 GB to 1,800 GB, with 1,500 GB written in 10 GB files and no failure (about 8 GB/min). The 15 min cap was not needed for disk. Phase 2 can use 30 min or whole sessions, as long as the run time allows it.
 
+**Phase 1 results (2026-11-20).** 14 of 17 sessions exported: 28 session-paths, 1,175 trials, 6.85 h of path-time (900 s per path). Each run took 3.3 to 12 h: registration 0.5 to 1.3 h, SiLo 1.4 to 4 h, export 1.1 to 7 h. Two failures and one crash:
+
+- 803496 and 804730 (train and validation, the only one-channel recordings) exported no trials. Every trial failed in `exportF0TrainingData`: `squeeze` dropped the channel dimension of SiLo's one-channel `mean_im`. The run still reported `ok`, and data assets were made (empty). Fixed (e83933f): `mean_im` is reshaped to channels × pixels, a path with one source no longer fails the same way, and `run_export` now fails a session in which no trial exported (`trials_exported`, `trials_failed` in `run_info.json`). Both relaunched (04:32).
+- 828408 (train, RCaMP3) died with 32 workers at SiLo's localization of path 2 (12 trials at once, estimated 16.4 GB each, 209 GB free), most likely out of memory. Relaunched with 10 workers (04:16). The three relaunched with 12 workers peaked at 146 to 182 GB of 246 GB with the same 12 trials at once.
+
+QC of the 14 (medians over trials, per session-path):
+
+| | median | range |
+|---|---|---|
+| activity gain | 0.60 | 0.50 to 0.84 |
+| peak slope after the gain | 1.13 | 0.99 to 1.34 |
+| blur | 0 px | 0 to 0.75 px |
+| event residual | 0.15 | 0.06 to 0.32 |
+
+Over 15 min the QC is better than in the 120 s diagnostic on 780125 (gain 0.66 and 0.53, peak slope 1.09 and 1.27, event residual 0.15 and 0.23, for paths 1 and 2). The pattern is the same: most paths sit at blur 0 with the peak slope above 1, so WMF's footprints stay flatter than the movie. Four paths (794237 both, 826033 path 1, 810196 path 1) match the old getActImPeaks exports (peak slope 1.0, blur 0.5 to 0.75).
+
 ## v10 results (2026-11-19)
 
 All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
