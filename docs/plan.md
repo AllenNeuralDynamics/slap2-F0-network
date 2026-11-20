@@ -1379,6 +1379,8 @@ Two to three times the sources, and GIAnT's activity now overshoots the 80 Hz mo
 
 **Out of memory.** Three 2026 RCaMP3 sessions (867430, 876767, 878030) were killed about 20 min into registration with 32 MATLAB workers. They were relaunched with 12 workers (17:43). Runs now log memory use with disk use every minute (8b5e577).
 
+**Disk test (finished after the launch).** Code Ocean's results volume grows as it fills: from 300 GB to 1,800 GB, with 1,500 GB written in 10 GB files and no failure (about 8 GB/min). The 15 min cap was not needed for disk. Phase 2 can use 30 min or whole sessions, as long as the run time allows it.
+
 ## v10 results (2026-11-19)
 
 All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
