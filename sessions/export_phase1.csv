@@ -1,18 +1,18 @@
 prefix,subject_id,role,cap_s_per_path,recording_s,export_path_s,acquisition_style,red,note
-780125_2025-03-14_09-30-06,780125,train,1800,1473,2946,triggered,jRGECO1a,in v9 training (180 s cap)
-803121_2025-10-29_11-19-29,803121,train,1800,1740,3480,continuous,RCaMP3,in v9 training (180 s cap)
-885233_2026-10-02_14-34-25,885233,train,1800,4338,3600,continuous,RCaMP3,in v9 training (180 s cap)
-776266_2025-03-24_14-59-49,776266,train,1800,1473,2946,triggered,jRGECO1a,"new mouse: 2025 jRGECO1a, triggered"
-828408_2025-11-13_10-30-53,828408,train,1800,4243,3600,triggered,RCaMP3,"new mouse: RCaMP3, triggered"
-803496_2025-07-25_13-02-10,803496,train,1800,1740,3480,continuous,None,"new mouse: no red channel, continuous"
-809047_2025-10-29_10-16-32,809047,train,1800,1740,3480,continuous,RCaMP3,"new mouse: 2025 RCaMP3, continuous"
-826033_2026-02-23_10-45-21,826033,train,1800,1800,3600,continuous,RCaMP3,"new mouse: 2026 RCaMP3, continuous"
-867430_2026-06-16_11-57-20,867430,train,1800,3927,3600,continuous,RCaMP3,"new mouse: 2026 RCaMP3, continuous"
-878030_2026-08-28_14-41-35,878030,validation,600,3806,1200,continuous,RCaMP3,v9 validation session
-794237_2025-04-04_09-37-29,794237,validation,600,1487,1200,triggered,jRGECO1a,"2025 jRGECO1a, triggered"
-804730_2025-07-25_14-08-35,804730,validation,600,1740,1200,continuous,None,"no red channel, continuous"
-834788_2026-03-02_10-18-42,834788,validation,600,1800,1200,continuous,RCaMP3,"2026 RCaMP3, continuous"
-776270_2025-01-03_12-48-51,776270,test,600,1960,1200,triggered,jRGECO1a,"2025 jRGECO1a, triggered"
-810196_2025-07-25_16-24-20,810196,test,600,1740,1200,continuous,None,"no red channel, continuous"
-829704_2025-12-10_13-47-47,829704,test,600,4245,1200,triggered,RCaMP3,"RCaMP3, triggered"
-876767_2026-08-20_13-28-03,876767,test,600,3874,1200,continuous,RCaMP3,"2026 RCaMP3, continuous"
+780125_2025-03-14_09-30-06,780125,train,900,1473,1800,triggered,jRGECO1a,in v9 training (180 s cap)
+803121_2025-10-29_11-19-29,803121,train,900,1740,1800,continuous,RCaMP3,in v9 training (180 s cap)
+885233_2026-10-02_14-34-25,885233,train,900,4338,1800,continuous,RCaMP3,in v9 training (180 s cap)
+776266_2025-03-24_14-59-49,776266,train,900,1473,1800,triggered,jRGECO1a,"new mouse: 2025 jRGECO1a, triggered"
+828408_2025-11-13_10-30-53,828408,train,900,4243,1800,triggered,RCaMP3,"new mouse: RCaMP3, triggered"
+803496_2025-07-25_13-02-10,803496,train,900,1740,1800,continuous,None,"new mouse: no red channel, continuous"
+809047_2025-10-29_10-16-32,809047,train,900,1740,1800,continuous,RCaMP3,"new mouse: 2025 RCaMP3, continuous"
+826033_2026-02-23_10-45-21,826033,train,900,1800,1800,continuous,RCaMP3,"new mouse: 2026 RCaMP3, continuous"
+867430_2026-06-16_11-57-20,867430,train,900,3927,1800,continuous,RCaMP3,"new mouse: 2026 RCaMP3, continuous"
+878030_2026-08-28_14-41-35,878030,validation,900,3806,1800,continuous,RCaMP3,v9 validation session
+794237_2025-04-04_09-37-29,794237,validation,900,1487,1800,triggered,jRGECO1a,"2025 jRGECO1a, triggered"
+804730_2025-07-25_14-08-35,804730,validation,900,1740,1800,continuous,None,"no red channel, continuous"
+834788_2026-03-02_10-18-42,834788,validation,900,1800,1800,continuous,RCaMP3,"2026 RCaMP3, continuous"
+776270_2025-01-03_12-48-51,776270,test,900,1960,1800,triggered,jRGECO1a,"2025 jRGECO1a, triggered"
+810196_2025-07-25_16-24-20,810196,test,900,1740,1800,continuous,None,"no red channel, continuous"
+829704_2025-12-10_13-47-47,829704,test,900,4245,1800,triggered,RCaMP3,"RCaMP3, triggered"
+876767_2026-08-20_13-28-03,876767,test,900,3874,1800,continuous,RCaMP3,"2026 RCaMP3, continuous"

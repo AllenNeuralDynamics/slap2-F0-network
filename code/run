@@ -3,7 +3,7 @@
 #
 # export (default): make F0-network training data from every attached SLAP2
 # session (GIAnT registration and SiLo, then exportF0TrainingData).
-#   ./run [--mode export] [--giant_ref main] [--max_duration_s 1800]
+#   ./run [--mode export] [--giant_ref main] [--max_duration_s 900]
 #         [--datasets all] [--n_workers 0] [--channels 1]
 #         [--keep_giant_outputs summary] [--compensate_online 1]
 #         [--peak_method wmf] [--wmf_peakth 3] [--save_tif 0] [--stats 1]
@@ -53,7 +53,7 @@ set -uo pipefail
 
 mode=export
 giant_ref=main
-max_duration_s=1800
+max_duration_s=900
 compensate_online=1
 save_tif=0
 peak_method=wmf
@@ -166,7 +166,7 @@ else
 fi
 echo "GIAnT: $giant_ref -> $(git -C "$dest" rev-parse HEAD)"
 
-# disk use every 5 min (GIAnT's working files for a 30 min session are a few hundred GB)
+# disk use every 5 min (GIAnT's working files: up to ~225 MB per second of recording)
 (while true; do echo "$(date +%T) $(df -BG --output=size,used,avail /root/capsule/results | tail -1) work $(du -sBG "$RESULTS/_work" 2>/dev/null | cut -f1)"; sleep 300; done) \
     > "$RESULTS/logs/disk_usage.txt" 2>&1 &
 disk_pid=$!

@@ -1245,7 +1245,7 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 
 **Against what the network trains on.** v9 trained on 1,015 s of path-time, from three sessions. Those three sessions alone hold 15,100 s, and the validation session 7,600 s. Each export was capped at 180 s per path (`--max_duration_s 180`). All qualifying sessions together hold about 660 times the current training data, from 32 mice instead of 3.
 
-## Export plan: more real data, scaling and held-out tests (2026-11-19; not started)
+## Export plan: more real data, scaling and held-out tests (2026-11-19; launched at 15 min per session, see below)
 
 **What may be used.** iGluSnFR4f multiROI raster recordings from 2025 onward, with two exclusions:
 
@@ -1320,3 +1320,34 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 2. Export phase 1.
 3. Run S0–S3 and the repeats (about 9 GPU runs of about 6 h each; at most a few run at once on Code Ocean).
 4. Evaluate, then decide on phase 2.
+
+## Export phase 1: launched (2026-11-19)
+
+**Settings** (the user's, 2026-11-19): the filter above; GIAnT main (9695d27) with compensated registration (`compensateOnline`) and WMF seeding with `wmfPeakth` 3; **15 min per session** (first 900 s); trial stats stored next to each trial (`slap2-f0 stats`, `*_stats_v5.npz`, found first by training wherever the data are mounted). The 17 sessions of `sessions/export_phase1.csv` run as one Code Ocean computation each.
+
+**Why 15 min, and HDF5 movies.** GIAnT's working files must all exist at once (SiLo reads every trial). On 780125 (845 × 320 px canvas) they are about 600 MB per second of recording with TIFF movies: 30 min would be about 1 TB, against a 300 GB results volume. The registered movies are 87% NaN outside the ROIs and shrink about 9× as deflated HDF5 (GIAnT's `saveTif` false, lossless), which brings it to about 225 MB/s (the alignment files' uncompressed `varFacDS`, 2.4 GB per 28 s trial and path, is most of the rest). At 15 min that is about 200 GB plus about 20 GB of export. Each run logs disk use every 5 min (`logs/disk_usage.txt`).
+
+**Data, at 15 min:** training 16,200 s of path-time (16× the current 1,015 s), validation 7,200 s, test 7,200 s. Experiment 1 becomes:
+
+| run | training data | path-time |
+|---|---|---|
+| S0 | 3 mice, first 180 s per path | 1,080 s |
+| S1 | the same 3 mice, 15 min per path | 5,400 s |
+| S2 | 9 mice, 5 min per path | 5,400 s |
+| S3 | 9 mice, 15 min per path | 16,200 s |
+
+**Code** (commits 2417673, 42f2be5, ec96430):
+
+- Export: `selectAcquisitionsSLAP2` / `slap2MetaInfo` apply the filter and give GIAnT a folder of links to the usable acquisitions (`removeLinkDir` removes the links without following them); `run_info.json` records each decision; `--compensate_online`, `--peak_method`, `--wmf_peakth`, `--save_tif`, `--stats`; `--max_duration_s 0` = no cap.
+- Training: `--val_sessions` / `--train_sessions`, `--max_train_s` (first trials of each session and path), `--keep_every` (`steps/step_<N>.pt`); `evaluate --ckpt run=.../steps/step_*.pt` and `--per_window` (`windows.csv`, each window's 8-frame error sums, for bootstrap intervals).
+
+**Local test** (780125, first 120 s = 5 trials, so SiLo used WMF): every stage ran, including the filter (one activity acquisition used), links, cleanup and stats. But the export QC changed against the old export of the same session (GIAnT d2fb85c, uncompensated, getActImPeaks, 7 trials):
+
+| | old export | new export |
+|---|---|---|
+| sources, path 1 / 2 | 106 / 74 | 220 / 193 |
+| activity gain | 0.78–0.86 | 0.53–0.63 |
+| peak slope after the gain | 0.95–1.03, blur 0–0.75 px | 1.10–1.29 at blur 0 |
+| event residual | 0.08–0.18 | 0.20–0.31 |
+
+Two to three times the sources, and GIAnT's activity now overshoots the 80 Hz movie by about 1.7× (was 1.2×), with more event signal left in movie − activity. Likely cause: many weak WMF sources at threshold 3, whose noisy traces dilute the gain regression; compensated registration (a sharper movie) may add to it. A local diagnostic separates the two (compensated + getActImPeaks; uncompensated + WMF 3).

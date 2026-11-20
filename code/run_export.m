@@ -14,8 +14,9 @@ function run_export(varargin)
 %   (peakMethod 'wmf', wmfPeakth). Registered movies are written as
 %   deflated HDF5 (saveTif 0): they are mostly NaN outside the ROIs and
 %   shrink about 9x, which matters for long sessions (GIAnT's working files
-%   are several hundred GB per 30 min). selectAcquisitionsSLAP2 leaves out
-%   reference stacks, and the whole session if it has any integration scan
+%   are up to ~225 MB per second of recording, ~200 GB per 15 min).
+%   selectAcquisitionsSLAP2 leaves out reference stacks, and the whole
+%   session if it has any integration scan
 %   (run_info.json says what was left out and why; status 'excluded').
 %   Outputs go to resultsDir/<session>/: the exported trials
 %   (Path<k>/trial_<NNN>.h5), export_summary.json (per-trial QC),
@@ -28,7 +29,7 @@ str = @(x) ischar(x) || isstring(x);
 p = inputParser;
 addParameter(p, 'giantDir', '/opt/GIAnT-MATLAB', str);
 addParameter(p, 'giantRef', '', str);
-addParameter(p, 'maxDuration_s', 1800);
+addParameter(p, 'maxDuration_s', 900);
 addParameter(p, 'compensateOnline', 1);
 addParameter(p, 'saveTif', 0);
 addParameter(p, 'peakMethod', 'wmf', str);
