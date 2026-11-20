@@ -50,6 +50,20 @@
 #         --stats_from /root/capsule/data/<run>/train/stats --windows 192"
 #   eval_args is passed to `slap2-f0 evaluate`, with results in results/eval.
 #
+# register: GIAnT on the GPU without MATLAB. For every attached SLAP2 session,
+# GIAnT-Python builds the trial table (trimmed to max_duration_s) and
+# registers it (MultiRoiRegistration), then the network computes the
+# localization baselines of the registered movies if a checkpoint is given.
+#   ./run --mode register [--giant_python_ref slap2-trial-table]
+#         [--max_duration_s 180] [--datasets all] [--compensate_online 0]
+#         [--ckpt /root/capsule/data/<run>/finetune/best.pt]
+#         [--predict_args "..."] [--keep_registered 0]
+#   GIAnT-Python (giant_python_ref), SLAP2_Utils and GIAnT-Python's
+#   pure-Python dependencies (tifffile, tqdm, joblib) are fetched at the
+#   start, so the environment is unchanged. Results in results/register
+#   (see code/register_gpu.py); keep_registered 1 keeps the registered
+#   movies (about 3 GB per 18 s trial and path).
+#
 # See README.md for the output formats.
 set -uo pipefail
 
@@ -71,6 +85,9 @@ train_args=""
 finetune_args=""
 eval_args=""
 predict_args=""
+giant_python_ref=slap2-trial-table
+ckpt=""
+keep_registered=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -79,7 +96,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args|giant_python_ref|ckpt|keep_registered) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -149,8 +166,44 @@ elif [[ "$mode" == "disktest" ]]; then
     rmdir "$RESULTS/_disktest"
     df -BG /root/capsule/results | tee -a "$RESULTS/logs/disktest.txt"
     exit 0
+elif [[ "$mode" == "register" ]]; then
+    nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
+    work="$SCRATCH/register_env"
+    rm -rf "$work" && mkdir -p "$work"
+    if ! git clone -q https://github.com/AllenNeuralDynamics/GIAnT-Python.git "$work/GIAnT-Python" \
+        || ! git -C "$work/GIAnT-Python" checkout -q "$giant_python_ref"; then
+        echo "Could not check out GIAnT-Python $giant_python_ref"
+        exit 1
+    fi
+    if ! git clone -q https://github.com/m-xie/SLAP2_Utils.git "$work/SLAP2_Utils" \
+        || ! git -C "$work/SLAP2_Utils" checkout -q d5a7cbc1476c52dd57d7530935776ca9b7bc26d5; then
+        echo "Could not check out SLAP2_Utils"
+        exit 1
+    fi
+    # only SLAP2_Utils' pure-Python header and parse-plan code is used, so it
+    # goes on the path (a pip install would build its Cython extension)
+    python3 -m pip install -q --no-deps --target "$work/pydeps" \
+        tifffile==2026.11.16 tqdm==4.70.1 joblib==1.6.0 || exit 1
+    GIANT_PYTHON_COMMIT=$(git -C "$work/GIAnT-Python" rev-parse HEAD)
+    export GIANT_PYTHON_COMMIT GIANT_PYTHON_REF="$giant_python_ref"
+    echo "GIAnT-Python $giant_python_ref -> $GIANT_PYTHON_COMMIT"
+    # memory, results disk and GPU use every 30 s
+    ( while true; do
+        echo "$(date +%T) mem_used_gb=$(free -g | awk '/Mem:/ {print $3}')" \
+            "results_used=$(df -BG --output=used /root/capsule/results | tail -1 | tr -d ' ')" \
+            "gpu=$(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader 2>/dev/null)"
+        sleep 30
+    done ) > "$RESULTS/logs/usage.txt" 2>&1 &
+    monitor=$!
+    PYTHONPATH="$work/GIAnT-Python/src:$work/SLAP2_Utils:$work/pydeps:$CODE" python3 -u "$CODE/register_gpu.py" \
+        "$DATA" "$RESULTS/register" --datasets "$datasets" --max_duration_s "$max_duration_s" \
+        --compensate_online "$compensate_online" --ckpt "$ckpt" --predict_args "$predict_args" \
+        --keep_registered "$keep_registered" 2>&1 | tee "$RESULTS/logs/register.log"
+    status="${PIPESTATUS[0]}"
+    kill "$monitor" 2>/dev/null
+    exit "$status"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, train, eval, predict, probe or disktest)"
+    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe or disktest)"
     exit 2
 fi
 
