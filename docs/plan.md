@@ -1203,7 +1203,7 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 - v10b: v10a plus the motion features.
 - Both evaluate on real, free, fast, fastpz and motionpz windows. v10a also re-scores v9 (the v9 run is now a data asset) so the motion simulations compare like with like.
 
-**Status (2026-11-19 morning).** Every run with a data asset attached fails on Code Ocean within 20–35 s, with no log or results; a probe run without assets, on the same code, succeeds. The runs are relaunched automatically once asset mounting works again.
+**Status.** Both runs finished in the afternoon, after a morning when runs with data assets failed to start on Code Ocean. Results: "v10 results" below.
 
 ## Flash test: v9 fine-tuned on 780125 (2026-11-19)
 
@@ -1287,7 +1287,7 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 - Keep every checkpoint (`step_<N>.pt` every 250 steps; today only `last.pt` and `best.pt`).
 - An evaluation of all checkpoints on every held-out session, with bootstrap intervals over mice and windows.
 
-**Experiment 1: does more data help, and is it amount or diversity?** All runs use the same recipe (v10's winner), steps, validation mice and test mice:
+**Experiment 1: does more data help, and is it amount or diversity?** All runs use the same recipe (v10's winner; that is v9's, see "v10 results"), steps, validation mice and test mice:
 
 | run | training data | path-time | question |
 |---|---|---|---|
@@ -1350,4 +1350,50 @@ Against the true baseline (simulations), the support pixels in the last 8 frames
 | peak slope after the gain | 0.95–1.03, blur 0–0.75 px | 1.10–1.29 at blur 0 |
 | event residual | 0.08–0.18 | 0.20–0.31 |
 
-Two to three times the sources, and GIAnT's activity now overshoots the 80 Hz movie by about 1.7× (was 1.2×), with more event signal left in movie − activity. Likely cause: many weak WMF sources at threshold 3, whose noisy traces dilute the gain regression; compensated registration (a sharper movie) may add to it. A local diagnostic separates the two (compensated + getActImPeaks; uncompensated + WMF 3).
+Two to three times the sources, and GIAnT's activity now overshoots the 80 Hz movie by about 1.7× (was 1.2×), with more event signal left in movie − activity. Likely cause: many weak WMF sources at threshold 3, whose noisy traces dilute the gain regression; compensated registration (a sharper movie) may add to it. A local diagnostic separates the two (compensated + getActImPeaks; uncompensated + WMF 3): see below.
+
+**Diagnostic: WMF 3 causes the change; compensation does not.** The same 120 s of 780125 with the same exporter:
+
+| | sources, path 1 / 2 | gain | peak slope | event residual |
+|---|---|---|---|---|
+| old export (GIAnT d2fb85c: uncompensated, getActImPeaks, 7 trials) | 106 / 74 | 0.78–0.86 | 0.95–1.03 | 0.08–0.18 |
+| C: compensated, getActImPeaks | 99 / 77 | 0.78–0.86 | 0.97–1.02 | 0.11–0.21 |
+| B: uncompensated, WMF 3 | 214 / 194 | 0.53–0.68 | 1.05–1.30 | 0.16–0.33 |
+| phase 1: compensated, WMF 3 | 220 / 193 | 0.53–0.63 | 1.10–1.29 | 0.20–0.31 |
+
+- **It is not weak sources pulling the gain down.** The slope of the movie on the written activity at each source's peak pixel is the same in every strength quartile (1.13–1.16 on path 1, 1.25–1.28 on path 2), and does not depend on how many sources are nearby. With WMF the activity is flatter than the movie for strong and weak sources alike. The gain (from the flux in a 4 px disk) fits the flux, and the peak pixel keeps 10–30% of the activity. The blur that should make up the difference is at its lower bound (0), so the exporter cannot sharpen.
+- **The two training targets at the same events.** Both compensated runs have identical movies, so both targets can be read at the same pixels and frames. Events are the peaks of each method's own activity at its sources:
+
+| events at | sources per trial | events | event size | left in WMF target | left in getActImPeaks target |
+|---|---|---|---|---|---|
+| path 1: found by both | 69 | 1,852 | 78 | 0.31 | 0.19 |
+| path 1: only WMF | 150 | 5,136 | 23 | 0.13 | 1.00 |
+| path 1: only getActImPeaks | 10 | 282 | 73 | 0.58 | 0.15 |
+| path 2: found by both | 62 | 2,165 | 57 | 0.33 | 0.15 |
+| path 2: only WMF | 130 | 5,239 | 27 | 0.20 | 0.99 |
+| path 2: only getActImPeaks | 5 | 190 | 49 | 0.70 | 0.22 |
+
+- **Net effect:** summed over these events (size × count × fraction left), the WMF target keeps about half as much event signal as the getActImPeaks one (path 1: 72k against 149k; path 2: 75k against 158k). The reason is that getActImPeaks misses about 140 weaker sources per path, whose events stay whole in its target. In exchange, WMF removes the strong synapses that both methods find only half as well (31–33% left against 15–19%). It also mostly leaves the few strong sources that only getActImPeaks finds (58–70% left). That fits WMF merging close pairs: on path 1, 89 getActImPeaks sources have a WMF source within 2 px, but only 69 WMF sources have a getActImPeaks source that close.
+- Some events at the WMF-only sources may be noise peaks; the WMF validation put the false-source rate at 3% or less at threshold 3.
+- The phase-1 exports keep WMF 3. What would improve them: WMF footprints that are as peaked as the movie and keep close pairs apart (GIAnT), after which a re-export would be worthwhile.
+
+**Out of memory.** Three 2026 RCaMP3 sessions (867430, 876767, 878030) were killed about 20 min into registration with 32 MATLAB workers. They were relaunched with 12 workers (17:43). Runs now log memory use with disk use every minute (8b5e577).
+
+## v10 results (2026-11-19)
+
+All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
+
+| | real support | real background | fast support | fastpz support | motionpz support | motionpz background | free support |
+|---|---|---|---|---|---|---|---|
+| v10a (= v6r pretrained) | +0.8% | +0.3% | +15.0% | +15.9% | +11.3% | −5.7% | +0.7% |
+| v10b fine-tuned | +0.3% | −0.1% | +20.0% | +21.2% | +11.7% | −13.3% | +10.9% |
+| v9 pretrained | +0.5% | +0.5% | +1.6% | +0.2% | −0.2% | −9.3% | +3.5% |
+
+- **v10a is v6r pretrained, bit for bit.** No pretraining step beat v6r's start on the motion simulations: motion_balanced was 0.470 at step 0 and 0.49–0.52 afterwards. Fine-tuning then kept its start too: real_balanced_free was 0.894 at step 0 and 0.90–0.94 afterwards.
+- **v10b**:
+  - Pretraining's best was step 1000, at 0.459, 2% better than the start.
+  - Fine-tuned, it ties v9 fine-tuned on real windows and is better on the background of the motion simulations.
+  - It is worse at support pixels of every simulation (+11 to +21%), with a more negative support bias on real windows (−0.073 against −0.022).
+- The 3 h limit stopped both pretraining runs at 2,443 and 2,359 of 3,000 steps, because simulated motion makes windows 2.7× slower. v10a's validation never came near its start, so the missing steps are unlikely to matter.
+
+**Decision (by the rule set above): v9 fine-tuned stays the default, and Experiment 1 uses v9's recipe, with no simulated motion and no motion features.**
