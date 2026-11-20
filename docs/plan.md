@@ -1397,6 +1397,28 @@ QC of the 14 (medians over trials, per session-path):
 
 Over 15 min the QC is better than in the 120 s diagnostic on 780125 (gain 0.66 and 0.53, peak slope 1.09 and 1.27, event residual 0.15 and 0.23, for paths 1 and 2). The pattern is the same: most paths sit at blur 0 with the peak slope above 1, so WMF's footprints stay flatter than the movie. Four paths (794237 both, 826033 path 1, 810196 path 1) match the old getActImPeaks exports (peak slope 1.0, blur 0.5 to 0.75).
 
+**Decisions (the user's, 2026-11-20).** WMF 3 stays, and Experiment 1 trains on these exports. Phase 2 also takes 15 min per session. The two empty assets and 828408's first failed run (225 GB of working files) were deleted.
+
+**828408 ran out of memory again.** The relaunch with 10 workers died at the same step, SiLo's localization of path 2 with 10 trials at once. Memory rose from 23 to 209 GB of 246 within 5 min: SiLo's estimate (16.4 GB per trial) is too low for this session. Relaunched with 6 workers (08:33).
+
+**Export about 6× faster, same output (dc4d38e).** The export took 1.1 to 7 h per session on Code Ocean, more than SiLo on some sessions. One trial of the 120 s test on 780125 took 94 s; the profile showed:
+
+- `placeFootprints`: 46 s. For each of 90 placements per trial (sub-pixel offsets, then blurs), every source's footprint was copied out of the whole canvas, searched and interpolated on the whole canvas grid. Each footprint is now interpolated on a crop around it that holds every grid neighbour of its sample points, which gives the same values: 3.4 s.
+- HDF5 writes: 25 s. Deflate 1 instead of 4 writes movie and activity 40% faster, with files 5 to 7% larger (lossless).
+- Footprint reads: SiLo's `per_trial_profiles` is a dense [trials sources 1 rows cols] array, uncompressed and contiguous, with trials varying fastest on disk. Reading one trial walks the whole dataset, about 10 GB per path in a 15 min session, once per trial, so the cost grows with the square of the number of trials (1 GB here, with 5 trials). All trials are now read in one pass of contiguous column blocks, as sparse matrices.
+- Two full pixels × frames double arrays (about 5 GB each) were made only to read some of their rows; only those rows are computed now.
+- Trials are independent and now run in parallel (`--export_workers`, default 8, at most `--n_workers`), about 15 GB each.
+
+| 780125, 120 s, 10 trials | time |
+|---|---|
+| old exporter | 922 s |
+| new, one trial at a time | 456 s |
+| new, 5 at once, deflate 1 | 164 s |
+
+Every dataset, attribute and summary value is identical to the old exporter's (deflate changes only the file bytes).
+
+**Experiment 1, S0 and S1.** Their training mice (780125, 803121, 885233) are exported, so they can start before the rest. Launch files use v9's recipe (from v6r pretrained; 3000 + 1700 steps), `--train_sessions`, `--val_sessions 878030,794237,834788` for best.pt in every run (804730 joins the held-out evaluation), `--keep_every 250`, `--max_train_s 180` for S0, and `--max_hours` 5 and 4 (v10 was cut short at 3). A local run checked the arguments, the split and the checkpoints. They wait for the GPU capsule, which refused the update: it has uncommitted changes in the Code Ocean IDE.
+
 ## v10 results (2026-11-19)
 
 All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
