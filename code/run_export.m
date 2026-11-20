@@ -15,6 +15,8 @@ function run_export(varargin)
 %   deflated HDF5 (saveTif 0): they are mostly NaN outside the ROIs and
 %   shrink about 9x, which matters for long sessions (GIAnT's working files
 %   are up to ~225 MB per second of recording, ~200 GB per 15 min).
+%   exportWorkers trials are exported at once (at most nWorkers; each needs
+%   about 15 GB).
 %   selectAcquisitionsSLAP2 leaves out reference stacks, and the whole
 %   session if it has any integration scan
 %   (run_info.json says what was left out and why; status 'excluded').
@@ -36,6 +38,7 @@ addParameter(p, 'peakMethod', 'wmf', str);
 addParameter(p, 'wmfPeakth', 3);
 addParameter(p, 'datasets', 'all', str);
 addParameter(p, 'nWorkers', 0);
+addParameter(p, 'exportWorkers', 8);
 addParameter(p, 'channels', '1', str);
 addParameter(p, 'keepGiantOutputs', 'summary', str);
 addParameter(p, 'dataDir', '/root/capsule/data', str);
@@ -49,6 +52,7 @@ opts.saveTif = logical(num(opts.saveTif));
 opts.peakMethod = char(opts.peakMethod);
 opts.wmfPeakth = num(opts.wmfPeakth);
 opts.nWorkers = num(opts.nWorkers);
+opts.exportWorkers = num(opts.exportWorkers);
 if opts.nWorkers <= 0
     opts.nWorkers = min(32, feature('numcores'));
 end
@@ -149,7 +153,7 @@ try
 
         stage = 'export'; t = tic;
         info.export = exportF0TrainingData(tt, outDir, 'channels', opts.channels, ...
-            'label', s.name, 'giantRef', giantCommit);
+            'label', s.name, 'giantRef', giantCommit, 'nWorkers', min(opts.exportWorkers, opts.nWorkers));
         info.stages.export = toc(t);
         % a trial that fails is recorded and the next one runs; the session
         % fails only if no trial was exported
@@ -212,6 +216,7 @@ if st == 0, prov.slap2_f0_commit = strtrim(sha); else, prov.slap2_f0_commit = ''
 prov.matlab_version = version;
 prov.num_cores = feature('numcores');
 prov.n_workers = opts.nWorkers;
+prov.export_workers = min(opts.exportWorkers, opts.nWorkers);
 prov.max_duration_s = opts.maxDuration_s;
 prov.compensate_online = opts.compensateOnline;
 prov.save_tif = opts.saveTif;

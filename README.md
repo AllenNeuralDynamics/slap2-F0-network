@@ -43,15 +43,17 @@ docs/plan.md           design and plan
 
 - **On Code Ocean**, the `run` parameters are:
   - `giant_ref` (GIAnT commit; default `main`);
-  - `max_duration_s` (seconds kept from the start of each session; default 180, the length the integration-test capsule runs on these sessions);
+  - `max_duration_s` (seconds kept from the start of each session; default 900; 0 keeps everything);
   - `datasets` (`all`, or comma-separated mount names);
-  - `n_workers`, `channels` (default `1`);
+  - `n_workers` (GIAnT's parallel workers; 12 or fewer for long 2026 sessions, which ran out of memory with 32), `channels` (default `1`);
+  - `export_workers` (trials exported at once, default 8, at most `n_workers`; about 15 GB each);
+  - `compensate_online`, `peak_method`, `wmf_peakth` (GIAnT's `compensateOnline`, `peakMethod`, `wmfPeakth`; defaults 1, `wmf`, 3), `save_tif` (0: registered movies as deflated HDF5), `stats` (1: each trial's stats next to it);
   - `keep_giant_outputs` (`summary`, `all` or `none`).
 - **Locally**, after SiLo has run on a session:
 
 ```matlab
 addpath('code/matlab')   % with GIAnT-MATLAB (minus its tests folder) and the SLAP2 reader on the path
-exportF0TrainingData('<session>/trial_table.h5', '<out>', 'rawDir', '<raw data folder>')
+exportF0TrainingData('<session>/trial_table.h5', '<out>', 'rawDir', '<raw data folder>', 'nWorkers', 8)
 ```
 
 ### Output format

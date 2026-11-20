@@ -61,12 +61,16 @@ function summary = exportF0TrainingData(trialTableFn, outDir, varargin)
 %     shiftRange, shiftStep  sub-pixel offset search around the integer
 %                 offset of the mean images (default 1 and 0.25 px)
 %     varFac      'mean' (per-pixel mean, default) or 'full' (every frame)
-%     deflate     HDF5 deflate level (default 4)
+%     deflate     HDF5 deflate level (default 1: 40% faster to write than 4,
+%                 and 5% larger files)
 %     label       session label stored with the data (default: the name of
 %                 the trial table's datadr folder)
 %     giantRef    GIAnT commit that made the SiLo outputs, stored as metadata
 %     ignoreSources  export every path as if SiLo had found no sources (zero
 %                 activity; for checks of the raw residual statistics)
+%     nWorkers    trials exported at once on a parallel pool (default 1:
+%                 one after the other); each needs several GB of memory
+%                 (about 15 GB for a 2-channel 845 x 320 px trial of 28 s)
 
 p = inputParser;
 addParameter(p, 'saveDir', '');
@@ -78,10 +82,11 @@ addParameter(p, 'blurSigmas', 0:0.25:1.5);
 addParameter(p, 'shiftRange', 1);
 addParameter(p, 'shiftStep', 0.25);
 addParameter(p, 'varFac', 'mean');
-addParameter(p, 'deflate', 4);
+addParameter(p, 'deflate', 1);
 addParameter(p, 'label', '');
 addParameter(p, 'giantRef', '');
 addParameter(p, 'ignoreSources', false);
+addParameter(p, 'nWorkers', 1);
 parse(p, varargin{:});
 o = p.Results;
 
@@ -142,30 +147,65 @@ for DMDix = paths(:)'
     if isempty(trials)
         trials = find(nf(:)' > 0);
     end
-    for t = trials(:)'
-        if t > numel(nf) || nf(t) == 0
-            continue
+    % every trial's footprints, read once for the path (see readTrialProfiles)
+    if profSz(2) > 0
+        tRead = tic;
+        Fall = readTrialProfiles(pts, [grp '/sources/spatial/per_trial_profiles'], profSz);
+        fprintf('[exportF0] %s path %d: footprints of %d trials x %d sources read in %.0f s\n', ...
+            o.label, DMDix, profSz(1), profSz(2), toc(tRead));
+    else
+        Fall = cell(numel(nf), 1);
+    end
+    trials = trials(:)';
+    trials = trials(trials <= numel(nf));
+    trials = trials(nf(trials) > 0);
+    nW = min(o.nWorkers, numel(trials));
+    if nW > 1 % trials at once; the summary is written once the path is done
+        pool = gcp('nocreate');
+        if isempty(pool)
+            pool = parpool('Processes', nW);
         end
-        fprintf('[exportF0] %s path %d trial %d\n', o.label, DMDix, t);
-        try
-            q = exportTrial(tt, t, DMDix, nf, fl, profSz, es, pts, grp, mocoDr, prm, o, ...
-                fullfile(pathDir, sprintf('trial_%03d.h5', t)));
-            summary.trials{end+1} = q;
-            fprintf(['[exportF0]   gain %.2f; after it, peak slope %.2f (r %.2f), disk-flux slope %.2f (r %.2f); ' ...
-                'shift [%.2f %.2f], blur %.2f px, event residual %.2f\n'], q.activityGain, q.peakSlope, q.peakR, q.diskSlope, q.diskR, ...
-                q.shiftRC, q.blurSigma, q.eventResidualFraction);
-        catch ME
-            fprintf(2, '[exportF0]   failed: %s\n', ME.message);
-            summary.trials{end+1} = struct('path', DMDix, 'trial', t, 'error', ME.message);
+        nW = min(nW, pool.NumWorkers);
+        Ft = Fall(trials);
+        qs = cell(1, numel(trials));
+        parfor (i = 1:numel(trials), nW)
+            qs{i} = exportOne(tt, trials(i), DMDix, nf, fl, profSz, Ft{i}, es, grp, mocoDr, prm, o, pathDir);
         end
-        fid = fopen(fullfile(outDir, 'export_summary.json'), 'w');
-        fprintf(fid, '%s', jsonencode(summary, 'PrettyPrint', true));
-        fclose(fid);
+        summary.trials = [summary.trials, qs];
+        writeSummary(outDir, summary);
+    else
+        for t = trials
+            summary.trials{end+1} = exportOne(tt, t, DMDix, nf, fl, profSz, Fall{t}, es, grp, mocoDr, prm, o, pathDir);
+            writeSummary(outDir, summary);
+        end
     end
 end
 end
 
-function q = exportTrial(tt, t, DMDix, nf, fl, profSz, es, pts, grp, mocoDr, prm, o, outFn)
+function q = exportOne(tt, t, DMDix, nf, fl, profSz, H, es, grp, mocoDr, prm, o, pathDir)
+%one trial, with its log lines; a failure is returned as {path, trial, error}
+fprintf('[exportF0] %s path %d trial %d\n', o.label, DMDix, t);
+try
+    q = exportTrial(tt, t, DMDix, nf, fl, profSz, H, es, grp, mocoDr, prm, o, ...
+        fullfile(pathDir, sprintf('trial_%03d.h5', t)));
+    fprintf(['[exportF0] path %d trial %d: gain %.2f; after it, peak slope %.2f (r %.2f), disk-flux slope %.2f (r %.2f); ' ...
+        'shift [%.2f %.2f], blur %.2f px, event residual %.2f\n'], DMDix, t, q.activityGain, q.peakSlope, q.peakR, q.diskSlope, q.diskR, ...
+        q.shiftRC, q.blurSigma, q.eventResidualFraction);
+catch ME
+    fprintf(2, '[exportF0] path %d trial %d failed: %s\n', DMDix, t, ME.message);
+    q = struct('path', DMDix, 'trial', t, 'error', ME.message);
+end
+end
+
+function writeSummary(outDir, summary)
+fid = fopen(fullfile(outDir, 'export_summary.json'), 'w');
+fprintf(fid, '%s', jsonencode(summary, 'PrettyPrint', true));
+fclose(fid);
+end
+
+function q = exportTrial(tt, t, DMDix, nf, fl, profSz, H, es, grp, mocoDr, prm, o, outFn)
+% H: this trial's footprints on the consensus canvas, a sparse (rows*cols) x nS
+% matrix (readTrialProfiles)
 nS = profSz(2); % 0: no sources, zero activity
 %--- GIAnT outputs for this trial (200 Hz, consensus canvas)
 if nS > 0
@@ -175,12 +215,10 @@ if nS > 0
     lines200 = fl(f200);
     disc200 = squeeze(all(isnan(X200(:,1,:)), 1));
     X200(isnan(X200)) = 0;
-    H = h5read(pts, [grp '/sources/spatial/per_trial_profiles'], [t 1 1 1 1], [1 nS 1 profSz(4) profSz(5)]);
-    H = reshape(double(H), nS, profSz(4), profSz(5));
-    H(isnan(H)) = 0;
-    if ~any(H(:))
+    if nnz(H) == 0
         error('no footprints for this trial');
     end
+    H = struct('H', H, 'sz', [profSz(4) profSz(5)]);
 end
 
 %--- the 80 Hz registered movie and its alignment data
@@ -279,7 +317,7 @@ Hs = gain * placeFootprints(H, best.shift, bestSig.sigma, R, C); % (R*C) x nS sp
 [pr, pc] = ind2sub([R C], pk);
 
 %--- QC after the gain: disk flux and event-triggered residual
-A1 = Hs * X80{prm.activityChannel}; % (R*C) x T, sparse rows outside support
+A1 = Hs(pk, :) * X80{prm.activityChannel}; % activity at the peak pixels (nS x T)
 [cfD, rD] = diskFit(Hs, X80{prm.activityChannel}, Y1, hpf, R, C);
 etaY = zeros(1, 25); etaR = etaY; nEv = 0;
 for s = 1:nS
@@ -287,7 +325,7 @@ for s = 1:nS
     thr = prctile(x, 99);
     ev = find(x(2:end-1) > thr & x(2:end-1) >= x(1:end-2) & x(2:end-1) > x(3:end)) + 1;
     ev = ev(ev > 8 & ev <= T - 16);
-    y = double(Y1(pk(s), :)); a = full(A1(pk(s), :));
+    y = double(Y1(pk(s), :)); a = full(A1(s, :));
     for e = ev
         wy = y(e-8:e+16); wr = wy - a(e-8:e+16);
         if any(isnan(wy)), continue, end
@@ -306,13 +344,19 @@ if exist(outFn, 'file'), delete(outFn); end
 chans = o.channels(:)';
 mov = zeros(Rc, Cc, T, numel(chans), 'single');
 actv = zeros(Rc, Cc, T, numel(chans), 'single');
+if nS > 0 % the activity is computed only at footprint pixels inside the crop (zero elsewhere)
+    [cr, cc] = ndgrid(r0:r1, c0:c1);
+    inCrop = sub2ind([R C], cr(:), cc(:));
+    sup = find(any(Hs(inCrop, :), 2));
+end
 for k = 1:numel(chans)
     m = crop(squeeze(IM(:,:,chans(k),:)));
     m(:,:,discard) = nan;
     mov(:,:,:,k) = m;
     if nS > 0
-        a = full(Hs * X80{min(chans(k), nCh200)});
-        actv(:,:,:,k) = crop(reshape(single(a), R, C, T));
+        a = zeros(Rc*Cc, T, 'single');
+        a(sup, :) = single(full(Hs(inCrop(sup), :) * X80{min(chans(k), nCh200)}));
+        actv(:,:,:,k) = reshape(a, Rc, Cc, T);
     end
 end
 clear IM
@@ -366,21 +410,61 @@ for fn2 = fieldnames(q)'
 end
 end
 
-function Hs = placeFootprints(H, shift, sigma, R, C)
+function Fall = readTrialProfiles(pts, ds, profSz)
+%every trial's footprints in one pass. SiLo's per_trial_profiles is
+%[trials sources 1 rows cols], uncompressed and contiguous, with trials
+%varying fastest on disk: reading one trial walks the whole dataset (tens of
+%GB for a 15 min session), once per trial. Blocks of columns are contiguous,
+%so they are read in turn (about 2 GB each). Returns, per trial, a sparse
+%(rows*cols) x sources matrix (NaN as 0).
+nT = profSz(1); nS = profSz(2); Rk = profSz(4); Ck = profSz(5);
+cb = max(1, floor(2^31 / (4 * nT * nS * Rk))); % columns per block
+P = cell(0, 1); S = P; T = P; V = P;
+for c0 = 1:cb:Ck
+    n = min(cb, Ck - c0 + 1);
+    B = h5read(pts, ds, [1 1 1 1 c0], [nT nS 1 Rk n]);
+    B = reshape(B, nT, nS, Rk * n);
+    B(isnan(B)) = 0;
+    k = find(B);
+    [tk, sk, pk] = ind2sub([nT nS Rk*n], k);
+    T{end+1} = tk; S{end+1} = sk; P{end+1} = pk + (c0 - 1) * Rk; V{end+1} = double(B(k)); %#ok<AGROW>
+end
+clear B
+T = vertcat(T{:}); S = vertcat(S{:}); P = vertcat(P{:}); V = vertcat(V{:});
+Fall = repmat({sparse(Rk*Ck, nS)}, nT, 1);
+if isempty(T), return, end
+[T, ord] = sort(T); S = S(ord); P = P(ord); V = V(ord);
+edges = [0; find(diff(T)); numel(T)];
+for i = 1:numel(edges) - 1
+    j = edges(i)+1:edges(i+1);
+    Fall{T(j(1))} = sparse(P(j), S(j), V(j), Rk*Ck, nS);
+end
+end
+
+function Hs = placeFootprints(F, shift, sigma, R, C)
 %footprints from the consensus canvas into trial coordinates,
 %trial(r + shift(1), c + shift(2)) = consensus(r, c), optionally blurred;
-%returns a sparse (R*C) x nSources matrix
-nS = size(H, 1);
+%returns a sparse (R*C) x nSources matrix. F.H is the sparse (rows*cols) x
+%nSources footprint matrix on the canvas (size F.sz). Each source is
+%interpolated on a crop of the canvas that holds every grid neighbour of its
+%sample points, which gives the same values as interpolating the whole canvas.
+nS = size(F.H, 2);
+Rk = F.sz(1); Ck = F.sz(2);
 ii = cell(nS, 1); jj = ii; vv = ii;
 pad = 3 + ceil(3*sigma) + ceil(max(abs(shift)));
+m = pad + ceil(max(abs(shift))) + 2; % crop margin around the footprint
 for s = 1:nS
-    h = squeeze(H(s, :, :));
-    [rr, cc] = find(h);
-    if isempty(rr), continue, end
-    ra = max(1, min(rr) - pad):min(size(h,1), max(rr) + pad);
-    ca = max(1, min(cc) - pad):min(size(h,2), max(cc) + pad);
+    [k, ~, w] = find(F.H(:, s));
+    if isempty(k), continue, end
+    [rr, cc] = ind2sub([Rk Ck], k);
+    ra = max(1, min(rr) - pad):min(Rk, max(rr) + pad);
+    ca = max(1, min(cc) - pad):min(Ck, max(cc) + pad);
+    gr = max(1, min(rr) - m):min(Rk, max(rr) + m);
+    gc = max(1, min(cc) - m):min(Ck, max(cc) + m);
+    h = zeros(numel(gr), numel(gc));
+    h(sub2ind(size(h), rr - gr(1) + 1, cc - gc(1) + 1)) = w;
     [CC, RR] = meshgrid(ca, ra);
-    patch = interp2(1:size(h,2), 1:size(h,1), h, CC - shift(2), RR - shift(1), 'linear', 0);
+    patch = interp2(gc, gr, h, CC - shift(2), RR - shift(1), 'linear', 0);
     if sigma > 0
         patch = imgaussfilt(patch, sigma);
     end

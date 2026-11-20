@@ -4,13 +4,15 @@
 # export (default): make F0-network training data from every attached SLAP2
 # session (GIAnT registration and SiLo, then exportF0TrainingData).
 #   ./run [--mode export] [--giant_ref main] [--max_duration_s 900]
-#         [--datasets all] [--n_workers 0] [--channels 1]
+#         [--datasets all] [--n_workers 0] [--export_workers 8] [--channels 1]
 #         [--keep_giant_outputs summary] [--compensate_online 1]
 #         [--peak_method wmf] [--wmf_peakth 3] [--save_tif 0] [--stats 1]
 #   giant_ref is the GIAnT-MATLAB commit/branch/tag whose fits define the
 #   training target. max_duration_s caps each session (0: no cap). datasets
-#   is "all" or comma-separated mount names. Reference stacks are left out,
-#   and so is any session with an integration scan (selectAcquisitionsSLAP2).
+#   is "all" or comma-separated mount names. export_workers trials are
+#   exported at once (at most n_workers; about 15 GB each). Reference stacks
+#   are left out, and so is any session with an integration scan
+#   (selectAcquisitionsSLAP2).
 #   keep_giant_outputs: summary (trial_table + experiment_summary), all (adds
 #   per_trial_summary) or none. compensate_online, peak_method and wmf_peakth
 #   are GIAnT's compensateOnline (registration), peakMethod and wmfPeakth
@@ -62,6 +64,7 @@ stats=1
 disk_gb=1500
 datasets=all
 n_workers=0
+export_workers=8
 channels=1
 keep_giant_outputs=summary
 train_args=""
@@ -76,7 +79,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -173,7 +176,7 @@ echo "GIAnT: $giant_ref -> $(git -C "$dest" rev-parse HEAD)"
 disk_pid=$!
 
 esc() { printf '%s' "${1//\'/\'\'}"; }
-(cd "$CODE" && matlab -batch "run_export('giantDir','$dest','giantRef','$(esc "$giant_ref")','maxDuration_s','$max_duration_s','datasets','$(esc "$datasets")','nWorkers','$n_workers','channels','$(esc "$channels")','keepGiantOutputs','$(esc "$keep_giant_outputs")','compensateOnline','$compensate_online','saveTif','$save_tif','peakMethod','$(esc "$peak_method")','wmfPeakth','$wmf_peakth','dataDir','$DATA','resultsDir','$RESULTS','scratchDir','$SCRATCH')") \
+(cd "$CODE" && matlab -batch "run_export('giantDir','$dest','giantRef','$(esc "$giant_ref")','maxDuration_s','$max_duration_s','datasets','$(esc "$datasets")','nWorkers','$n_workers','exportWorkers','$export_workers','channels','$(esc "$channels")','keepGiantOutputs','$(esc "$keep_giant_outputs")','compensateOnline','$compensate_online','saveTif','$save_tif','peakMethod','$(esc "$peak_method")','wmfPeakth','$wmf_peakth','dataDir','$DATA','resultsDir','$RESULTS','scratchDir','$SCRATCH')") \
     2>&1 | tee "$RESULTS/logs/matlab.log"
 status="${PIPESTATUS[0]}"
 if [[ "$stats" == "1" ]]; then  # each trial's stats, next to it, for training
