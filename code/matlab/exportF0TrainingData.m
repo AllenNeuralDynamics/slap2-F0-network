@@ -240,13 +240,15 @@ Wk = sparse(ii, jj, ww, numel(lines200), T);
 discard = discard(:)' | discW > 0.5;
 X80 = cell(1, nCh200);
 for ch = 1:nCh200
-    X80{ch} = squeeze(X200(:, ch, :)) * Wk; % sources x 80 Hz frames
-    if nS == 1, X80{ch} = X80{ch}(:)'; end
+    X80{ch} = reshape(X200(:, ch, :), nS, []) * Wk; % sources x 80 Hz frames (squeeze would turn one source into a column)
 end
 
 %--- consensus -> trial offset and blur
 Y1(:, discard) = nan;
-meanC = squeeze(h5read(es, [grp '/visualizations/mean_im']));
+% mean_im is [1 channels rows cols]: squeeze would also drop the channel
+% dimension of a one-channel recording, so reshape to channels x pixels
+meanC = h5read(es, [grp '/visualizations/mean_im']);
+meanC = reshape(meanC, [], profSz(4)*profSz(5));
 meanC = reshape(meanC(prm.activityChannel, :), profSz(4), profSz(5));
 sh0 = integerOffset(meanT, meanC, 5);
 hpf = @(x) x - movmedian(x, 81, 2, 'omitnan');

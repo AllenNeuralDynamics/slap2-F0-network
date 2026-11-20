@@ -151,6 +151,17 @@ try
         info.export = exportF0TrainingData(tt, outDir, 'channels', opts.channels, ...
             'label', s.name, 'giantRef', giantCommit);
         info.stages.export = toc(t);
+        % a trial that fails is recorded and the next one runs; the session
+        % fails only if no trial was exported
+        tr = info.export.trials;
+        failed = cellfun(@(q) isfield(q, 'error'), tr);
+        info.trials_exported = nnz(~failed);
+        info.trials_failed = nnz(failed);
+        if ~any(~failed)
+            msg = 'no trials';
+            if any(failed), msg = tr{find(failed, 1)}.error; end
+            error('run_export:NoTrials', 'No trial exported (%d failed; first error: %s)', nnz(failed), msg);
+        end
         info.status = 'ok';
     end
 catch err
