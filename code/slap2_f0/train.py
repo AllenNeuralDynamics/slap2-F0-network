@@ -137,6 +137,24 @@ def seconds_by_session(files: list[Path], fps: float = 80.0) -> dict[str, float]
     return dict(tot)
 
 
+def without_noise_stats(files: list[Path], stats: dict) -> list[Path]:
+    """Files whose noise statistics are not finite. They come from the
+    unlabeled valid pixels; a trial whose labeled mask covers every valid pixel
+    (seen once in phase 1, a dim trial) has none, and simulating from it fails."""
+    keys = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c")
+    bad = lambda s: not all(np.isfinite(float(s[k])) for k in keys) or float(s["gain"]) <= 0  # noqa: E731
+    return [f for f in files if bad(stats[str(f)])]
+
+
+def _drop_files(files: list[Path], stats: dict) -> set[str]:
+    """Print and return the files without finite noise statistics."""
+    bad = without_noise_stats(files, stats)
+    if bad:
+        print(f"left out {len(bad)} trial file(s) without finite noise statistics (no unlabeled valid pixels): "
+              + ", ".join(f"{f.parent.parent.name}/{f.parent.name}/{f.name}" for f in bad), flush=True)
+    return {str(f) for f in bad}
+
+
 def _ref_var(b, region):
     """Photon-noise variance at the mean image (scale units), a fixed per-pixel
     weight for the mean loss that does not depend on the model."""
@@ -547,6 +565,14 @@ def train(args) -> None:
     stats = load_stats(files, stats_cache(args, out), workers=args.workers)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; gain "
           + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)
+    bad = _drop_files(files, stats)
+    if bad:
+        train_files = [f for f in train_files if str(f) not in bad]
+        val_files = [f for f in val_files if str(f) not in bad]
+        files = train_files + val_files
+        secs = seconds_by_session(train_files)
+        if not train_files:
+            raise SystemExit("no training files left")
 
     model = SlabBlindSpotNet(mcfg).to(device)
     if args.init:
@@ -693,6 +719,10 @@ def evaluate_checkpoints(args) -> None:
     stats = load_stats(files, cache, workers=args.workers)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; sessions: "
           + ", ".join(f"{s} ({len(f)} trials)" for s, f in sorted(groups.items())), flush=True)
+    bad = _drop_files(files, stats)
+    if bad:
+        files = [f for f in files if str(f) not in bad]
+        groups = session_groups(files)
     excess_report(groups, stats, out / "excess.csv")
     rows = []
     specs = []

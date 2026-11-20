@@ -364,8 +364,14 @@ movSz = [Cc Rc T numel(chans)]; % explicit, so a single channel keeps its axis
 writeArr(outFn, '/movie', permute(mov, [2 1 3 4]), [min(64,Cc) min(64,Rc) min(256,T) 1], o.deflate, movSz);
 writeArr(outFn, '/activity', permute(actv, [2 1 3 4]), [min(64,Cc) min(64,Rc) min(256,T) 1], o.deflate, movSz);
 clear mov actv
-labeled = medfilt2(meanT, [3 3]);
-labeled = ~isnan(meanT) & labeled > 3*prctile(labeled(~isnan(labeled)), 25);
+mf = medfilt2(meanT, [3 3]);
+labeled = ~isnan(meanT) & mf > 3*prctile(mf(~isnan(mf)), 25);
+if nnz(valid & ~labeled) < 0.05*nnz(valid)
+    % a dim trial: the canvas's 25th percentile is so low that (nearly)
+    % every valid pixel counts as labeled, which leaves the noise statistics
+    % no background pixels; take the percentile over the valid pixels
+    labeled = ~isnan(meanT) & mf > 3*prctile(mf(valid & ~isnan(mf)), 25);
+end
 support = reshape(full(any(Hs, 2)), R, C);
 writeArr(outFn, '/mask/valid', uint8(crop(valid)'), [], o.deflate);
 writeArr(outFn, '/mask/labeled', uint8(crop(labeled)'), [], o.deflate);
