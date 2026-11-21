@@ -397,6 +397,27 @@ def test_activity_fit_artifacts_are_left_out(tmp_path):
         r, c = np.nonzero(lost)
         assert lost.sum() == 9 and np.ptp(r) == 2 and np.ptp(c) == 2  # the 3 x 3 block, nothing else
         assert ((w > 0) == (w_raw > 0))[:, ~lost].all()
+    # simulations put no activity there either: the template's per-frame activity at the artifact
+    # went into the simulated movie (804730 path 2: up to 3e5 counts) while the inputs said ~10
+    from slap2_f0.io import TrialFile
+    from slap2_f0.simulate import Template, draw, window
+    T, R, C = raw["n_frames"], *bad.shape
+    with TrialFile(fn) as tf:
+        sims = {}
+        for name, s in (("sanitized", st), ("raw", raw)):
+            tp = Template(tf, s)
+            rng = np.random.default_rng(5)
+            sims[name] = window(tp, draw(tp, SimConfig(), rng), 0, int(T), 0, R, 0, C, rng)
+    assert sims["raw"]["activity"][:, 2, 2].max() > 100  # what the simulator did before
+    assert sims["sanitized"]["activity"][:, bad].max() == 0
+    assert sims["sanitized"]["activity"][:, ~bad].max() > 0  # the other sources keep theirs
+    assert np.nanmax(sims["sanitized"]["movie"][:, bad]) < 10 * np.nanmax(raw["mean_movie"])
+    # real windows with the residual as input (subtract_frac) show the movie there, not the residual
+    sub = WindowDataset([fn], cfg, stats, length=3, seed=0, flip="none", sim_frac=0.0, subtract_frac=1.0)
+    for i in range(3):  # each window holds the whole trial, artifact included
+        b = sub[i]
+        assert float(b["target"].min() * b["scale"]) < -100  # the residual there is hugely negative
+        assert np.nanmin(b["movie"].numpy()) > -50  # the input is not
 
 
 def test_real_windows_drop_trial_edges(tmp_path):

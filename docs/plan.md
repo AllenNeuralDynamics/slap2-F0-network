@@ -1633,7 +1633,13 @@ Paired differences of the late means, in percentage points of the reference's MS
   - It happens at every checkpoint, including fine-tuning step 0, which holds the pretrained weights.
   - On the pretraining evaluations' code (1034c10), those windows held GIAnT fit artifacts like 803121's: there the mean image's error was 3.4×10⁹.
   - With the artifact mask (093f9ee), the target is normal but the network's output is not, so some network input still carries the artifact.
-  - Not yet diagnosed. 804730 is left out of the simulated scores below.
+  - **Diagnosed and fixed (same day).** 804730 path 2 has a GIAnT fit artifact like 803121's: about 10×10 pixels near row 284, column 950 carry fitted activity up to 3×10⁵ counts, on a movie of about 13 (trial 33: above 1000 counts in 1388 of 1497 frames).
+    - 093f9ee's mask flags them and cleans the trial statistics, so the simulated mean image and variance map say these pixels are dim.
+    - But the simulator copied each frame's activity from the trial file unmasked, so the simulated movie carried the artifact, and the network extrapolated from it.
+    - Now no activity is simulated at flagged pixels, and real windows with the residual as input (`subtract_frac`, unused in the current recipe) show the movie there instead.
+    - Reproduced locally from the four trials involved: the network's error on these windows drops from 160–18,000× the mean image's to 0.5–1.3× (S0 step 1500).
+    - Four pixels next to the cluster in trial 38 still spike to 1890 counts. Their mean and RMS activity are within the rule's bounds, so catching them would need a per-frame statistic.
+  - 804730 is left out of the simulated scores below; these evaluations ran before the fix.
   - The test mice's windows are identical on both code versions.
 
 **Experiment 2: selection.**

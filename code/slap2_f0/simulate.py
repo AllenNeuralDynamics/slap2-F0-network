@@ -417,6 +417,8 @@ class Template:
         self.zc = zero_count_scale(st, tf.valid)  # None without zero_movie (older stats)
         at = st.get("act_trace")
         self.act_trace = np.asarray(at, np.float64) if at is not None and np.size(at) == self.T else None
+        unfit = st.get("unfit")  # GIAnT fit artifacts (stats.sanitize): their per-frame activity is not used
+        self.unfit = np.asarray(unfit, bool) if unfit is not None and np.any(unfit) else None
         self._pz = {}
 
     def pz_kernels(self, excess: float = 1.0):
@@ -778,6 +780,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     amask = r["act_mask"][xs:xe, ys:ye] if "act_mask" in r else np.float32(1.0)  # 0 in silent regions
     act *= r["amp"] * amask
     act[:, ~valid_x] = 0
+    if tp.unfit is not None:  # as in the sanitized stats: no activity at GIAnT's fit artifacts
+        act[:, tp.unfit[xs:xe, ys:ye]] = 0  # (on 804730 path 2 up to 3e5 counts on a movie of ~13)
     fill = None
     if moving:  # the sample moves (or changes focus), the scan does not
         fill = _fill_nearest(valid_x)

@@ -187,7 +187,9 @@ class WindowDataset(Dataset):
                 var_map = np.where(np.isfinite(mean_image), _crop(st["var_movie"], r0, ns, c0, ns), np.nan)
                 mean_act = np.where(np.isfinite(mean_image), _crop(st["mean_act"], r0, ns, c0, ns), np.nan)
                 if use_sub:  # the residual as input, with its own whole-trial maps; no events left to see
-                    movie = target
+                    unf = st.get("unfit")  # GIAnT fit artifacts: the movie there (their residual is hugely negative)
+                    movie = target if unf is None else np.where(_crop(unf.astype(np.float32), r0, ns, c0, ns, 0.0)[None] > 0.5,
+                                                                p.movie, target)
                     inside = np.isfinite(mean_image)
                     mean_image = np.where(inside, _crop(st["mean_res"], r0, ns, c0, ns), np.nan)
                     var_map = np.where(inside, _crop(st["var_res"], r0, ns, c0, ns), np.nan)
