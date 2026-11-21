@@ -1565,3 +1565,116 @@ Checks:
 
 **No retraining for this.** The next training run with `--photon_zeros` gets the new noise, in training and in its validation simulations. Runs compared like for like with S0–S3 (seed repeats) should pass `--pz_legacy`. The fastpz and motionpz evaluation kinds also change, and `--pz_legacy` re-scores them as before.
 
+## Experiments 1 and 2: held-out evaluation results (2026-11-21)
+
+**Runs.** All six evaluation runs finished: 7.3 h per fine-tuning run, 6.1 h per pretraining run. Each scored every kept checkpoint of S0–S3 on 192 windows per held-out mouse and kind.
+
+**Scores** (`tools/heldout_eval.py exp1|exp2 RESULTS_DIR`):
+- Each score is the 8-frame MSE as a % change against a reference, summed per mouse and pixel class. "Balanced" averages support and background, then mice.
+- References:
+  - real windows: the mean image (as in checkpoint selection) and SiLo;
+  - simulations: the oracle, the window's true mean baseline. It is static, so "vs oracle" is the excess error over a perfect constant baseline.
+- Intervals are 95%:
+  - "mice": a hierarchical bootstrap, resampling mice and then windows within each mouse;
+  - "windows": windows only, with these mice fixed.
+- Differences between runs are paired on the same windows.
+- Checkpoints:
+  - "picked": the one training's validation chose (S0 step 1500; S1–S3 step 1700);
+  - "late": the mean of the five checkpoints at steps 750–1700.
+
+**Experiment 1, test mice** (776270, 810196, 829704, 876767). Balanced % change, with the mouse-level interval for S0 and S3:
+
+| | S0 | S1 | S2 | S3 |
+|---|---|---|---|---|
+| training data | 3 mice, 180 s per path | 3 mice, 15 min | 9 mice, 5 min | 9 mice, 15 min |
+| real vs mean image, picked | −3.2 [−4.0, −2.5] | −3.1 | −3.3 | −3.4 [−4.2, −2.6] |
+| real: support / background | −5.9 / −0.4 | −5.8 / −0.4 | −6.1 / −0.5 | −6.3 / −0.5 |
+| real vs SiLo, picked | −1.8 | −1.8 | −2.0 | −2.1 |
+| sim vs oracle, late | +63 | +62 | +56 | +56 |
+| fast vs oracle, late | +38 [+15, +59] | +37 | +32 | +31 [+15, +48] |
+| activity-free vs mean image (the true mean there), late | −16 | −19 | −22 | −20 |
+| leak at simulated support (mean image: 0.44) | 0.28 | 0.27 | 0.26 | 0.26 |
+
+Paired differences of the late means, in percentage points of the reference's MSE (negative: the first run is better). Interval over mice, then over windows:
+
+| | real vs mean image | fast vs oracle |
+|---|---|---|
+| S1 − S0 (amount, same mice) | −0.0 [−0.1, +0.1] | −1.0 [−5.2, +2.6]; [−2.1, +0.3] |
+| S2 − S1 (diversity, same amount) | −0.2 [−0.4, +0.1]; [−0.2, −0.1] | −5.9 [−17.1, +4.8]; [−8.0, −4.2] |
+| S3 − S0 | −0.2 [−0.5, +0.1]; [−0.3, −0.2] | −7.1 [−17.6, +3.0]; [−9.1, −5.7] |
+| S3 − S2 (amount, 9 mice) | −0.1 [−0.1, −0.0] | −0.2 [−2.5, +2.1]; [−0.8, +0.3] |
+
+- **More mice help; more time per mouse does not.**
+  - S2 and S3 beat S0 and S1 on every readout:
+    - on fast simulations from the test mice by 6–7 points, a sixth to a fifth of the network's excess error over the oracle;
+    - on the other simulations by 6–8 points;
+    - on real windows by 0.2 points (0.4 over all 8 held-out mice).
+  - S1 (3× S0's data, from the same mice) is no better than S0, and S3 is no better than S2.
+- **Significance.**
+  - Over windows, the S2 and S3 gains are clear.
+  - Over mice, with 4 test mice, every interval crosses 0.
+  - Over all 8 held-out mice, every subset of 3 or more gives the same sign (see Resolution below).
+- **Real windows hardly separate checkpoints.**
+  - The network is 3.1–3.4% better than the mean image (about 6% at support, 0.5% in background) and 2% better than SiLo.
+  - All 32 fine-tuning checkpoints lie within 0.6 points.
+  - The real target is the 8-frame mean of movie − activity, so most of its error is noise that no baseline removes.
+- **Fine-tuning costs simulation accuracy.**
+  - On fast simulations, fine-tuning's step 0 (the pretraining pick) scores +24 to +33% against the oracle; the late fine-tuning checkpoints score +31 to +38%.
+  - In exchange, real windows improve by 0.1–0.3 points.
+- **Checkpoint noise.**
+  - Within a run, fast vs oracle moves 3–5 points (SD) between fine-tuning checkpoints, about the size of the S2/S3 gain, so single checkpoints compare poorly.
+  - The seed repeats were not run, so the run-to-run spread is unknown.
+- **Activity-free labeled pixels.** In two test mice (776270, 876767) and validation mouse 878030, without activity the network sets the baseline too low at labeled pixels outside the support:
+  - its bias there is +0.15 to +0.28 (target − net, scaled units);
+  - its MSE is 1.1–2.1× the mean image's at the picked checkpoints, and 8–9× at S0 step 500;
+  - it expects activity wherever pixels are labeled. In the other mice the MSE is 0.4–0.9× the mean image's.
+- **804730's simulations break the network.**
+  - One simulated window per kind (sim window 36; fast windows 138, plus 135 and 68) gives errors up to 6×10⁵ times the mean image's, and dominates 804730's simulated scores.
+  - It happens at every checkpoint, including fine-tuning step 0, which holds the pretrained weights.
+  - On the pretraining evaluations' code (1034c10), those windows held GIAnT fit artifacts like 803121's: there the mean image's error was 3.4×10⁹.
+  - With the artifact mask (093f9ee), the target is normal but the network's output is not, so some network input still carries the artifact.
+  - Not yet diagnosed. 804730 is left out of the simulated scores below.
+  - The test mice's windows are identical on both code versions.
+
+**Experiment 2: selection.**
+- Regret is the test score of the checkpoint that the validation mice pick, minus the best checkpoint's, in percentage points.
+- It is averaged over every subset of k validation mice and, for 48 windows, over the four disjoint 48-window blocks.
+- Fine-tuning is selected on real windows (balanced vs mean image; 878030, 794237, 834788, 804730).
+- Pretraining is selected on fast windows (balanced vs mean image; without 804730).
+
+Each cell gives 48 / 192 windows per mouse:
+
+| pool | test readout | random pick | 1 mouse | 2 mice | 3 mice | 4 mice |
+|---|---|---|---|---|---|---|
+| fine-tuning, all 32 checkpoints | real vs mean image | 0.30 | 0.12 / 0.08 | 0.01 / 0.01 | 0.00 / 0.00 | 0.00 / 0.00 |
+| | fast vs oracle | 9.1 | 7.4 / 7.0 | 4.0 / 3.9 | 3.5 / 3.3 | 3.3 / 3.3 |
+| pretraining, all 52 checkpoints | fast vs mean image | 4.9 | 5.0 / 5.7 | 0.6 / 0.4 | 0.5 / 0.5 | |
+| | fast vs oracle | 15.9 | 15.3 / 17.2 | 3.9 / 3.3 | 4.5 / 4.5 | |
+
+- **Mice limit selection, windows do not.**
+  - 48 and 192 windows per mouse pick about equally well.
+  - One mouse is little better than a random pick, and in pretraining no better.
+  - Two or three mice remove most of the regret on the readout that is scored.
+  - Within one run (8 or 13 checkpoints that differ little), 3 mice leave anywhere from 0 to 100% of a random pick's regret.
+- **Selecting on real windows does not select for simulation accuracy.** Within runs, the rank correlation between the validation mice's real score and the test mice's fast-vs-oracle score is −0.05 to +0.50. Between real scores it is +0.64 to +0.93.
+- **balanced_free picks worse than chance.**
+  - It is training's fine-tuning score, which adds activity-free labeled pixels.
+  - In S0, S1 and S3 it picks worse than a random checkpoint on the test mice's real score.
+  - Its labeled-pixel term follows the bias above, not real accuracy.
+- **Resolution** (late means, all held-out mice; fast without 804730):
+
+  | | real vs mean image | fast vs oracle | same sign across mouse subsets |
+  |---|---|---|---|
+  | S3 − S0 | −0.42 | −8.6 | every subset of 3+ mice; 95–96% of pairs; 71–88% of single mice |
+  | S2 − S1 | −0.34 | −7.1 | 94–100% of subsets of 3+ mice; 86–96% of pairs; 71–75% of single mice |
+  | S1 − S0 | −0.02 | −1.0 | not even across subsets of 4 mice |
+  | S3 − S2 | −0.06 | −0.45 | not even across subsets of 4 mice |
+
+**Against the plan's decision rules:**
+- **Diversity: met.** S2 beats S1 by about as much as S3 beats S0. So phase 2 should first take one or two sessions from every available mouse, and 5 min per path is enough (S2 = S3).
+- **Phase 2: open.** S3 beats S0 by more than the spread between checkpoints, and consistently across mice. The seed-to-seed spread, which the rule names, is unmeasured.
+- **S3-long: not run.** At 3000 + 1700 steps the extra time per mouse adds nothing. S3-long would test whether more steps make it useful.
+- **Selection: change it.**
+  - Use 3–4 validation mice with 48 windows each.
+  - Drop the labeled-pixel term from the fine-tuning score.
+  - Since real windows barely separate checkpoints, weigh simulated windows from the validation mice into fine-tuning selection too.
