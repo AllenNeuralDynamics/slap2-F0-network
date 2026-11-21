@@ -1427,6 +1427,19 @@ On Code Ocean, 794237 (15 min, 2 paths, 64 trials) re-exported with the new code
 
 **S1 ran out of memory; S1 relaunched, S2 and S3 launched (ed47628).** The relaunched S1 was killed after 1.3 h with exit code 137 while S0 kept running. Each of the 12 training workers kept every trial and simulation template it had opened, about 8 MB per trial: S1 has 253 training trials, S0 about 40. On top of that, each of the 5 validation sets kept 12 persistent workers. Steps slowed from about 140 s to 500 s per 50 before the kill. Each worker now keeps at most 32 trials open, least recently used first out (the windows are unchanged), and validation workers stop after each validation. S2 (all 9 training mice, first 300 s per path) and S3 (9 mice, 15 min) use the same recipe and validation mice as S0 and S1.
 
+**S2 and S3 crashed at start on one-channel trials (c91b440).** 803496 and 804730 store `mean_image` without the channel axis, so every reader got its first row; the export-time stats of those two sessions covered only the columns valid in that row. Readers now handle both layouts, those stats are recomputed at training time, and the exporter keeps the channel axis.
+
+**S0–S3 finished (2026-11-21).** All ran the full 3000 + 1700 steps (exit code 0, 4.3–5.2 h). Best validation scores (the 3 validation mice, which also pick the checkpoint, so not a fair comparison):
+
+| run | pretraining fast_balanced (step) | fine-tuning real_balanced_free (step) |
+|---|---|---|
+| S0 | 0.557 (2500) | 0.815 (1500) |
+| S1 | 0.545 (2000) | 0.817 (1700) |
+| S2 | 0.530 (3000) | 0.807 (1700) |
+| S3 | 0.534 (2500) | 0.810 (1700) |
+
+More mice help on the simulations (0.53 vs 0.55–0.56). The fine-tuned differences (0.01) are within the checkpoint-to-checkpoint noise, so the held-out evaluation decides. S2 and S3 each had one loss spike between steps 2850 and 2900 (running mean 77 and 99 against about 0.015; gradients are clipped at 1, and validation at 3000 was unaffected): one simulated window from a new mouse, not yet identified.
+
 ## v10 results (2026-11-19)
 
 All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
