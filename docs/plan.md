@@ -1698,7 +1698,7 @@ Each cell gives 48 / 192 windows per mouse:
 - **Excluded:**
   - held-out mice (validation and test): their sessions stay out of training;
   - 890920, and mice 880917, 880918 and 890921: integration scans or indicator testing.
-- After phase 2: 18 training mice, 41 training sessions with phase 1.
+- After phase 2: 18 training mice and 32 training sessions, counting phase 1's 9.
 
 **Settings:**
 - Same as phase 1: the data capsule at c91b440 (no export code has changed since); GIAnT pinned to 9695d27, phase 1's commit and still GIAnT's main; compensated registration; WMF seeding with `wmfPeakth` 3; trial stats stored with each trial.
