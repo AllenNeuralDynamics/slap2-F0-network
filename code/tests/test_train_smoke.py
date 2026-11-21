@@ -296,6 +296,36 @@ def test_edge_windows(tmp_path):
         assert first <= 5 or last >= T - 6, (first, last)
 
 
+def test_open_trial_cache_is_bounded(tmp_path):
+    """A worker keeps at most max_open trials (and their templates) open,
+    closes the ones it drops, and draws the same windows as without a limit."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.simulate import SimConfig
+    from slap2_f0.stats import load_stats
+
+    fns = []
+    for k in range(4):
+        d = tmp_path / "data" / f"sess{k}" / "Path1"
+        d.mkdir(parents=True)
+        fns.append(d / "trial_000.h5")
+        _trial(fns[-1], f"sess{k}", k)
+    stats = load_stats(fns, tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=40, out_px=10, t_reach=0, s_reach=0)
+    for sim in (None, SimConfig()):
+        lim = WindowDataset(fns, cfg, stats, length=40, seed=5, sim=sim, flip="none", max_open=2)
+        unl = WindowDataset(fns, cfg, stats, length=40, seed=5, sim=sim, flip="none", max_open=0)
+        handles = {}
+        for i in range(40):
+            a, b = lim[i], unl[i]
+            for k in a:
+                assert np.array_equal(a[k].numpy(), b[k].numpy(), equal_nan=True), k
+            assert len(lim._open) <= 2 and set(lim._tpl) <= set(lim._open)
+            handles.update({fn: tf._f for fn, tf in lim._open.items()})
+        assert len(unl._open) == 4
+        closed = [fn for fn, f in handles.items() if fn not in lim._open]
+        assert closed and all(not handles[fn].id.valid for fn in closed)
+
+
 def test_train_with_motion_simulation_and_features(tmp_path):
     """Simulated residual motion, focus and local motion in training, the motion
     validation set and evaluation kind, and the motion features: it trains,

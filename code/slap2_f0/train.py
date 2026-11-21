@@ -591,12 +591,15 @@ def train(args) -> None:
 
     sim = sim_config(args) if args.data in ("sim", "mix") else None
     frac = args.sim_frac if args.data == "mix" else 1.0
-    kw = dict(num_workers=args.workers, persistent_workers=args.workers > 0, pin_memory=device.type == "cuda")
+    # validation loaders start their workers at each validation and stop them
+    # after it: kept alive, the 5 sets' workers (12 each) held memory for the
+    # whole run on top of the training workers'
+    kw = dict(num_workers=args.workers, pin_memory=device.type == "cuda")
     mk = lambda fl, n, seed, s, fr=1.0: DataLoader(  # noqa: E731
         WindowDataset(fl, wcfg_train if seed == args.seed else wcfg, stats, length=n, seed=seed, sim=s,
                       flip=("none" if args.no_flip else args.flip) if seed == args.seed else "none",
                       sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
-        batch_size=args.batch, **kw)
+        batch_size=args.batch, persistent_workers=False, **kw)
     dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
     evals = {}
     if val_files:

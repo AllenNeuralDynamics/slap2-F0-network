@@ -58,6 +58,7 @@ rotations: the image is not the same rotated (``model.ModelConfig.hp_shared``).
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -93,11 +94,18 @@ def _crop(a: np.ndarray, r0: int, nr: int, c0: int, nc: int, fill=np.nan) -> np.
 
 
 class WindowDataset(Dataset):
-    """Each item is a random window from a random trial (real or simulated)."""
+    """Each item is a random window from a random trial (real or simulated).
+
+    Each worker keeps at most ``max_open`` trials open, with their simulation
+    templates (about 8 MB per trial of a 15 min export), least recently used
+    first out; 0 = no limit. Unbounded, 12 workers drawing from S1's 253
+    trials ran the 64 GB machine out of memory (exit code 137); reopening a
+    trial and rebuilding its template takes about 0.1 s.
+    """
 
     def __init__(self, files, cfg: WindowConfig, stats: dict, length: int = 10000, seed: int = 0,
                  sim: SimConfig | None = None, flip: str | bool = "rows", sim_frac: float = 1.0,
-                 subtract_frac: float = 0.0):
+                 subtract_frac: float = 0.0, max_open: int = 32):
         self.files = [str(f) for f in files]
         self.cfg = cfg
         self.stats = {str(k): v for k, v in stats.items()}
@@ -109,16 +117,24 @@ class WindowDataset(Dataset):
             raise ValueError(f"flip must be rows, both or none, not {flip!r}")
         self.sim_frac = sim_frac
         self.subtract_frac = subtract_frac
-        self._open: dict[str, TrialFile] = {}
+        self.max_open = max_open
+        self._open: OrderedDict[str, TrialFile] = OrderedDict()
         self._tpl: dict[str, Template] = {}
 
     def __len__(self) -> int:
         return self.length
 
     def _trial(self, fn: str) -> TrialFile:
-        if fn not in self._open:
-            self._open[fn] = TrialFile(fn)
-        return self._open[fn]
+        tf = self._open.get(fn)
+        if tf is not None:
+            self._open.move_to_end(fn)
+            return tf
+        tf = self._open[fn] = TrialFile(fn)
+        while self.max_open > 0 and len(self._open) > self.max_open:
+            old, otf = self._open.popitem(last=False)
+            self._tpl.pop(old, None)  # a template refers to its trial
+            otf.close()
+        return tf
 
     def _template(self, fn: str) -> Template:
         if fn not in self._tpl:
