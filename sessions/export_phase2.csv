@@ -1,0 +1,24 @@
+prefix,subject_id,role,cap_s_per_path,recording_s,export_path_s,acquisition_style,red,note
+787725_2025-02-26_13-55-24,787725,train,900,1237,1800,triggered,jRGECO1a,new mouse
+796630_2025-04-22_09-47-56,796630,train,900,1444,1800,triggered,RCaMP3,new mouse
+796630_2025-09-26_10-48-22,796630,train,900,3874,1800,triggered,RCaMP3,new mouse
+801381_2025-05-29_15-41-38,801381,train,900,3349,1800,"continuous,",RCaMP3,new mouse
+801381_2025-09-26_14-17-56,801381,train,900,3876,1800,triggered,RCaMP3,new mouse
+804733_2025-07-25_15-17-00,804733,train,900,1740,1800,continuous,None,new mouse
+804733_2025-07-31_13-29-01,804733,train,900,1740,1800,continuous,None,new mouse
+828409_2025-11-11_14-41-13,828409,train,900,4597,1800,triggered,RCaMP3,new mouse
+828409_2025-11-20_10-01-34,828409,train,900,4344,1800,triggered,RCaMP3,new mouse
+838410_2026-03-02_12-40-55,838410,train,900,1800,1800,continuous,RCaMP3,new mouse
+838410_2026-03-18_16-43-23,838410,train,900,1800,1800,continuous,RCaMP3,new mouse
+878029_2026-08-20_17-16-26,878029,train,900,3874,1800,continuous,RCaMP3,new mouse
+878029_2026-08-25_13-07-15,878029,train,900,3874,1800,continuous,RCaMP3,new mouse
+885234_2026-10-02_10-17-48,885234,train,900,4510,1800,continuous,RCaMP3,new mouse
+885235_2026-09-24_13-35-16,885235,train,900,4465,1800,continuous,RCaMP3,new mouse
+780125_2025-03-18_13-06-48,780125,train,900,1439,1800,triggered,jRGECO1a,second session of a phase-1 training mouse
+803121_2025-11-05_11-16-57,803121,train,900,1740,1800,continuous,RCaMP3,second session of a phase-1 training mouse
+776266_2025-01-09_13-15-00,776266,train,900,1238,1800,triggered,jRGECO1a,second session of a phase-1 training mouse
+828408_2025-11-19_14-19-09,828408,train,900,4346,1800,triggered,RCaMP3,second session of a phase-1 training mouse
+803496_2025-07-31_09-43-28,803496,train,900,1740,1800,continuous,None,second session of a phase-1 training mouse
+809047_2025-11-05_10-13-00,809047,train,900,1740,1800,continuous,RCaMP3,second session of a phase-1 training mouse
+826033_2026-02-26_12-40-54,826033,train,900,1800,1800,continuous,RCaMP3,second session of a phase-1 training mouse
+867430_2026-06-30_14-35-25,867430,train,900,3874,1800,continuous,RCaMP3,second session of a phase-1 training mouse

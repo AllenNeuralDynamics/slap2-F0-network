@@ -1684,3 +1684,27 @@ Each cell gives 48 / 192 windows per mouse:
   - Use 3–4 validation mice with 48 windows each.
   - Drop the labeled-pixel term from the fine-tuning score.
   - Since real windows barely separate checkpoints, weigh simulated windows from the validation mice into fine-tuning selection too.
+
+## Export phase 2: launched (2026-11-21)
+
+**The user's call:** go straight to phase 2, organised by mice, after fixing 804730. Experiment 1 says more mice help and more minutes per mouse do not. Phase 2 therefore takes one or two sessions from every training-pool mouse, at 15 min per session as decided on 2026-11-20 (training can cap shorter with `--max_train_s`).
+
+**Sessions** (`sessions/export_phase2.csv`, 23 sessions, all training):
+- **New mice (15 sessions).** The 9 mice that phase 1 left out: 787725, 796630, 801381, 804733, 828409, 838410, 878029, 885234, 885235.
+  - Two sessions each, chosen far apart in time.
+  - Only one session exists for 787725, 885234 and 885235.
+  - 801381's two include its one continuous recording.
+- **Second sessions (8).** One more session, on another day, for each phase-1 training mouse except 885233, which has only one session.
+- **Excluded:**
+  - held-out mice (validation and test): their sessions stay out of training;
+  - 890920, and mice 880917, 880918 and 890921: integration scans or indicator testing.
+- After phase 2: 18 training mice, 41 training sessions with phase 1.
+
+**Settings:**
+- Same as phase 1: the data capsule at c91b440 (no export code has changed since); GIAnT pinned to 9695d27, phase 1's commit and still GIAnT's main; compensated registration; WMF seeding with `wmfPeakth` 3; trial stats stored with each trial.
+- `--n_workers` 6 for 828408 and 828409 (828408 ran out of memory in phase 1 with 10), and 12 for the rest.
+- Started 14:51–14:54, one Code Ocean computation per session. Each finished export becomes a data asset with mount `f0p2_<session>`.
+
+**Before the next training:**
+- Merge main into the GPU capsule. It needs 8bc88b6 (no simulated activity at GIAnT fit artifacts) and 82860cb (realistic low counts).
+- Change selection as Experiment 2 suggests: 3–4 validation mice at 48 windows each, no labeled-pixel term, simulated windows in fine-tuning selection.
