@@ -551,7 +551,7 @@ def train(args) -> None:
         raise SystemExit("window_reach must not exceed the temporal reach + 1 (the window would run out)")
     wcfg = WindowConfig(out_frames=args.out_frames, out_px=args.out_px,
                         t_reach=mcfg.gap + 1 + mcfg.temporal_reach, s_reach=mcfg.spatial_reach,
-                        w_unfitted=args.w_unfitted)
+                        w_unfitted=args.w_unfitted, real_edge_s=args.real_edge_s)
     # event masking only in training windows, so validation metrics stay comparable across runs
     wcfg_train = replace(wcfg, event_mask=args.event_mask, event_margin=args.event_margin,
                          sim_event_weight=args.sim_event_weight, edge_frac=args.edge_frac)
@@ -742,7 +742,9 @@ def evaluate_checkpoints(args) -> None:
         ck = torch.load(path, map_location=device, weights_only=False)
         model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device)
         model.load_state_dict(ck["model"])
-        wcfg = WindowConfig(**ck["window"])
+        wcfg = WindowConfig(**ck["window"])  # checkpoints from before real_edge_s get its default (2 s)
+        if args.real_edge_s is not None:
+            wcfg = replace(wcfg, real_edge_s=args.real_edge_s)
         region = loss_region(wcfg)
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
         for sess in sorted(groups):
@@ -825,6 +827,9 @@ def add_eval_arguments(p) -> None:
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
                         "shared brightness changes), motion (fast plus residual motion, focus and local motion)")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
+    p.add_argument("--real_edge_s", type=float, default=None,
+                   help="real windows: no loss within this many seconds of a trial edge (default: the checkpoint's, "
+                        "2 s for checkpoints from before the option; 0 = keep the edges)")
     p.add_argument("--per_window", action="store_true",
                    help="also write windows.csv: each window's 8-frame squared errors at support and background "
                         "pixels (for bootstrap intervals over windows and sessions)")
@@ -944,6 +949,9 @@ def add_arguments(p) -> None:
                    help="real training windows: no loss where GIAnT activity exceeds this times its RMS over the trial, "
                         "and --event_margin frames around (the target there holds unfitted activity; 0 = off)")
     p.add_argument("--event_margin", type=int, default=8)
+    p.add_argument("--real_edge_s", type=float, default=2.0,
+                   help="real windows: no loss within this many seconds of a trial's first or last frame, where "
+                        "GIAnT's baseline (so the target) is biased; also in validation (0 = keep the edges)")
     p.add_argument("--edge_frac", type=float, default=0.0,
                    help="share of training windows whose loss region starts or ends at a trial edge (the baseline "
                         "is biased in the first and last ~0.5 s otherwise)")

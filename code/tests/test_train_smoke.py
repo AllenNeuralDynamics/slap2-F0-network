@@ -34,6 +34,7 @@ def _trial(fn, label, seed, T=160, R=20, C=24, sources=True):
         f["frame/discard"] = np.zeros(T, np.uint8)
         f.attrs["label"] = label
         f.attrs["nSources"] = int(sources)
+        f.attrs["alignHz"] = 20.0  # real windows drop real_edge_s (2 s) = 40 frames at each trial edge
 
 
 @pytest.mark.parametrize("data", ["sim", "real"])
@@ -287,7 +288,8 @@ def test_edge_windows(tmp_path):
     with h5py.File(fn, "a") as f:  # the movie holds its frame number, so a window shows which frames it covers
         f["movie"][...] = np.broadcast_to(np.arange(T, dtype=np.float32)[None, :, None, None] + 1.0, f["movie"].shape)
     stats = load_stats([fn], tmp_path / "stats", workers=0)
-    cfg = WindowConfig(out_frames=40, out_px=10, t_reach=0, s_reach=0, edge_frac=1.0, edge_frames=5)
+    cfg = WindowConfig(out_frames=40, out_px=10, t_reach=0, s_reach=0, edge_frac=1.0, edge_frames=5,
+                       real_edge_s=0)  # real windows keep their edges, so they are placed there too
     ds = WindowDataset([fn], cfg, stats, length=60, seed=3, flip="none")
     for i in range(60):
         m = ds[i]["movie"].numpy()
@@ -395,6 +397,41 @@ def test_activity_fit_artifacts_are_left_out(tmp_path):
         r, c = np.nonzero(lost)
         assert lost.sum() == 9 and np.ptp(r) == 2 and np.ptp(c) == 2  # the 3 x 3 block, nothing else
         assert ((w > 0) == (w_raw > 0))[:, ~lost].all()
+
+
+def test_real_windows_drop_trial_edges(tmp_path):
+    """Real windows weigh 0 within real_edge_s of a trial's first or last frame
+    (GIAnT's baseline is biased there) and are not placed at trial edges;
+    simulated windows keep both."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.simulate import SimConfig
+    from slap2_f0.stats import load_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    T = 400
+    _trial(fn, "sessA", 0, T=T)  # alignHz 20: the 2 s edges are 40 frames
+    with h5py.File(fn, "a") as f:  # the movie holds its frame number
+        f["movie"][...] = np.broadcast_to(np.arange(T, dtype=np.float32)[None, :, None, None] + 1.0, f["movie"].shape)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    cfg = WindowConfig(out_frames=60, out_px=10, t_reach=0, s_reach=0, edge_frac=1.0, edge_frames=5)
+    real = WindowDataset([fn], cfg, stats, length=40, seed=3, flip="none")
+    near_edge = 0
+    for i in range(40):
+        b = real[i]
+        m = b["movie"].numpy()
+        fr = np.nanmax(m.reshape(m.shape[0], -1), 1) - 1  # trial frame of each window frame (NaN outside)
+        wf = b["weight"].numpy().reshape(m.shape[0], -1).max(1)  # does the frame carry any loss weight?
+        inside = np.isfinite(fr)
+        edge = inside & ((fr < 40) | (fr >= T - 40))
+        assert (wf[edge] == 0).all() and (wf[inside & ~edge] > 0).all()
+        near_edge += np.nanmin(fr) <= 5 or np.nanmax(fr) >= T - 6
+    assert near_edge < 20  # placed anywhere, not at the edges (with edge_frac 1, every window would be)
+    sim = WindowDataset([fn], cfg, stats, length=20, seed=3, sim=SimConfig(), flip="none")
+    for i in range(20):  # simulated windows sit at an edge (at most 5 frames outside the trial), edges weighted
+        wf = sim[i]["weight"].numpy().reshape(60, -1).max(1)
+        assert (wf > 0).sum() >= 55
 
 
 def test_train_with_motion_simulation_and_features(tmp_path):

@@ -12,7 +12,9 @@ support pixels and unlabeled (off-dendrite) pixels weight 1; labeled pixels
 outside every footprint weight ``w_unfitted`` (default 0), because their
 residual still holds activity GIAnT did not fit. In a trial without sources
 (``nSources`` 0, e.g. a GFP control without an activity sensor) the activity
-is known to be zero, so every valid pixel weighs 1. With ``event_mask`` > 0,
+is known to be zero, so every valid pixel weighs 1. Frames within ``real_edge_s``
+(2 s) of a trial's first or last frame weigh 0: GIAnT's baseline is biased there, and
+with it the activity and the target. With ``event_mask`` > 0,
 voxels where GIAnT's activity exceeds event_mask times the pixel's activity
 RMS over the trial, and ``event_margin`` frames around them, weigh 0: there
 the target still holds the part of the events GIAnT did not fit (up to ~20%),
@@ -82,6 +84,9 @@ class WindowConfig:
     sim_event_weight: float = 1.0  # simulated windows: loss weight during events (1 = as elsewhere)
     edge_frac: float = 0.0  # share of windows whose loss region starts or ends at a trial edge (+-edge_frames)
     edge_frames: int = 64
+    # real windows: no loss within real_edge_s of a trial's first or last frame, where GIAnT's
+    # baseline, and so the target movie - activity, is biased (0 = keep the edges)
+    real_edge_s: float = 2.0
 
 
 def _crop(a: np.ndarray, r0: int, nr: int, c0: int, nc: int, fill=np.nan) -> np.ndarray:
@@ -152,7 +157,9 @@ class WindowDataset(Dataset):
         for _ in range(50):
             fn = self.files[rng.integers(len(self.files))]
             tr, st = self._trial(fn), self.stats[fn]
-            if c.edge_frac > 0 and rng.random() < c.edge_frac:  # the first or last frames of the trial
+            # windows at the first or last frames of the trial: simulated ones (and real ones only
+            # when real windows keep their edges)
+            if c.edge_frac > 0 and (use_sim or c.real_edge_s <= 0) and rng.random() < c.edge_frac:
                 e = int(rng.integers(-c.edge_frames, c.edge_frames + 1))
                 t0 = e if rng.random() < 0.5 else tr.n_frames - c.out_frames + e
             else:
@@ -191,6 +198,10 @@ class WindowDataset(Dataset):
                 unfit = st.get("unfit")
                 if unfit is not None and unfit.any():  # GIAnT fit artifacts (stats.unfit_pixels): no loss
                     weight *= (_crop(unfit.astype(np.float32), r0, ns, c0, ns, 0.0) < 0.5).astype(np.float32)[None]
+                if c.real_edge_s > 0:  # trial edges: GIAnT's baseline is biased there
+                    e = int(round(c.real_edge_s * float(tr.attrs.get("alignHz", 80.0))))
+                    tt = t0 + np.arange(nt)  # the trial frame of each window frame
+                    weight[(tt < e) | (tt >= tr.n_frames - e)] = 0
                 if c.event_mask > 0:
                     rms = np.sqrt(np.maximum(_crop(st["mean_act2"], r0, ns, c0, ns, 0.0), 0))
                     ev = np.nan_to_num(p.activity) > c.event_mask * np.maximum(rms, 1e-6)[None]
