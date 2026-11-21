@@ -1423,6 +1423,10 @@ On Code Ocean, 794237 (15 min, 2 paths, 64 trials) re-exported with the new code
 
 **S0 and S1 crashed at their first validation (3c90dca).** Both ended after 12 min in the simulator's Poisson draw (numpy: lam value too large, i.e. NaN expected counts). 878030 Path 1 trial 27 has no noise statistics: gain, the noise correlations and the skew are NaN. The exporter's labeled mask (median-filtered mean image above 3x its 25th percentile over the canvas) covered every valid pixel in this dim trial, so the stats had no unlabeled valid pixels to work from. It is the only such trial among the 506 of S0's six sessions. Training and evaluation now leave out trials without finite noise statistics and name them. The exporter takes the percentile over the valid pixels when fewer than 5% of them would be unlabeled; normal trials are unchanged (the local 120 s export on 780125 is identical). Code Ocean marks a run "succeeded" whatever its exit code: these two exited with 1, so check `exit_code`. Both relaunched.
 
+**All 17 phase-1 exports are done (2026-11-20).** The three relaunched sessions exported 96 trials (803496), 93 (804730) and 64 (828408, with 6 workers).
+
+**S1 ran out of memory; S1 relaunched, S2 and S3 launched (ed47628).** The relaunched S1 was killed after 1.3 h with exit code 137 while S0 kept running. Each of the 12 training workers kept every trial and simulation template it had opened, about 8 MB per trial: S1 has 253 training trials, S0 about 40. On top of that, each of the 5 validation sets kept 12 persistent workers. Steps slowed from about 140 s to 500 s per 50 before the kill. Each worker now keeps at most 32 trials open, least recently used first out (the windows are unchanged), and validation workers stop after each validation. S2 (all 9 training mice, first 300 s per path) and S3 (9 mice, 15 min) use the same recipe and validation mice as S0 and S1.
+
 ## v10 results (2026-11-19)
 
 All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, and the mean-image errors of the v10a and v10b evaluations agree exactly. The sessions are 780125, 803121, 847983, 878030 and 885233. The table gives the change in 8-frame MSE against v9 fine-tuned, as the mean over sessions:
@@ -1441,3 +1445,53 @@ All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, 
 - The 3 h limit stopped both pretraining runs at 2,443 and 2,359 of 3,000 steps, because simulated motion makes windows 2.7× slower. v10a's validation never came near its start, so the missing steps are unlikely to matter.
 
 **Decision (by the rule set above): v9 fine-tuned stays the default, and Experiment 1 uses v9's recipe, with no simulated motion and no motion features.**
+
+
+## Source detection with the network baseline: queued (2026-11-20)
+
+The question: once the network supplies μ and σ, is SiLo's detection the right statistic for photon counts? SiLo computes a Z-score, applies the exponential matched filter and the difference of Gaussians (DoG), then sums the squares of local maxima. Scripts are in `tools/detection/`.
+
+**Real data** (780125, 10 trials, 112 isolated sources). Each source's signal pattern comes from regressing the movie on its own GIAnT trace, cross-fitted over alternating 200-frame blocks. Detection d′ relative to SiLo's spatial filter:
+
+| change | d′ |
+|---|---|
+| Gaussian without the DoG surround | +10% |
+| weighting by brightness (raw counts, Z, 1/σ²) | within 2% of Z |
+| template weighted by the mean image | +6% |
+| isotropic template whitened for the stationary noise correlation (0.36 to the next column, 0.22 to the next row) | 0% |
+| the source's own footprint | +22% |
+| its own footprint, whitened | +35% (stationary correlation), +45% (local covariance) |
+
+In time, the 24 ms exponential keeps 95% of the whitened matched filter's d′. So the Z weighting and the temporal filter are fine. The surround costs 10%, and the larger gains need the footprint's shape, which exists only after a first fit.
+
+**Photon noise** (simulated, baseline known):
+
+- **Gaussian thresholds:** at 0.03–1 photons per pixel and frame, the filtered statistic exceeds 4 SD 6–42× as often as Gaussian noise. 780125's median pixel gets 0.5–0.67.
+- **Sign-flip null:** the negative tail is nearly empty, so a sign-flip null does not see the excess.
+- **Today's noise model:** SiLo's Vb floor (VIF) shrinks dim pixels' Z to a variance of 0.13–0.6, which hides the problem.
+- **With the network's σ:** without that floor, dim pixels' null activity image is 1.2–1.5× higher.
+
+**Combining frames:** the sum of squared local maxima comes within 0.01–0.03 AUC of an oracle sparse-event likelihood for weak, frequent events. For rare strong events it scores 0.84 against 0.93 (0.3 Hz, 2 SD at the peak).
+
+**Queued, in order.** All three are in GIAnT's SiLo (`localizeSources_vIM`), each as an option that is off by default. Each is tested with the integration capsule on the simulations with ground truth and on the 4 sessions.
+
+1. **No DoG surround once the network baseline is in SiLo** (see "Network baselines in SiLo's localization").
+   - The surround makes up for the moving median's bias; with an unbiased blind baseline it only costs sensitivity (+10% d′ without it).
+   - Check that the activity image's 5×5 median subtraction still removes what the surround did (residual motion, shared brightness changes).
+2. **A null calibrated per pixel brightness.**
+   - Per pixel, the null distribution of the activity image comes from a parametric bootstrap. Noise movies with the trial's baseline, gain, correlations and skew (`slap2_f0.simulate` already matches these) go through the same filters.
+   - Thresholds then mean the same false-positive rate on dim and bright pixels.
+   - The bootstrap replaces the sign-flip FDR estimate (GIAnT-MATLAB#42).
+   - A cheaper partial fix above 1 photon per frame: a skew correction computed from convolutions of the baseline.
+   - Drop the VIF floor once this is in.
+3. **A soft-threshold score.** Replace the sum of squared local maxima with the sum over frames of a sparse-event log-likelihood ratio, or of max(0, u − 2)², which does not add the energy of every noise maximum.
+
+Later: a second detection pass with whitened footprint templates after GIAnT's first fit (+35–45% d′ for those templates), an extension of WMF's deblending.
+
+**Architecture ideas from the DeepInterpolation study on Neuropixels:** nothing to adopt.
+
+- **Two-branch blind spot with a centre-tap-zeroed spatial branch:** the v6 box blind spot already covers this.
+- **Showing the neighbouring frames (omission0):** this keeps their spikes, but it would leak our events into the baseline.
+- **Fold geometry, NAF blocks, L2 vs Charbonnier, spike weighting, training recipes:** probe-specific, or null or harmful in their tests.
+
+Width was their largest replicated gain, and our model has 0.31 M parameters, so a wider run is the one cheap arm. Their lessons on evaluation carry over: reconstruction loss did not rank detection, and weak units lost the most.
