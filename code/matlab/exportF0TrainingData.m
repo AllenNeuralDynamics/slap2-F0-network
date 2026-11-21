@@ -376,7 +376,8 @@ support = reshape(full(any(Hs, 2)), R, C);
 writeArr(outFn, '/mask/valid', uint8(crop(valid)'), [], o.deflate);
 writeArr(outFn, '/mask/labeled', uint8(crop(labeled)'), [], o.deflate);
 writeArr(outFn, '/mask/footprint_support', uint8(crop(support)'), [], o.deflate);
-writeArr(outFn, '/mean_image', permute(single(crop(meanAll)), [2 1 3]), [], o.deflate);
+mi = permute(single(crop(meanAll)), [2 1 3]); % size keeps the channel axis of one-channel recordings
+writeArr(outFn, '/mean_image', mi, [], o.deflate, [size(mi, 1) size(mi, 2) size(meanAll, 3)]);
 writeArr(outFn, '/frame/discard', uint8(discard(:)), [], o.deflate);
 writeArr(outFn, '/frame/motion_row', single(aData.motionDSr(:)), [], o.deflate);
 writeArr(outFn, '/frame/motion_col', single(aData.motionDSc(:)), [], o.deflate);

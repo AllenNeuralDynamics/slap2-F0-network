@@ -38,6 +38,19 @@ class Patch:
     origin: tuple[int, int, int]  # (frame, row, col) of the window's corner
 
 
+def read_mean_image(f: h5py.File, channel: int = 0) -> np.ndarray:
+    """A trial's mean image (row, col) for one channel. Exports of
+    one-channel recordings store it as (row, col), without the channel axis
+    (MATLAB drops the trailing singleton when writing), so indexing it by
+    channel would return its first row."""
+    ds = f["mean_image"]
+    if ds.ndim == 2:
+        if channel != 0:
+            raise IndexError(f"{f.filename}: one-channel mean image, no channel {channel}")
+        return ds[:]
+    return ds[channel]
+
+
 class TrialFile:
     """Lazy access to one exported trial."""
 
@@ -51,7 +64,7 @@ class TrialFile:
         self.labeled = self._f["mask/labeled"][:].astype(bool)
         self.support = self._f["mask/footprint_support"][:].astype(bool)
         self.discard = self._f["frame/discard"][:].astype(bool)
-        self.mean_image = self._f["mean_image"][channel].astype(np.float32)
+        self.mean_image = read_mean_image(self._f, channel).astype(np.float32)
         vf = self._f["varfac"]
         vf = (vf[:] if vf.ndim == 2 else np.nanmean(vf[:], axis=0)).astype(np.float32)
         # relative to its median over the imaged pixels, so the network input

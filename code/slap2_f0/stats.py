@@ -40,6 +40,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from .io import read_mean_image
+
 MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res", "var_res", "var8_res", "var64_res",
         "zero_movie", "act_trace")  # arrays (act_trace is per frame)
 SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "zero_frac", "n_frames")
@@ -51,7 +53,8 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
     block); chunks are float32 and sums float64, to bound memory."""
     with h5py.File(fn, "r") as f:
         _, T, R, C = f["movie"].shape
-        mi = f["mean_image"][channel]
+        mi = read_mean_image(f, channel)
+        mi_axes = f["mean_image"].ndim
         valid = f["mask/valid"][:].astype(bool) & np.isfinite(mi)
         bg = valid & ~f["mask/labeled"][:].astype(bool)
         support = valid & f["mask/footprint_support"][:].astype(bool)
@@ -174,7 +177,7 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
                 act_trace=act_trace).items()}
     zf = float(nz[valid].sum() / max(n[valid].sum(), 1))
     out.update(gain=gain, rho_t1=corr_t(1), rho_t2=corr_t(2), rho_r=rho_r, rho_c=rho_c, F64=F64, skew=skew, zero_frac=zf,
-               n_frames=float(T))
+               n_frames=float(T), mean_image_axes=float(mi_axes))
     return out
 
 
@@ -196,6 +199,14 @@ def _from_npz(p: Path) -> dict:
     return {k: (d[k] if k in MAPS else float(d[k])) for k in d.files if k != "file_size"}
 
 
+def _one_channel_mean_image(fn: Path) -> bool:
+    """Whether the trial stores its mean image without a channel axis (one-
+    channel exports). Stats made before ``io.read_mean_image`` read only that
+    image's first row there, so they lack ``mean_image_axes`` and are redone."""
+    with h5py.File(fn, "r") as f:
+        return f["mean_image"].ndim == 2
+
+
 def _cached(args) -> dict:
     """Stats of one file: from its sidecar (if made for this version and file
     size), else from the cache folder, else computed (and then cached, and
@@ -204,9 +215,10 @@ def _cached(args) -> dict:
     fn = Path(fn)
     side = sidecar_path(fn)
     size = fn.stat().st_size
+    one_channel = _one_channel_mean_image(fn)
     if side.exists():
         with np.load(side) as d:
-            ok = "file_size" in d.files and int(d["file_size"]) == size
+            ok = "file_size" in d.files and int(d["file_size"]) == size and (not one_channel or "mean_image_axes" in d.files)
         if ok:
             return _from_npz(side)
     p = None
@@ -214,9 +226,10 @@ def _cached(args) -> dict:
         p = Path(cache) / f"{fn.stem}_{_key(fn)}.npz"
         if p.exists():
             s = _from_npz(p)
-            if write_sidecar:
-                np.savez(side, file_size=size, **s)
-            return s
+            if not one_channel or "mean_image_axes" in s:
+                if write_sidecar:
+                    np.savez(side, file_size=size, **s)
+                return s
     s = trial_stats(fn)
     if p is not None:
         Path(cache).mkdir(parents=True, exist_ok=True)

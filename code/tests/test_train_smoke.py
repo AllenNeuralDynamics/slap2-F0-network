@@ -326,6 +326,37 @@ def test_open_trial_cache_is_bounded(tmp_path):
         assert closed and all(not handles[fn].id.valid for fn in closed)
 
 
+def test_one_channel_mean_image(tmp_path):
+    """One-channel exports store the mean image as (row, col): it is read
+    whole, its stats cover every valid pixel, and a sidecar made before the
+    fix (first row only, no mean_image_axes) is redone."""
+    from slap2_f0.io import TrialFile
+    from slap2_f0.stats import load_stats, sidecar_path, trial_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    two, one = d / "trial_000.h5", d / "trial_001.h5"
+    _trial(two, "sessA", 0)
+    _trial(one, "sessA", 0)
+    with h5py.File(one, "a") as f:
+        mi = f["mean_image"][0]
+        mi[0, :5] = np.nan  # the first row is not all imaged, as in a cropped canvas
+        del f["mean_image"]
+        f["mean_image"] = mi
+    with TrialFile(one) as tf:
+        assert tf.mean_image.shape == (20, 24)
+    s1, s2 = trial_stats(one), trial_stats(two)
+    assert s1["mean_image_axes"] == 2 and s2["mean_image_axes"] == 3
+    assert (s1["n_valid"][1:] > 0).all()  # rows below the first are covered
+    stale = {k: v for k, v in s1.items() if k != "mean_image_axes"}
+    stale["n_valid"] = np.zeros_like(stale["n_valid"])
+    np.savez(sidecar_path(one), file_size=one.stat().st_size, **stale)
+    np.savez(sidecar_path(two), file_size=two.stat().st_size, **{k: v for k, v in s2.items() if k != "mean_image_axes"})
+    st = load_stats([one, two], None, workers=0)
+    assert st[str(one)]["mean_image_axes"] == 2 and (st[str(one)]["n_valid"][1:] > 0).all()  # redone
+    assert "mean_image_axes" not in st[str(two)]  # a two-channel trial's sidecar stays valid
+
+
 def test_train_with_motion_simulation_and_features(tmp_path):
     """Simulated residual motion, focus and local motion in training, the motion
     validation set and evaluation kind, and the motion features: it trains,

@@ -39,7 +39,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .io import list_trials
+from .io import list_trials, read_mean_image
 
 
 def _blind_mean(v: np.ndarray, n: np.ndarray, gap: int, reach: int) -> np.ndarray:
@@ -142,7 +142,7 @@ def trial_ceiling(fn: Path, gap: int = 8, reach: int = 254, channel: int = 0, si
     with h5py.File(fn, "r") as f:
         movie = f["movie"][channel].astype(np.float32)
         act = f["activity"][channel].astype(np.float32)
-        mean_image = f["mean_image"][channel].astype(np.float32)
+        mean_image = read_mean_image(f, channel).astype(np.float32)
         valid = f["mask/valid"][:].astype(bool) & np.isfinite(mean_image)
         labeled = f["mask/labeled"][:].astype(bool)
         support = f["mask/footprint_support"][:].astype(bool)
