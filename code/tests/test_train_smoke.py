@@ -357,6 +357,46 @@ def test_one_channel_mean_image(tmp_path):
     assert "mean_image_axes" not in st[str(two)]  # a two-channel trial's sidecar stays valid
 
 
+def test_activity_fit_artifacts_are_left_out(tmp_path):
+    """Pixels where GIAnT's mean activity is far above the movie (a fit
+    artifact, as on 803121 path 2) and their neighbours: no activity and no
+    excess noise in the simulator's maps, no loss weight in real windows."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.simulate import SimConfig, excess_maps, noise_kernels
+    from slap2_f0.stats import load_stats, trial_stats
+
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    fn = d / "trial_000.h5"
+    _trial(fn, "sessA", 0, T=800)  # 64-frame variances need at least 8 blocks
+    with h5py.File(fn, "a") as f:
+        a = f["activity"][...]
+        t = np.arange(a.shape[1])
+        a[0, :, 2, 2] = 600 + 900 * np.sin(2 * np.pi * t / 300)  # ~100x the movie's 5-10 counts, not in the movie
+        f["activity"][...] = a
+    raw = trial_stats(fn)
+    stats = load_stats([fn], tmp_path / "stats", workers=0)
+    st = stats[str(fn)]
+    bad = st["unfit"]
+    assert bad[2, 2] and bad[1:4, 1:4].all() and bad.sum() == 9
+    assert st["mean_act"][2, 2] == 0 and raw["mean_act"][2, 2] > 100
+    kt, valid = noise_kernels(raw)[0], raw["n_valid"] > 0
+    _, slow_unc = excess_maps(raw, kt, valid, SimConfig(slow_max_sd=np.inf))  # what S0-S3's simulator drew
+    _, slow_cap = excess_maps(raw, kt, valid)  # capped at the pixel's mean
+    _, slow = excess_maps(st, kt, valid)
+    assert slow_unc[2, 2] > 1000 and slow_cap[2, 2] <= raw["mean_movie"][2, 2] ** 2 + 1e-3
+    assert slow[1:4, 1:4].max() == 0
+    cfg = WindowConfig(out_frames=800, out_px=48, t_reach=0, s_reach=0)  # every window holds the whole 20 x 24 trial
+    ds = WindowDataset([fn], cfg, stats, length=6, seed=0, flip="none")
+    ds_raw = WindowDataset([fn], cfg, {str(fn): raw}, length=6, seed=0, flip="none")  # the same windows, raw stats
+    for i in range(6):
+        w, w_raw = ds[i]["weight"].numpy(), ds_raw[i]["weight"].numpy()
+        lost = ((w_raw > 0) & (w == 0)).any(0)
+        r, c = np.nonzero(lost)
+        assert lost.sum() == 9 and np.ptp(r) == 2 and np.ptp(c) == 2  # the 3 x 3 block, nothing else
+        assert ((w > 0) == (w_raw > 0))[:, ~lost].all()
+
+
 def test_train_with_motion_simulation_and_features(tmp_path):
     """Simulated residual motion, focus and local motion in training, the motion
     validation set and evaluation kind, and the motion features: it trains,

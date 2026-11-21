@@ -106,6 +106,7 @@ class SimConfig:
     excess: float = 1.0  # scale of the template's excess variance (0 = photon noise and the drift above only)
     n_slow: int = 6  # slow baseline processes that carry the excess's slow part
     slow_tau_s: tuple[float, float] = (1.0, 20.0)  # their time constants, log-uniform
+    slow_max_sd: float = 1.0  # cap on a pixel's slow-fluctuation SD, relative to its mean (excess_maps)
     slow_px: tuple[float, float] = (2.0, 6.0)  # spatial scale of their fields
     # activity-free regions: with probability silent_trial a virtual trial has no
     # activity at all; otherwise a fraction (uniform in silent_frac) of its valid
@@ -357,6 +358,9 @@ def excess_maps(st: dict, kt: np.ndarray, valid: np.ndarray, cfg: "SimConfig | N
     slow = (v64 - k64 * v1) / (c64 - k64)
     fast = np.where(ph > 0, (v1 - slow) / np.maximum(ph, 1e-9) - 1, 0)
     slow = np.maximum(_smooth_valid(slow, ok), 0)
+    # at most slow_max_sd x the pixel's mean: where the residual moves far more than
+    # the movie (GIAnT fit artifacts, see stats.unfit_pixels) the estimate is not a baseline
+    slow = np.minimum(slow, (cfg.slow_max_sd * np.maximum(np.nan_to_num(st["mean_movie"]), 0)) ** 2)
     fast = np.clip(_smooth_valid(fast, ok), -0.3, 3.0)
     return np.where(ok, fast, 0).astype(np.float32), np.where(ok, slow, 0).astype(np.float32)
 

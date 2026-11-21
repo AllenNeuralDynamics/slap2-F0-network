@@ -188,6 +188,9 @@ class WindowDataset(Dataset):
                 weight = np.isfinite(target).astype(np.float32)
                 w_unf = c.w_unfitted if tr.attrs.get("nSources", 1) else 1.0  # no sources: no activity
                 weight *= np.where(labeled & ~support, w_unf, 1.0).astype(np.float32)[None]
+                unfit = st.get("unfit")
+                if unfit is not None and unfit.any():  # GIAnT fit artifacts (stats.unfit_pixels): no loss
+                    weight *= (_crop(unfit.astype(np.float32), r0, ns, c0, ns, 0.0) < 0.5).astype(np.float32)[None]
                 if c.event_mask > 0:
                     rms = np.sqrt(np.maximum(_crop(st["mean_act2"], r0, ns, c0, ns, 0.0), 0))
                     ev = np.nan_to_num(p.activity) > c.event_mask * np.maximum(rms, 1e-6)[None]

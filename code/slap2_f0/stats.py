@@ -46,6 +46,12 @@ MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res
         "zero_movie", "act_trace")  # arrays (act_trace is per frame)
 SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "zero_frac", "n_frames")
 VERSION = 5  # bump when the stats change, to invalidate caches
+# GIAnT's mean fitted activity above this many times the movie's mean (at
+# least 1 count) is a fit artifact: activity cannot exceed the movie it is
+# part of. On 803121 path 2 a few dozen dim pixels carry 100-1300x, so the
+# residual there is hugely negative; the simulator turned that into baseline
+# fluctuations hundreds of times the pixel's mean (loss spikes in S0-S3).
+ACT_MAX_RATIO = 2.0
 
 
 def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 64) -> dict:
@@ -186,6 +192,41 @@ def _key(fn: Path) -> str:
     return hashlib.sha1(f"{fn.resolve()}|{st.st_size}|{int(st.st_mtime)}|v{VERSION}".encode()).hexdigest()[:16]
 
 
+def unfit_pixels(st: dict) -> np.ndarray:
+    """Pixels where GIAnT's mean activity exceeds ACT_MAX_RATIO times the
+    movie's mean (at least 1 count), with their 8 neighbours."""
+    mm = np.maximum(np.nan_to_num(st["mean_movie"]), 1.0)
+    bad = np.nan_to_num(st["mean_act"]) > ACT_MAX_RATIO * mm
+    if bad.any():
+        R, C = bad.shape
+        p = np.pad(bad, 1)
+        bad = np.zeros_like(bad)
+        for dr in range(3):
+            for dc in range(3):
+                bad |= p[dr:dr + R, dc:dc + C]
+    return bad
+
+
+def sanitize(st: dict) -> dict:
+    """The stats with GIAnT's fit artifacts (``unfit_pixels``) left out: there
+    the activity maps are 0, the residual's mean and variance are the
+    movie's, and the 8- and 64-frame residual variances NaN, so the simulator
+    puts no activity and no excess noise at those pixels. ``unfit`` marks
+    them; real windows give them no loss weight (``data.WindowDataset``).
+    The sidecars on disk keep the raw stats."""
+    bad = unfit_pixels(st)
+    out = dict(st)
+    out["unfit"] = bad
+    if bad.any():
+        out["mean_act"] = np.where(bad, 0, st["mean_act"]).astype(np.float32)
+        out["mean_act2"] = np.where(bad, 0, st["mean_act2"]).astype(np.float32)
+        out["mean_res"] = np.where(bad, st["mean_movie"], st["mean_res"]).astype(np.float32)
+        out["var_res"] = np.where(bad, st["var_movie"], st["var_res"]).astype(np.float32)
+        for k in ("var8_res", "var64_res"):
+            out[k] = np.where(bad, np.nan, st[k]).astype(np.float32)
+    return out
+
+
 def sidecar_path(fn: str | Path) -> Path:
     """Where `slap2-f0 stats` stores a trial's stats: next to it, so they travel
     with the exported data (e.g. in its Code Ocean data asset), whatever path
@@ -252,7 +293,7 @@ def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0, max
             res = list(ex.map(_cached, jobs))
     else:
         res = [_cached(j) for j in jobs]
-    return dict(zip(files, res))
+    return {f: sanitize(r) for f, r in zip(files, res)}
 
 
 def run(args) -> None:
