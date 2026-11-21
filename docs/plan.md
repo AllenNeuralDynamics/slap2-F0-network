@@ -1708,3 +1708,73 @@ Each cell gives 48 / 192 windows per mouse:
 **Before the next training:**
 - Merge main into the GPU capsule. It needs 8bc88b6 (no simulated activity at GIAnT fit artifacts) and 82860cb (realistic low counts).
 - Change selection as Experiment 2 suggests: 3–4 validation mice at 48 windows each, no labeled-pixel term, simulated windows in fine-tuning selection.
+
+## GPU machine: re-evaluation (2026-11-21)
+
+**Question (the user's).** Is g5.4xlarge (one A10G, 24 GB) still the right machine for the GPU capsule, or would a larger GPU be faster at a reasonable cost? Consider also the deeper network planned once phase 2's data are in.
+
+**Where today's time goes** (S3's logs and the held-out evaluation runs, g5.4xlarge):
+- **An S3-type run takes about 5 h:**
+  - loading trial stats: 43 min;
+  - 4,700 steps at 2.7 s: 3.5 h;
+  - 14 validations: 0.7 h.
+- **Stats loading is not the GPU.** S0 and S1 loaded their stats in 7–11 s. Runs that include a one-channel phase-1 session (803496 in S2 and S3, 804730 in the evaluations) take 16–43 min. Those sessions' export-time sidecars are stale, so every run recomputes them from the movies.
+- **The GPU is the limit, not the data loaders.** Evaluation costs 0.46–0.49 s per window whether the window is real (read from disk) or simulated (about 1 s of CPU each, spread over 12 workers). An evaluation run (49,000 windows) takes 7.2 h.
+- **Most of the compute is context.** The network processes 718 frames × 94² px per window, and the loss covers 192 × 48², so 7% of the processed voxels are scored.
+
+**Profile** (`tools/gpu_bench.py CKPT key=value ...`: the trained model's own configuration on random inputs of its window; local RTX 4060 Ti, 8 GB):
+- **cuDNN picks a slow algorithm.** Half of a training step's GPU time (49%) was one cuDNN kernel, a direct algorithm for a convolution's backward pass, chosen by cuDNN's heuristics.
+  - `torch.backends.cudnn.benchmark = True` lets cuDNN time the algorithms once per shape, and the window shape is fixed in training.
+  - With it, a step is 2.1× faster: 1.88 → 0.88 s at 62² px, and 2.36 → 1.14 s at 70² px.
+  - The forward pass alone, as in evaluation, gains only about 10%.
+  - Neither the code nor S0–S3 had it on.
+- **After that, memory traffic dominates.** Layout conversions to and from channels-last are 23% of GPU time, and element-wise kernels (residual adds in float32, bf16 casts, GELU) most of the rest. The convolutions themselves are a small share.
+  - Bandwidth speeds this up in hardware, and `torch.compile` in software. Compile needs Triton, which is untested here because it isn't available on Windows.
+  - Channels-last as is made it slower (1.04 s against 0.88 s), because the model's padding and slicing break the layout.
+- **The model is memory-bound.** Extrapolated to the full window, the 4060 Ti would take 4.3 s per step against the A10G's 2.7 s at the same settings. Its memory bandwidth is half the A10G's (288 against 600 GB/s), and its compute is 0.7×.
+- **Larger loss regions are cheaper per scored frame.** 448 output frames instead of 192 cost 20% less per loss frame.
+- **Depth and width** (62² px, autotuning on):
+
+  | variant | parameters | time per step | GPU memory | at the full window (scaled) |
+  |---|---|---|---|---|
+  | current | 0.31 M | 0.89 s | 4.5 GB | ~10 GB (A10G measured: 9.8) |
+  | 2× depth | 0.59 M | 1.34 s (1.5×) | 6.3 GB | ~15 GB |
+  | 1.5× width | 0.69 M | 1.53 s (1.7×) | 6.2 GB | ~14 GB |
+  | 2× width | 1.23 M | out of local memory | 8.2 GB | ~19 GB |
+
+  These sizes are with activation checkpointing. Without it, or with a larger loss region, they exceed 24 GB.
+
+**Machines in use at AIND's Code Ocean** (capsules' `.codeocean/resources.json` on GitHub) and on-demand AWS prices, approximate:
+
+| machine | GPU | GPU memory, bandwidth | vCPU / RAM | $/h |
+|---|---|---|---|---|
+| g5.4xlarge (now) | A10G | 24 GB, 600 GB/s | 16 / 64 GB | 1.62 |
+| gr6.4xlarge | L4 | 24 GB, 300 GB/s | 16 / 128 GB | 1.54 |
+| g6e.2xlarge | L40S | 48 GB, 864 GB/s | 8 / 64 GB | 2.24 |
+| g6e.4xlarge | L40S | 48 GB, 864 GB/s | 16 / 128 GB | 3.00 |
+| g5.12xlarge | 4× A10G | 4× 24 GB | 48 / 192 GB | 5.67 |
+
+- **No A100 or H100 capsules were found.** AWS sells the A100 only in 8-GPU machines, which is far too large for a 1 M-parameter model at batch 1.
+- **The L40S** has 1.44× the A10G's bandwidth and about 3× its compute, so a memory-bound model gains about 1.4–2×.
+- **The L4** has half the bandwidth, so it would be slower here.
+
+**Estimates (not yet measured on these machines):**
+- Software fixes: `--stats_from` for the stale one-channel sessions, cuDNN autotuning, and on 48 GB no checkpointing (25% less work per step).
+- Ranges carry the uncertainty of the A10G's autotuning gain (assumed 1.5–2.1×) and the L40S's speed relative to the A10G (assumed 1.4–2×).
+
+| run | g5.4xlarge now | g5.4xlarge with the fixes | g6e.2xlarge with the fixes | g6e.4xlarge with the fixes |
+|---|---|---|---|---|
+| S3-type training, current model | 5.0 h, $8.1 | 2.4–3.0 h, $3.9–4.9 | 1.1–1.8 h, $2.4–4.0 | 1.1–1.8 h, $3.3–5.4 |
+| the same, 2× depth | ~7 h, ~$11 | 3.6–4.6 h, $5.8–7.4 | 1.5–2.7 h, $3.4–6.0 | 1.5–2.7 h, $4.5–8.0 |
+| held-out evaluation (8 checkpoints) | 7.2 h, $11.7 | ~6.0 h, ~$9.7 | 3.0–4.3 h, $6.7–9.6 | 3.0–4.3 h, $9.0–12.9 |
+
+- **On g6e.2xlarge, 8 vCPUs** run about 7 data workers, about 7 simulated windows/s. A training step there consumes about 2.2–3.3 windows/s and evaluation about 3–4. Enough, but with the least margin of the options.
+- **g5.12xlarge** could run an evaluation's checkpoints on 4 GPUs at once: about 1.6 h for about $9, with a small change to split checkpoints across GPUs. Training on it would need data-parallel code.
+
+**Recommendation:**
+1. **Software first.** cuDNN autotuning in training and evaluation, and `--stats_from` for 803496 and 804730. On today's machine this roughly halves a training run's time and cost. Phase 2's sidecars come from the fixed exporter, so they need no recomputing.
+2. **Then move training to g6e.2xlarge (L40S, 48 GB).** At 1.4× the hourly price it should cost the same or less per run, and finish in about half the time of the fixed A10G.
+   - The 48 GB matters most for the deeper network: no checkpointing, and larger loss regions.
+   - g6e.4xlarge only if 8 vCPUs turn out to starve the GPU.
+   - Not the L4. g5.12xlarge only if evaluation wall time matters.
+3. **Confirm before switching.** One short benchmark job each on g5.4xlarge and g6e.2xlarge: the real model; autotuning; `torch.compile`; checkpointing on and off; batch 1–4; deeper and wider; larger loss regions. That is about 30 min and $2 in all.
