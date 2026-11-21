@@ -483,16 +483,18 @@ MOTION_SIM = dict(motion_sd_px=(0.0, 0.2), motion_tau_frames=(0.5, 40.0), focus_
                   local_sd_px=(0.0, 0.2))
 
 
-def eval_sim(kind: str, photon_zeros: bool = False) -> SimConfig | None:
+def eval_sim(kind: str, photon_zeros: bool = False, pz_legacy: bool = False) -> SimConfig | None:
     """The simulation of an evaluation kind (real: None). A kind may end in
     "pz" (realistic low counts) and/or "shuf" (shuffled activity timing, no
-    stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"."""
+    stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"; pz_legacy
+    draws the low counts as up to 2026-11-21 (SimConfig.pz_legacy)."""
     base = _base_kind(kind)
     cfg = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
            "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3)),
            "motion": SimConfig(**FAST_SIM, **MOTION_SIM)}.get(base)
     if cfg is not None:
         cfg.photon_zeros = photon_zeros or "pz" in kind[len(base):]
+        cfg.pz_legacy = pz_legacy
         cfg.shuffle_prob = 1.0 if "shuf" in kind[len(base):] else 0.0
     return cfg
 
@@ -512,13 +514,13 @@ EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "da
 def sim_config(args, free: bool = False) -> SimConfig:
     """Simulation settings from the arguments; free: no activity anywhere."""
     if free:
-        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros)
+        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy)
     lo, hi = (float(v) for v in args.silent_frac.split(","))
     dlo, dhi = (float(v) for v in args.dark_frac.split(","))
     pair = lambda s: tuple(float(v) for v in s.split(","))  # noqa: E731
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
                      fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi),
-                     shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros,
+                     shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy,
                      motion_sd_px=pair(args.motion_sd), motion_tau_frames=pair(args.motion_tau),
                      focus_sd_px2=pair(args.focus_sd), local_sd_px=pair(args.local_sd))
 
@@ -604,13 +606,13 @@ def train(args) -> None:
     evals = {}
     if val_files:
         evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
-        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, eval_sim("sim", args.photon_zeros))
+        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, eval_sim("sim", args.photon_zeros, args.pz_legacy))
         if args.val_free:
             evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
         if args.val_fast:
-            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast", args.photon_zeros))
+            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast", args.photon_zeros, args.pz_legacy))
         if args.val_motion:
-            evals["motion"] = mk(val_files, args.val_windows, 70_000 + args.seed, eval_sim("motion", args.photon_zeros))
+            evals["motion"] = mk(val_files, args.val_windows, 70_000 + args.seed, eval_sim("motion", args.photon_zeros, args.pz_legacy))
     evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
     region = loss_region(wcfg)
     sel_prefix = (args.select_on or ("real" if args.data == "mix" else args.data)) if val_files else "tr"
@@ -749,7 +751,7 @@ def evaluate_checkpoints(args) -> None:
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
         for sess in sorted(groups):
             for kind in args.kinds.split(","):
-                sim = eval_sim(kind)
+                sim = eval_sim(kind, pz_legacy=args.pz_legacy)
                 seed = EVAL_SEEDS[_base_kind(kind)] + args.seed
                 ds = WindowDataset(groups[sess], wcfg, stats, length=args.windows, seed=seed, sim=sim, flip=False)
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
@@ -830,6 +832,9 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--real_edge_s", type=float, default=None,
                    help="real windows: no loss within this many seconds of a trial edge (default: the checkpoint's, "
                         "2 s for checkpoints from before the option; 0 = keep the edges)")
+    p.add_argument("--pz_legacy", action="store_true",
+                   help="pz kinds (fastpz, motionpz, ...): draw the low counts as up to 2026-11-21, to compare with "
+                        "evaluations made before (SimConfig.pz_legacy)")
     p.add_argument("--per_window", action="store_true",
                    help="also write windows.csv: each window's 8-frame squared errors at support and background "
                         "pixels (for bootstrap intervals over windows and sessions)")
@@ -1031,6 +1036,9 @@ def add_arguments(p) -> None:
     p.add_argument("--photon_zeros", action="store_true",
                    help="simulate realistic low counts (zero-inflated, never negative; SimConfig.photon_zeros); "
                         "validation simulations too")
+    p.add_argument("--pz_legacy", action="store_true",
+                   help="with --photon_zeros: draw the low counts as up to 2026-11-21 (v7-v9, S0-S3), whose noise "
+                        "had about half the measured correlations and too much skew (SimConfig.pz_legacy)")
     p.add_argument("--shuffle_prob", type=float, default=0.0,
                    help="share of simulated trials with shuffled activity timing (no stimulus rhythm)")
     p.add_argument("--val_fraction", type=float, default=0.2)

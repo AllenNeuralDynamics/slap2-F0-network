@@ -230,6 +230,71 @@ def test_photon_zeros(tmp_path):
     assert np.allclose(w["truth"][inside], plain["truth"][inside])
 
 
+def test_gamma_quantile():
+    from scipy import special
+    from slap2_f0.simulate import gamma_quantile
+    k = np.exp(np.linspace(np.log(0.05), np.log(1500.0), 37))[:, None]
+    x = np.linspace(-5.0, 5.0, 41)[None]
+    q = gamma_quantile(np.broadcast_to(k, (37, 41)), np.broadcast_to(x, (37, 41)))
+    ref = special.gammaincinv(k, special.ndtr(x))
+    ok = ref > 1e-20
+    assert np.max(np.abs(q[ok] / ref[ok] - 1)) < 0.005
+    big = gamma_quantile(np.array([5000.0]), np.array([1.0]))  # Wilson-Hilferty above the table
+    assert abs(big[0] / special.gammaincinv(5000.0, special.ndtr(1.0)) - 1) < 1e-3
+
+
+def _counts_template(fn, T=1500, R=40, C=44, seed=0):
+    """Photon events spread by a short positive kernel (as the microscope's
+    frame formation does): never negative, exact zeros where no event lands
+    in the kernel, correlated in time and space, about 30-50% zero frames."""
+    rng = np.random.default_rng(seed)
+    kt, kr, kc = np.array([0.6, 1.0, 0.6]), np.array([0.25, 1.0, 0.25]), np.array([0.45, 1.0, 0.45])
+    base = (0.8 + 1.7 * rng.random((R, C))).astype(np.float32)  # mean counts
+    amp = 9.0
+    lam = np.pad(base, 1, mode="edge") / (amp * kt.sum() * kr.sum() * kc.sum())
+    ev = amp * rng.poisson(np.broadcast_to(lam, (T + 2, R + 2, C + 2))).astype(np.float32)
+    movie = _filter(ev, kt, kr, kc)
+    act = np.zeros((T, R, C), np.float32)
+    act[100:110, 10:14, 10:14] = 3.0
+    lab = np.zeros((R, C), np.uint8)
+    lab[8:20, 6:16] = 1
+    with h5py.File(fn, "w") as f:
+        f["movie"] = (movie + act)[None]
+        f["activity"] = act[None]
+        f["mean_image"] = (movie + act).mean(0)[None]
+        f["varfac"] = np.ones((R, C), np.float32)
+        f["mask/valid"] = np.ones((R, C), np.uint8)
+        f["mask/labeled"] = lab
+        f["mask/footprint_support"] = lab
+        f["frame/discard"] = np.zeros(T, np.uint8)
+        f.attrs["label"] = "s"
+
+
+def test_photon_zeros_keep_correlations(tmp_path):
+    """Realistic low counts reproduce the template's correlations in time and
+    space, its share of zeros, gain and (roughly) skew; the legacy draw lost
+    about half of the correlations."""
+    from slap2_f0.simulate import write_trial
+    fn = tmp_path / "trial_001.h5"
+    _counts_template(fn)
+    st = trial_stats(fn)
+    assert 0.25 < st["zero_frac"] < 0.6 and st["rho_c"] > 0.3 and st["rho_t1"] > 0.4
+    tp = Template(TrialFile(fn), st)
+    out = {}
+    for name, cfg in (("new", SimConfig(photon_zeros=True, excess=0.0)),
+                      ("legacy", SimConfig(photon_zeros=True, pz_legacy=True, excess=0.0))):
+        sf = tmp_path / f"sim_{name}.h5"
+        write_trial(tp, sf, cfg, seed=1, compress=False)
+        out[name] = trial_stats(sf)
+    s = out["new"]
+    for key in ("rho_t1", "rho_t2", "rho_r", "rho_c"):
+        assert abs(s[key] - st[key]) < 0.04, (key, s[key], st[key])
+        assert abs(out["legacy"][key] - st[key]) > abs(s[key] - st[key])
+    assert abs(s["zero_frac"] - st["zero_frac"]) < 0.06
+    assert abs(s["gain"] / st["gain"] - 1) < 0.1
+    assert abs(s["skew"] / st["skew"] - 1) < 0.25
+
+
 def test_shuffled_timing(tmp_path):
     """Shuffled activity timing keeps every event whole and the total activity."""
     fn = tmp_path / "trial_001.h5"

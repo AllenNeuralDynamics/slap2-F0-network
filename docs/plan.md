@@ -1498,7 +1498,7 @@ In time, the 24 ms exponential keeps 95% of the whitened matched filter's d′. 
    - The surround makes up for the moving median's bias; with an unbiased blind baseline it only costs sensitivity (+10% d′ without it).
    - Check that the activity image's 5×5 median subtraction still removes what the surround did (residual motion, shared brightness changes).
 2. **A null calibrated per pixel brightness.**
-   - Per pixel, the null distribution of the activity image comes from a parametric bootstrap. Noise movies with the trial's baseline, gain, correlations and skew (`slap2_f0.simulate` already matches these) go through the same filters.
+   - Per pixel, the null distribution of the activity image comes from a parametric bootstrap. Noise movies with the trial's baseline, gain, correlations and skew (`slap2_f0.simulate` matches these; with realistic low counts only since 2026-11-21, see the last section) go through the same filters.
    - Thresholds then mean the same false-positive rate on dim and bright pixels.
    - The bootstrap replaces the sign-flip FDR estimate (GIAnT-MATLAB#42).
    - A cheaper partial fix above 1 photon per frame: a skew correction computed from convolutions of the baseline.
@@ -1514,3 +1514,54 @@ Later: a second detection pass with whitened footprint templates after GIAnT's f
 - **Fold geometry, NAF blocks, L2 vs Charbonnier, spike weighting, training recipes:** probe-specific, or null or harmful in their tests.
 
 Width was their largest replicated gain, and our model has 0.31 M parameters, so a wider run is the one cheap arm. Their lessons on evaluation carry over: reconstruction loss did not rank detection, and weak units lost the most.
+
+## Same-frame neighbour correlations, and the low-count simulator (2026-11-21)
+
+**Question.** Would each pixel's whole-trial zero-lag correlation with its neighbours, as an input, help the network follow fast artifacts and other spatially structured errors?
+
+**Test** (`tools/neighbor_predictability.py`, `tools/neighbor_leak.py`; the five viewer trials). The target is the residual after v9 fine-tuned's baseline. It is predicted linearly from the same frame's deviation from that baseline at neighbouring pixels. Fits are cross-fitted on alternate 128-frame blocks, with the chance level (predictors shifted in time) subtracted, and frames within 2 s of a trial edge are not scored. Share of the residual's variance explained, single frames / fast part of 8-frame means:
+
+| neighbours | coefficients per pixel | one filter for all pixels |
+|---|---|---|
+| ring 5–7 px away (visible to v9 in the output frame) | ≤ 0.4%; 1.0–1.3% at support pixels of 803121 | 0.0% |
+| rings 2–4 px away (inside the box) | 0–1.8%; up to 6.6% in 803121 | 0–4.3% |
+| the 8 nearest pixels (inside the box) | 31–36% / 38–54% | 31–35% / 34–48% |
+
+- **What v9 can see holds almost nothing.** A per-pixel correlation map could add at most about 1%, and only in 803121, the trial with the most motion. This agrees with the motion covariates (at most 1.5%, 803121 3–6%) and with v10b's per-pixel motion features, which did not help.
+- **The nearest pixels' share is shared photon noise from image formation.** In counts, the residual's correlation with the next column is 0.39–0.46 and with the next row 0.24–0.33 (the templates' rho_c and rho_r are 0.36–0.39 and 0.23–0.27). One filter for all pixels captures nearly all of it, and the GFP session (no activity) shows the same 31%.
+- **Using the nearest pixels would put the events into the baseline.** A filter on the 8 nearest pixels that predicts the residual follows 70–73% of the pixel's own activity (support pixels, 780125 and 803121). Per-pixel coefficients still follow 28–33%, and all pixels within 4 px 11–14%. v9 follows 3–6%. This is what the box is for.
+
+**Decision: no correlation input.** Neighbour covariance belongs in the detection stage's null (queued item 2): shared photon noise makes any spatial sum vary more than per-pixel σ implies.
+
+**Simulator: realistic low counts lost half of the correlations.** Up to now, `photon_zeros` (training and validation of v7–v9 and S0–S3) worked as follows:
+
+- it redrew only voxels with at least 2% expected zeros;
+- the value above zero was lognormal;
+- the draw went through a copula field with the template's own kernels, independent of the other voxels' filtered Poisson noise.
+
+Its counts came out with about half the template's correlations and too much skew, which a simulated null would have inherited. Whole simulated trials, statistics as in `simcheck`:
+
+| template | | ρ next row | ρ next column | ρ 1 frame | ρ 2 frames | F64 | skew | zeros | gain |
+|---|---|---|---|---|---|---|---|---|---|
+| 878030 | real | 0.233 | 0.386 | 0.602 | 0.245 | 2.67 | 4.80 | 0.424 | 12.36 |
+| | before | 0.124 | 0.234 | 0.430 | 0.127 | 2.01 | 6.22 | 0.443 | 11.21 |
+| | now | 0.230 | 0.384 | 0.601 | 0.243 | 2.47 | 4.40 | 0.443 | 12.35 |
+| 780125 | real | 0.269 | 0.358 | 0.680 | 0.331 | 3.35 | 3.41 | 0.159 | 7.97 |
+| | before | 0.169 | 0.239 | 0.548 | 0.222 | 2.87 | 4.93 | 0.167 | 7.84 |
+| | now | 0.270 | 0.359 | 0.686 | 0.330 | 3.50 | 3.08 | 0.168 | 7.94 |
+
+**Fix** (`simulate._photon_counts`, `Template.pz_kernels`):
+
+- **Every voxel** of a low-count trial is drawn through one Gaussian copula field. Exact zeros come with probability exp(−mean/c), as before.
+- **The value above zero is gamma, not lognormal.** In real dim pixels its skew is 3.1–3.5; a gamma with the same mean and variance gives 2.9–3.2, a lognormal 7–9. Gamma quantiles come from a table, since scipy's gammaincinv takes 3 s per training window.
+- **The field's kernels are stronger than the template's**, so that the counts correlate as the template does. The mapping turns a latent correlation ρ into A(ρ) = Σ c_k² ρ^k / V, with Hermite coefficients pooled over 300 background pixels as the statistics pool them. The latent targets are A⁻¹ of the template's correlations, and the temporal kernel's F64 target is adjusted until the counts' inflation matches.
+- **Cost:** a 718 × 94 × 94 window takes 1.06 s against 1.10 s before.
+
+Checks:
+
+- The default and fast simulations are bit-identical to before, so the held-out evaluation (kinds real, sim, free, fast; no low counts) is unaffected.
+- `pz_legacy` (`--pz_legacy` in `train` and `evaluate`) reproduces the old draw bit for bit.
+- New tests: a correlated, zero-inflated template is reproduced (correlations within 0.04, and closer than before), and the gamma quantiles agree with scipy within 0.5%.
+
+**No retraining for this.** The next training run with `--photon_zeros` gets the new noise, in training and in its validation simulations. Runs compared like for like with S0–S3 (seed repeats) should pass `--pz_legacy`. The fastpz and motionpz evaluation kinds also change, and `--pz_legacy` re-scores them as before.
+

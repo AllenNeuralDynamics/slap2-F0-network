@@ -39,14 +39,18 @@ geometry, brightness, events and noise statistics:
   pixels are active and only the events themselves do. Without them, a
   network fine-tuned on sensor sessions (where every bright pixel in the loss
   has activity) set the baseline of GFP dendrites too low (v4 run);
-* **realistic low counts** (optional, ``photon_zeros``): on pixels where
-  zeros are likely, the noise is replaced by a zero-inflated distribution
-  with the same mean and variance (see ``_photon_zeros``). Real movies are
-  photon counts: never negative, and dim pixels are exactly 0 in many frames
-  (37% at 0.5-2 counts, 27% at 2-4, 9% at 4-8 in 780125), most of all at ROI
-  edges and in small ROIs; the filtered Poisson noise above is negative in a
-  few percent of voxels and never exactly 0. On such pixels SiLo's moving
-  median sits far below the mean and makes false sources;
+* **realistic low counts** (optional, ``photon_zeros``): every voxel is drawn
+  from a zero-inflated distribution with its mean and variance, exact zeros
+  with probability exp(-mean / c), else gamma (see ``_photon_counts``). Real
+  movies are photon counts: never negative, and dim pixels are exactly 0 in
+  many frames (37% at 0.5-2 counts, 27% at 2-4, 9% at 4-8 in 780125), most of
+  all at ROI edges and in small ROIs; the filtered Poisson noise above is
+  negative in a few percent of voxels and never exactly 0. On such pixels
+  SiLo's moving median sits far below the mean and makes false sources. The
+  draws come from one correlated Gaussian field (a Gaussian copula) whose
+  kernels are stronger than the template's, so that the counts after the
+  zero-inflated mapping, which weakens correlations, keep the template's
+  correlations in time and space (``Template.pz_kernels``);
 * **shuffled activity timing** (optional, ``shuffle_prob``): the template's
   activity timeline is cut into blocks at quiet frames and reordered, which
   breaks the recordings' stimulus rhythm while keeping every event;
@@ -135,14 +139,24 @@ class SimConfig:
     # keeping every event; probability shuffle_prob per virtual trial (0 = never)
     shuffle_prob: float = 0.0
     shuffle_frames: tuple[float, float] = (20.0, 60.0)
-    # realistic low counts (photon_zeros): the noise is mapped, voxel by voxel
-    # (a Gaussian copula, so its correlations stay), onto a zero-inflated
-    # distribution with the same mean and variance whose share of exact zeros
-    # is exp(-mean / c), c the template pixel's mean count per photon event,
-    # measured from its share of zero frames (stats zero_movie). Real movies are
-    # never negative and dim pixels are exactly 0 in many frames, most of all at
-    # ROI edges and in small ROIs, where SiLo's moving median makes false sources
+    # realistic low counts (photon_zeros): each voxel is drawn, through a
+    # Gaussian copula, from a zero-inflated distribution with its mean and
+    # variance whose share of exact zeros is exp(-mean / c), c the template
+    # pixel's mean count per photon event, measured from its share of zero
+    # frames (stats zero_movie), and whose positive part is gamma (real dim
+    # pixels: positive-part skew 3.1-3.5, gamma 2.9-3.2, lognormal 7-9). The
+    # copula's field has kernels chosen so that the counts keep the template's
+    # correlations (Template.pz_kernels). Real movies are never negative and dim
+    # pixels are exactly 0 in many frames, most of all at ROI edges and in small
+    # ROIs, where SiLo's moving median makes false sources
     photon_zeros: bool = False
+    # photon_zeros as up to 2026-11-21 (v7-v9, S0-S3): only voxels with at least
+    # 2% zeros were redrawn, lognormal above zero, through a field with the
+    # template's own kernels and independent of the other voxels' noise. Its
+    # counts had about half the template's correlations (878030: next column
+    # 0.23 against 0.39, next row 0.12 against 0.23, 1 frame 0.43 against 0.60)
+    # and too much skew (6.2 against 4.8). Kept to reproduce those runs
+    pz_legacy: bool = False
     # residual motion (0 = none): per axis (rows, columns) an OU process with SD
     # uniform in motion_sd_px (pixels) and time constant log-uniform in
     # motion_tau_frames; the baseline and activity move, the scan does not
@@ -403,6 +417,56 @@ class Template:
         self.zc = zero_count_scale(st, tf.valid)  # None without zero_movie (older stats)
         at = st.get("act_trace")
         self.act_trace = np.asarray(at, np.float64) if at is not None and np.size(at) == self.T else None
+        self._pz = {}
+
+    def pz_kernels(self, excess: float = 1.0):
+        """Temporal, row and column kernels (sum 1) of the Gaussian field behind
+        photon_zeros, and their sum of squares. The zero-inflated mapping
+        weakens correlations: output correlation A(rho) = sum_k c_k^2 rho^k / V for
+        a latent correlation rho, c_k the mapping's normalized Hermite
+        coefficients and V its variance, pooled over a sample of the template's
+        background pixels as stats.trial_stats pools them. The latent
+        correlations at 1 and 2 frames and 1 row and column are A^-1 of the
+        template's, and the temporal kernel's target for the inflation of
+        64-frame means is adjusted until the counts' inflation matches."""
+        if excess in self._pz:
+            return self._pz[excess]
+        st, tf = self.st, self.tf
+        bg = tf.valid & ~tf.labeled & np.isfinite(self.B) & (self.B > 0)
+        idx = np.flatnonzero(bg)
+        idx = np.random.default_rng(0).choice(idx, min(300, len(idx)), replace=False)
+        mu = self.B.ravel()[idx].astype(np.float64)
+        var = self.gain * mu * np.maximum(1 + self.fast.ravel()[idx] * excess, 0.05)
+        A = _copula_attenuation(mu, var, self.zc.ravel()[idx].astype(np.float64))
+
+        def inv(r):  # latent correlation giving output correlation r (bisection; A is increasing on [0, 1))
+            r = float(r)
+            if not np.isfinite(r) or r <= 0:
+                return r
+            lo, hi = 0.0, 0.999
+            if A(hi) <= r:
+                return hi
+            for _ in range(40):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if A(mid) < r else (lo, mid)
+            return 0.5 * (lo + hi)
+
+        lat = dict(st, rho_t1=inv(st["rho_t1"]), rho_t2=inv(st["rho_t2"]), rho_r=inv(st["rho_r"]), rho_c=inv(st["rho_c"]))
+        F = float(st.get("F64", np.nan))
+        kt, kr, kc = noise_kernels(lat)
+        if np.isfinite(F) and F > 1:
+            Fl = F
+            for _ in range(6):
+                ac = np.correlate(kt, kt, "full")[len(kt):] / (kt ** 2).sum()  # latent correlation at lags 1..
+                tau = np.arange(1, len(ac) + 1)
+                Fo = 1 + 2 * float(np.sum((1 - tau / 64) * np.array([A(a) for a in ac])))
+                if abs(Fo - F) < 0.01 * F:
+                    break
+                Fl = max(Fl + (F - Fo), 1.01)
+                kt = noise_kernels(dict(lat, F64=Fl))[0]
+        ksum2 = float((kt ** 2).sum() * (kr ** 2).sum() * (kc ** 2).sum())
+        self._pz[excess] = (kt, kr, kc, ksum2)
+        return self._pz[excess]
 
 
 def zero_count_scale(st: dict, valid: np.ndarray):
@@ -450,6 +514,87 @@ def _photon_zeros(movie: np.ndarray, mu: np.ndarray, var: np.ndarray, zc: np.nda
     out = movie.copy()
     out[use] = np.where(u < zu, 0.0, pos).astype(np.float32)
     return out
+
+
+_GAMMA_TABLE = None
+
+
+def _gamma_table():
+    """log Q(Phi(x); k), Q the standard gamma's quantile (shape k, scale 1), on a
+    grid of log k (0.02-2000) and x (-7..7)."""
+    global _GAMMA_TABLE
+    if _GAMMA_TABLE is None:
+        from scipy import special
+        lk = np.linspace(np.log(0.02), np.log(2000.0), 241)
+        x = np.linspace(-7.0, 7.0, 561)
+        K, X = np.meshgrid(np.exp(lk), x, indexing="ij")
+        q = special.gammaincinv(K, special.ndtr(X))
+        small = (special.log_ndtr(X) + special.gammaln(K + 1)) / K  # Q ~ (u Gamma(k + 1))^(1/k) as u -> 0
+        with np.errstate(divide="ignore"):
+            lq = np.where(q > 1e-30, np.log(np.maximum(q, 1e-300)), small)
+        _GAMMA_TABLE = (lk, x, lq.ravel())
+    return _GAMMA_TABLE
+
+
+def gamma_quantile(k: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """The standard gamma's quantile (shape k, scale 1) at probability Phi(x):
+    bilinear interpolation of log Q in (log k, x) (relative error < 0.5% for
+    |x| <= 5), Wilson-Hilferty above k = 2000. Fast enough for whole windows,
+    unlike scipy's gammaincinv."""
+    lk, xg, lq = _gamma_table()
+    k, x = np.asarray(k, np.float64), np.asarray(x, np.float64)
+    a = (np.log(np.clip(k, np.exp(lk[0]), np.exp(lk[-1]))) - lk[0]) / (lk[1] - lk[0])
+    b = (np.clip(x, xg[0], xg[-1]) - xg[0]) / (xg[1] - xg[0])
+    i = np.minimum(a.astype(np.int64), len(lk) - 2)
+    j = np.minimum(b.astype(np.int64), len(xg) - 2)
+    fa, fb = a - i, b - j
+    n = len(xg)
+    i0 = i * n + j
+    v = (1 - fa) * ((1 - fb) * lq[i0] + fb * lq[i0 + 1]) + fa * ((1 - fb) * lq[i0 + n] + fb * lq[i0 + n + 1])
+    q = np.exp(v)
+    big = k > np.exp(lk[-1])
+    if big.any():
+        kb, xb = k[big], x[big]
+        q[big] = kb * np.maximum(1 - 1 / (9 * kb) + xb / (3 * np.sqrt(kb)), 0) ** 3
+    return q
+
+
+def _photon_counts(mu: np.ndarray, var: np.ndarray, zc: np.ndarray, g: np.ndarray) -> np.ndarray:
+    """Voxel values with mean mu (> 0) and variance var: 0 with probability
+    z = exp(-mu / zc) (capped so that a positive part exists), otherwise gamma
+    with the positive part's mean and variance; drawn through g, a unit Gaussian
+    field, as a Gaussian copula (value = F^-1(Phi(g)))."""
+    from scipy import special
+    z = np.exp(-np.maximum(mu, 0) / zc)
+    z = np.clip(np.minimum(z, var / np.maximum(var + mu ** 2, 1e-12) - 1e-3), 0.0, None)
+    mp = mu / (1 - z)  # mean and variance of the positive part
+    vp = np.maximum((var + mu ** 2) / (1 - z) - mp ** 2, 1e-9 * np.maximum(mp, 1e-6) ** 2)
+    u = special.ndtr(g)
+    w = np.clip((u - z) / (1 - z), 1e-12, 1 - 1e-12)
+    return np.where(u < z, 0.0, vp / mp * gamma_quantile(mp ** 2 / vp, special.ndtri(w)))
+
+
+def _copula_attenuation(mu: np.ndarray, var: np.ndarray, zc: np.ndarray, K: int = 40):
+    """A(rho): the correlation of _photon_counts at two voxels of the same pixel
+    whose latent Gaussians correlate rho, pooled over pixels (sum of covariances
+    over sum of variances, as stats.trial_stats pools neighbour correlations):
+    sum_p sum_k c_pk^2 rho^k / sum_p V_p, with c_pk the normalized Hermite
+    coefficients of pixel p's mapping and V_p its variance (truncated at K terms,
+    which slightly underestimates A as rho -> 1)."""
+    x = np.linspace(-8.0, 8.0, 4001)
+    wts = np.exp(-x ** 2 / 2) / np.sqrt(2 * np.pi) * (x[1] - x[0])
+    n = len(mu)
+    h = _photon_counts(np.repeat(mu, len(x)), np.repeat(var, len(x)), np.repeat(zc, len(x)),
+                       np.tile(x, n)).reshape(n, len(x))
+    m = h @ wts
+    V = float(np.sum((h ** 2) @ wts - m ** 2))
+    c2 = np.empty(K)
+    prev, cur = np.ones_like(x), x.copy()  # normalized probabilists' Hermite polynomials He_k / sqrt(k!)
+    for k in range(1, K + 1):
+        c2[k - 1] = float(np.sum((h @ (cur * wts)) ** 2))
+        prev, cur = cur, (x * cur - np.sqrt(k) * prev) / np.sqrt(k + 1)
+    pw = np.arange(1, K + 1)
+    return lambda rho: float(np.sum(c2 * float(rho) ** pw) / V)
 
 
 def _shuffle_map(tp: "Template", frames: tuple[float, float], rng) -> np.ndarray:
@@ -561,6 +706,7 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
         r["local_proc"] = w.reshape(2, J, T).astype(np.float32)  # (2, J, T)
     if cfg.photon_zeros and tp.zc is not None:
         r["photon_zeros"] = True
+        r["pz_legacy"] = bool(cfg.pz_legacy)
     return r
 
 
@@ -691,9 +837,18 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     out["support"][dr, dc] = tf.support[rs:re, cs:ce] & valid
     if r.get("photon_zeros"):  # last, so the draws above are as without it
         ge = rng.standard_normal(Se.shape).astype(np.float32)
-        g = _filter(ge, tp.kt, tp.kr, tp.kc) / np.sqrt(tp.ksum2)
         var = tp.gain * np.maximum(S, 0) * fac[None]
-        mz = _photon_zeros(movie, S, var, np.broadcast_to(tp.zc[rs:re, cs:ce], S.shape), g)
+        zc = np.broadcast_to(tp.zc[rs:re, cs:ce], S.shape)
+        if r.get("pz_legacy"):
+            g = _filter(ge, tp.kt, tp.kr, tp.kc) / np.sqrt(tp.ksum2)
+            mz = _photon_zeros(movie, S, var, zc, g)
+        else:  # every voxel, through one field whose kernels make the counts correlate as the template
+            kt, kr, kc, ks2 = tp.pz_kernels(r.get("excess", 0.0))
+            g = _filter(ge, kt, kr, kc) / np.float32(np.sqrt(ks2))
+            use = np.isfinite(movie) & (S > 0)
+            mz = movie.copy()
+            mz[use] = _photon_counts(S[use].astype(np.float64), var[use].astype(np.float64),
+                                     zc[use].astype(np.float64), g[use].astype(np.float64))
         out["movie"][dt, dr, dc] = mz
         out["noisy"][dt, dr, dc] = mz - act
     return out
