@@ -1565,6 +1565,80 @@ Checks:
 
 **No retraining for this.** The next training run with `--photon_zeros` gets the new noise, in training and in its validation simulations. Runs compared like for like with S0–S3 (seed repeats) should pass `--pz_legacy`. The fastpz and motionpz evaluation kinds also change, and `--pz_legacy` re-scores them as before.
 
+## Low-count simulator: skew, and artifacts where pixels leave the field (2026-11-21)
+
+**Skew: the values above zero were too light-tailed.** With `--photon_zeros` the simulated skew was 8–10% below the template's.
+
+- **Cause:** on real dim background pixels the values above zero (over their pixel's mean) follow a generalized gamma, θ·G^s with G ~ Gamma(k), at s = 1.25–1.5. Quantiles from 5% to 99.9% agree in all five viewer sessions and every zero-share bin. The gamma (s = 1) has a lighter tail and more values near zero: with the real moments it predicts a median pixel skew of 4.55, against 4.78 measured (878030).
+- **Not the cause:**
+  - the zero share: 1–2 points high in the simulation, which lowers the skew by under 1%;
+  - the skew factor q: `photon_zeros` does not use it;
+  - the copula: each voxel's marginal is exact. Correlated frames bias the measured skew down by about 5%, in real and simulated trials alike.
+
+**Fix:** `SimConfig.pz_shape` = 1.4 (1 = the gamma).
+
+- k comes from the positive part's CV through a table per s, θ from its mean. The gamma quantile table is raised to s.
+- Mean, variance and zero share stay exact.
+- `pz_kernels` derives the latent correlations from the new mapping.
+
+Whole simulated trials (`simcheck` statistics):
+
+| template | | skew | ρ next row | ρ next column | ρ 1 frame | ρ 2 frames | F64 | zeros | gain |
+|---|---|---|---|---|---|---|---|---|---|
+| 878030 | real | 4.80 | 0.233 | 0.386 | 0.602 | 0.245 | 2.67 | 0.424 | 12.36 |
+| | gamma | 4.41 | 0.230 | 0.384 | 0.601 | 0.243 | 2.48 | 0.443 | 12.35 |
+| | s = 1.4 | **4.79** | 0.231 | 0.385 | 0.601 | 0.242 | 2.49 | 0.443 | 12.20 |
+| 780125 | real | 3.41 | 0.269 | 0.358 | 0.680 | 0.331 | 3.35 | 0.159 | 7.97 |
+| | gamma | 3.09 | 0.270 | 0.359 | 0.686 | 0.330 | 3.50 | 0.168 | 7.94 |
+| | s = 1.4 | **3.46** | 0.270 | 0.360 | 0.685 | 0.330 | 3.57 | 0.168 | 7.93 |
+| 885233 | real | 3.60 | 0.243 | 0.377 | 0.667 | 0.315 | 3.06 | 0.220 | 9.79 |
+| | gamma | 3.26 | 0.244 | 0.378 | 0.672 | 0.316 | 2.89 | 0.236 | 9.78 |
+| | s = 1.4 | **3.62** | 0.244 | 0.379 | 0.672 | 0.317 | 2.96 | 0.236 | 9.71 |
+
+- **Unchanged:** the zero share stays 1–2 points high and F64 within 7%. The gain reads up to 1.3% lower with the heavier tail.
+- **Checks:** default, fast-brightness, motion and `pz_legacy` windows are bit-identical; `pz_shape=1` is bit-identical to the gamma draw.
+- **Tests:**
+  - the quantiles agree with scipy's `gengamma`;
+  - a template whose positive part has s = 1.4 is reproduced within 2% of its skew, while the gamma is 10–11% low, as on the real templates.
+- **No retraining for this:** as with 82860cb, the next `--photon_zeros` run gets it.
+
+**Fit artifacts where pixels leave the imaged field.** The artifact mask missed four pixels on 804730 path 2, trial 38 (column 959, rows 282–285, next to the cluster).
+
+- **Why:** they are missing from the movie in 25% of the frames, because the field's right edge shifts.
+  - In exactly those frames GIAnT's activity reaches 1,000–1,890 counts, against a movie maximum of 80–185. GIAnT's fit is unconstrained there: SILo fills samples that have no data.
+  - The activity decays over 4–5 frames once the movie returns: 228 counts on a movie of 20, so real targets of −200 with full weight.
+  - Statistics skip frames without movie, so no mean, RMS or variance rule sees these pixels: mean activity 0.8–1.5 counts, residual variance 1.2–1.35× the movie's.
+  - The simulator read the activity in every frame and put the spikes into its movie.
+- **Missing frames are common otherwise, and harmless.** 8–29% of valid pixels miss some frames, mostly at the edges. Their activity there stays below the movie's maximum: at most 0.8×, and 99% below 0.35×, in nine trials of six sessions.
+- **Activity far above the movie in frames that have movie** (the obvious per-frame rule) flags nothing beyond the existing mask in nine trials. The largest excess outside the mask is 5 SD: the decay above.
+
+**Fix** (`stats.unfit_pixels`; no version bump, so no sidecar is recomputed):
+
+- **With every sidecar:** after the mean rule and its 1-px dilation, the mask grows by up to 2 px through pixels that miss frames (`n_valid` below the trial's most complete pixel) and carry activity. Trials without a mean-rule artifact are unchanged.
+- **With new stats:**
+  - `trial_stats` also stores `movie_max` and `act_nan`, the largest activity in kept frames without movie.
+  - Activity in a missing frame above twice the movie's maximum is an artifact wherever it is.
+  - Older sidecars lack the two maps and are used as they are. A sidecar or overlay that has them comes first.
+
+Pixels in the mask ("new stats" = recomputed with the two maps):
+
+| trial | mask before | existing sidecars (growth) | new stats (growth + per-frame rule) |
+|---|---|---|---|
+| 804730 path 2, trial 27 | 105 | 127 | 136 |
+| 804730 path 2, trial 33 | 135 | 156 | 162 |
+| 804730 path 2, trial 38 | 106 | 125 | 125 |
+| 804730 path 2, trial 42 | 113 | 119 | 119 |
+| 780125, 803121, 847983, 878030, 885233 (one trial each) | 0 | 0 | 0 |
+
+- **The flagged pixels:** column 959, rows 281–287: the four and the weaker pixels around them, in trials 38 and 27 alike.
+- **No false positives:** on pixels that miss frames outside artifacts, activity in missing frames reaches at most 0.53× the movie's maximum in 803121, the trial with the most motion and 1,203 such pixels, against the threshold of 2.
+- **The cause** (SILo's filled samples) belongs to GIAnT; a fix there is in progress (GIAnT-MATLAB branch `fit-artifact`).
+
+**Decided (2026-11-22): existing data stays as it is.** The per-frame rule applies only to stats computed from now on. The growth rule already covers the 804730 case on the existing sidecars and on the `f0p1_sidecars` overlay, which has `n_valid` but not the two maps.
+
+- If a session needs the per-frame rule later, run `slap2-f0 stats ROOT --out DIR`. It recomputes into the overlay folder every trial whose sidecar or cached stats lack the two maps, and a rerun resumes from that folder. Before the Copilot review fix (8b7f588), `--out` reused such sidecars and wrote nothing.
+- A version bump would recompute all ~2,800 trials. A pass that computes only the two maps still reads the whole trial: half the cost of the full statistics (37 s against 74 s for an 878030 trial).
+
 ## Experiments 1 and 2: held-out evaluation results (2026-11-21)
 
 **Runs.** All six evaluation runs finished: 7.3 h per fine-tuning run, 6.1 h per pretraining run. Each scored every kept checkpoint of S0–S3 on 192 windows per held-out mouse and kind.
