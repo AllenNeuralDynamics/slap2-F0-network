@@ -28,6 +28,13 @@ real movies are photon counts, never negative, and dim pixels are 0 in many
 frames), and per frame the activity summed over footprint-support pixels
 (act_trace, where the simulator may cut the activity's timeline without
 splitting events).
+
+Optional per-pixel maps, added without a version bump (stats made before
+2026-11-21 lack them and are not redone): the movie's largest value
+(movie_max) and the largest activity in frames where the valid pixel's
+movie is missing (act_nan; pixels leave the imaged field when it shifts,
+and GIAnT's fit there is unconstrained). ``unfit_pixels`` uses them when
+present.
 """
 
 from __future__ import annotations
@@ -43,7 +50,8 @@ import numpy as np
 from .io import read_mean_image
 
 MAPS = ("mean_movie", "var_movie", "mean_act", "mean_act2", "n_valid", "mean_res", "var_res", "var8_res", "var64_res",
-        "zero_movie", "act_trace")  # arrays (act_trace is per frame)
+        "zero_movie", "act_trace", "movie_max", "act_nan")  # arrays (act_trace is per frame)
+OPTIONAL = ("movie_max", "act_nan")  # maps that older stats of this version lack
 SCALARS = ("gain", "rho_t1", "rho_t2", "rho_r", "rho_c", "F64", "skew", "zero_frac", "n_frames")
 VERSION = 5  # bump when the stats change, to invalidate caches
 # GIAnT's mean fitted activity above this many times the movie's mean (at
@@ -52,6 +60,12 @@ VERSION = 5  # bump when the stats change, to invalidate caches
 # residual there is hugely negative; the simulator turned that into baseline
 # fluctuations hundreds of times the pixel's mean (loss spikes in S0-S3).
 ACT_MAX_RATIO = 2.0
+# The artifact mask grows up to this many pixels through neighbours that miss
+# movie frames and carry activity. On 804730 path 2 the pixels next to the
+# artifact cluster leave the imaged field in a quarter of the frames, and their
+# activity there reaches 1890 counts (movie at most ~100) without changing their
+# mean; it decays over 4-5 frames after the movie returns (targets of -200).
+GROW_PX = 2
 
 
 def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 64) -> dict:
@@ -66,6 +80,8 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
         support = valid & f["mask/footprint_support"][:].astype(bool)
         discard = f["frame/discard"][:].astype(bool)
         act_trace = np.zeros(T, np.float64)
+        movie_max = np.full((R, C), -np.inf, np.float32)
+        act_nan = np.zeros((R, C), np.float32)  # largest activity where the valid pixel's movie is missing
         z = lambda *s: np.zeros(s or (R, C), np.float64)  # noqa: E731
         n, sm, sm2, sa, sa2, nz = z(), z(), z(), z(), z(), z()
         # residual moments on background pixels: own, lag 1 and 2, next row, next column
@@ -93,6 +109,9 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
             sa2 += (a0 ** 2).sum(0, dtype=np.float64)
             nz += (fin & (m == 0)).sum(0, dtype=np.float64)
             act_trace[t0:t1] = np.nan_to_num(a[:, support]).sum(1, dtype=np.float64)
+            movie_max = np.maximum(movie_max, np.where(fin, m, -np.inf).max(0))
+            miss = ~fin & valid[None] & ~discard[t0:t1, None, None]
+            act_nan = np.maximum(act_nan, np.where(miss, np.nan_to_num(a), 0).max(0))
             xr = m0 - a0
             rs += xr.sum(0, dtype=np.float64)
             rs2 += (xr ** 2).sum(0, dtype=np.float64)
@@ -180,7 +199,7 @@ def trial_stats(fn: str | Path, channel: int = 0, chunk: int = 64, block: int = 
     out = {k: v.astype(np.float32) for k, v in
            dict(mean_movie=mean_movie, var_movie=var_movie, mean_act=mean_act, mean_act2=mean_act2, n_valid=n,
                 mean_res=mean_res, var_res=var_res, var8_res=var8_res, var64_res=var64_res, zero_movie=zero_movie,
-                act_trace=act_trace).items()}
+                act_trace=act_trace, movie_max=np.where(n > 0, movie_max, np.nan), act_nan=act_nan).items()}
     zf = float(nz[valid].sum() / max(n[valid].sum(), 1))
     out.update(gain=gain, rho_t1=corr_t(1), rho_t2=corr_t(2), rho_r=rho_r, rho_c=rho_c, F64=F64, skew=skew, zero_frac=zf,
                n_frames=float(T), mean_image_axes=float(mi_axes))
@@ -192,18 +211,38 @@ def _key(fn: Path) -> str:
     return hashlib.sha1(f"{fn.resolve()}|{st.st_size}|{int(st.st_mtime)}|v{VERSION}".encode()).hexdigest()[:16]
 
 
+def _dilate(b: np.ndarray) -> np.ndarray:
+    """b or any of its 8 neighbours."""
+    R, C = b.shape
+    p = np.pad(b, 1)
+    out = np.zeros_like(b)
+    for dr in range(3):
+        for dc in range(3):
+            out |= p[dr:dr + R, dc:dc + C]
+    return out
+
+
 def unfit_pixels(st: dict) -> np.ndarray:
-    """Pixels where GIAnT's mean activity exceeds ACT_MAX_RATIO times the
-    movie's mean (at least 1 count), with their 8 neighbours."""
+    """GIAnT fit artifacts: pixels where the mean activity exceeds
+    ACT_MAX_RATIO times the movie's mean (at least 1 count) or, in stats that
+    have the optional maps, where the activity in a frame without movie
+    exceeds ACT_MAX_RATIO times the movie's largest value (at least 1 count);
+    with their 8 neighbours, then grown by up to GROW_PX pixels through
+    pixels that miss movie frames (n_valid below the most complete pixel's)
+    and carry activity. On real pixels that miss frames the activity there
+    stays below the movie's maximum (at most 0.8x, 99% below 0.15x, in
+    804730 and 780125)."""
     mm = np.maximum(np.nan_to_num(st["mean_movie"]), 1.0)
     bad = np.nan_to_num(st["mean_act"]) > ACT_MAX_RATIO * mm
+    if all(k in st for k in OPTIONAL):
+        bad |= np.nan_to_num(st["act_nan"]) > ACT_MAX_RATIO * np.maximum(np.nan_to_num(st["movie_max"]), 1.0)
     if bad.any():
-        R, C = bad.shape
-        p = np.pad(bad, 1)
-        bad = np.zeros_like(bad)
-        for dr in range(3):
-            for dc in range(3):
-                bad |= p[dr:dr + R, dc:dc + C]
+        bad = _dilate(bad)
+        if "n_valid" in st:
+            nv = np.nan_to_num(np.asarray(st["n_valid"], np.float64))
+            drop = (nv > 0) & (nv < nv.max()) & (np.nan_to_num(st["mean_act2"]) > 0)
+            for _ in range(GROW_PX):
+                bad |= _dilate(bad) & drop
     return bad
 
 
@@ -250,19 +289,26 @@ def _one_channel_mean_image(fn: Path) -> bool:
 
 def _cached(args) -> dict:
     """Stats of one file: from its sidecar (if made for this version and file
-    size), else from the cache folder, else computed (and then cached, and
-    written as a sidecar if asked)."""
+    size; a sidecar or overlay with the OPTIONAL maps before one without),
+    else from the cache folder, else computed (and then cached, and written
+    as a sidecar if asked)."""
     fn, cache, write_sidecar, overlays, out_dir = (tuple(args) + ((), None))[:5]
     fn = Path(fn)
     side = sidecar_path(fn)
     size = fn.stat().st_size
     one_channel = _one_channel_mean_image(fn)
+    found = None
     for cand in [side] + [overlay_path(fn, d) for d in overlays]:
         if cand.exists():
             with np.load(cand) as d:
                 ok = "file_size" in d.files and int(d["file_size"]) == size and (not one_channel or "mean_image_axes" in d.files)
-            if ok:
+                full = all(k in d.files for k in OPTIONAL)
+            if ok and full:
                 return _from_npz(cand)
+            if ok and found is None:
+                found = cand
+    if found is not None:
+        return _from_npz(found)
     if write_sidecar and out_dir is not None:
         side = overlay_path(fn, out_dir)
         side.parent.mkdir(parents=True, exist_ok=True)
