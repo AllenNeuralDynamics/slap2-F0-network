@@ -230,8 +230,8 @@ def unfit_pixels(st: dict) -> np.ndarray:
     with their 8 neighbours, then grown by up to GROW_PX pixels through
     pixels that miss movie frames (n_valid below the most complete pixel's)
     and carry activity. On real pixels that miss frames the activity there
-    stays below the movie's maximum (at most 0.8x, 99% below 0.15x, in
-    804730 and 780125)."""
+    stays below the movie's maximum (at most 0.8x, 99% below 0.35x, in nine
+    trials of six sessions; 803121, with the most motion, 0.53x)."""
     mm = np.maximum(np.nan_to_num(st["mean_movie"]), 1.0)
     bad = np.nan_to_num(st["mean_act"]) > ACT_MAX_RATIO * mm
     if all(k in st for k in OPTIONAL):
