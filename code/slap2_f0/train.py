@@ -453,6 +453,7 @@ def _model_config(args) -> ModelConfig:
     mcfg.varfac_norm = args.varfac_norm
     mcfg.hp_shared = args.hp_shared
     mcfg.motion_features = getattr(args, "motion_features", False)
+    mcfg.edge_features = getattr(args, "edge_features", False)
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -489,16 +490,43 @@ def adapt_varfac_input(state: dict, width: int) -> dict:
     return state
 
 
-def load_compatible(model: torch.nn.Module, state: dict) -> str:
-    """Load a checkpoint into a model that may have more parts (e.g. a slab
-    model's weights into a box model): matching tensors are copied; a tensor
-    whose input-channel axis grew (the first fusion layer, whose inputs are
-    concatenated with the new ones last) gets the old columns and zeros for
-    the new ones, so the model starts out computing what the old one did.
-    Returns a summary."""
+def fusion_columns(src: ModelConfig, dst: ModelConfig) -> list[tuple[slice, slice]]:
+    """(source columns, target columns) of the first fusion layer for each input
+    part (``ModelConfig.fusion_inputs``) the source has; the target must have
+    each with the same size."""
+    def offsets(cfg):  # name -> (first column, count)
+        out, at = {}, 0
+        for name, n in cfg.fusion_inputs():
+            out[name], at = (at, n), at + n
+        return out
+
+    s, d = offsets(src), offsets(dst)
+    pairs = []
+    for name, (a, n) in s.items():
+        if not n:
+            continue
+        b, m = d[name]
+        if m != n:
+            raise SystemExit(f"checkpoint fusion input {name} ({n} channels) does not fit the model's ({m})")
+        pairs.append((slice(a, a + n), slice(b, b + n)))
+    return pairs
+
+
+def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | ModelConfig) -> str:
+    """Load a checkpoint (its weights ``state`` and config ``src_config``) into
+    a model that may have more parts (e.g. a slab model's weights into a box
+    model): matching tensors are copied; a tensor whose input-channel axis grew
+    gets the old columns and zeros for the new ones, so the model starts out
+    computing what the old one did. The first fusion layer's columns are
+    matched by input part (``ModelConfig.fusion_inputs``), whether it grew or
+    not: a new part may sit before an old one (motion or box features added to
+    a model with edge features), and a checkpoint part the model lacks is
+    refused even when the widths agree. Returns a summary."""
     own = model.state_dict()
     copied, grown, new = 0, [], []
     state = dict(state)
+    if not isinstance(src_config, ModelConfig):
+        src_config = config_from_dict(src_config)
     if any(k.startswith("hp_views.") for k in own) and any(k.startswith("hp.") for k in state):
         for k in own:  # a shared half-plane trunk (hp.*) starts every per-direction trunk (hp_views.<k>.*)
             src = "hp." + k.split(".", 2)[2] if k.startswith("hp_views.") else None
@@ -510,10 +538,23 @@ def load_compatible(model: torch.nn.Module, state: dict) -> str:
             new.append(k)
             continue
         w = state[k]
-        if w.shape == v.shape:
+        fits = w.dim() == v.dim() >= 2 and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:]
+        if k == "fuse.0.weight" and fits:  # by input part, also at equal width
+            pairs = fusion_columns(src_config, model.cfg)
+            if sum(s.stop - s.start for s, _ in pairs) != w.shape[1]:
+                raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not match its config")
+            nv = torch.zeros_like(v)
+            for s, d in pairs:
+                nv[:, d] = w[:, s]
+            own[k] = nv
+            if w.shape == v.shape:
+                copied += 1
+            else:
+                grown.append(k)
+        elif w.shape == v.shape:
             own[k] = w
             copied += 1
-        elif w.dim() == v.dim() and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:] and w.shape[1] < v.shape[1]:
+        elif fits and w.shape[1] < v.shape[1]:
             nv = torch.zeros_like(v)
             nv[:, : w.shape[1]] = w
             own[k] = nv
@@ -663,7 +704,7 @@ def train(args) -> None:
         if config_from_dict(ck["config"]).varfac_norm == "window" and mcfg.varfac_norm == "trial":
             state = adapt_varfac_input(state, mcfg.width)
             print("variance-factor weights folded from the window-median input to the trial-median input")
-        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
+        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state, ck['config'])}")
     n_params = sum(p.numel() for p in model.parameters())
     net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -1176,6 +1217,9 @@ def add_arguments(p) -> None:
     p.add_argument("--motion_features", action="store_true",
                    help="box model: also the local displacement and blur seen in the surround, as the change they "
                         "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
+    p.add_argument("--edge_features", action="store_true",
+                   help="per-side window statistics into the fusion and edge-gated corrections of the baseline and "
+                        "noise (ModelConfig.edge_features); starts out exactly as the --init checkpoint")
     p.add_argument("--hp_shared", action="store_true",
                    help="one half-plane trunk for all four directions (v6) instead of one per direction")
     p.add_argument("--photon_zeros", action="store_true",
