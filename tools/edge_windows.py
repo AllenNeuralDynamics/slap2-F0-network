@@ -109,6 +109,13 @@ def wait_for_gpu(device, need_gb: float, poll_s: float = 20.0):
 SWAPS = {"trunk": None, "stats": ("wm", "wv", "n", "edge", "gates"), "extra": ("extra",)}
 
 
+def parts_to(p: dict, device) -> dict:
+    """A ``model.parts`` dict (tensors, lists of tensors, None) on device: a crop's copy, so a cropped
+    view no longer holds its whole GPU allocation."""
+    f = lambda a: a.to(device) if torch.is_tensor(a) else a  # noqa: E731
+    return {k: [f(e) for e in v] if isinstance(v, list) else f(v) for k, v in p.items()}
+
+
 @torch.no_grad()
 def run_models(models, wins, scale, gain, device, tR, nf, need_gb=0.0):
     """Each model on each window (a dict of name -> window); returns {name: {cond: dict of (nf, H', W')
@@ -133,11 +140,13 @@ def run_models(models, wins, scale, gain, device, tR, nf, need_gb=0.0):
             if amp is not None:
                 x = x.to(amp)
             with torch.autocast(device_type=device.type, dtype=amp, enabled=amp is not None):
-                parts[c] = model.parts(x, one(scale), one(gain), region)
-                mu, _, aux = model.head(parts[c], aux=True)
+                p = model.parts(x, one(scale), one(gain), region)
+                mu, _, aux = model.head(p, aux=True)
             res[c] = {"mu": np_(mu) * scale, "base": np_(aux["base"]) * scale,
                       "wm": np_(aux["window_mean"]) * scale, "mix": np_(aux["mix"])}
-            del x
+            if c in ("mid", "end", "start"):  # the swaps' inputs wait on the CPU, so the GPU is free for the
+                parts[c] = parts_to(p, "cpu")  # next forward (wait_for_gpu cannot free referenced tensors)
+            del x, p, mu, aux
         for c in ("end", "start"):
             if c not in parts or "mid" not in parts:
                 continue
@@ -145,9 +154,11 @@ def run_models(models, wins, scale, gain, device, tR, nf, need_gb=0.0):
                 keys = keys or (("hf",) if c == "end" else ("hp",))
                 q = dict(parts[c])
                 q.update({k: parts["mid"][k] for k in keys})
+                q = parts_to(q, device)
                 with torch.autocast(device_type=device.type, dtype=amp, enabled=amp is not None):
                     mu, _ = model.head(q)
                 res[f"{c}_sw_{sw}"] = {"mu": np_(mu) * scale}
+                del q, mu
         out[name] = res
         del parts
     return out

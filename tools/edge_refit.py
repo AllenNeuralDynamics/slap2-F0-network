@@ -30,9 +30,10 @@ is not paid for in the middle). Training windows draw seeds 95_000+ (96_000+
 for ``--extra_train``, all at trial edges), evaluation windows 90_000+ (as
 ``edge_windows.py``), so the two never share a draw.
 
-A cache (``--save_cache``) records what its trunk outputs depend on (a hash of
-the trunk's weights, the checkpoint's config and window, the simulation and
-the window sizes); ``--load_cache`` reuses it only when these match.
+A cache (``--save_cache``) records what its trunk outputs depend on (hashes of
+the trunk's weights and of the trials' statistics, the checkpoint's config and
+window, the simulation and the window sizes); ``--load_cache`` reuses it only
+when these match.
 """
 import argparse
 import copy
@@ -58,17 +59,33 @@ from slap2_f0.train import eval_sim, load_compatible  # noqa: E402
 HEAD = ("fuse", "head_mu", "head_mix", "head_var", "head_edge", "log_floor")  # trained; the rest is frozen
 
 
-def cache_source(args, ck) -> dict:
-    """What cached trunk outputs depend on: the frozen weights (everything but HEAD, hashed), the
-    checkpoint's config and window, the simulation, the window sizes and the template trials."""
+def _digest(h, v):
+    """Feed a value (dicts, arrays, tensors, scalars) into the hash h."""
+    if isinstance(v, dict):
+        for k in sorted(v, key=str):
+            h.update(str(k).encode())
+            _digest(h, v[k])
+        return
+    a = v.detach().cpu().float().numpy() if torch.is_tensor(v) else np.asarray(v)
+    if a.dtype == object:
+        h.update(repr(v).encode())
+    else:
+        h.update(f"{a.dtype}{a.shape}".encode())
+        h.update(np.ascontiguousarray(a).tobytes())
+
+
+def cache_source(args, ck, stats) -> dict:
+    """What cached trunk outputs depend on: the frozen weights (everything but HEAD), the checkpoint's
+    config and window, the simulation, the window sizes, the template trials and their resolved
+    statistics (the simulator's baseline, gain and noise; a replaced sidecar or --stats cache changes
+    them), the weights and statistics hashed."""
     h = hashlib.sha256()
-    for k in sorted(ck["model"]):
-        if not k.startswith(HEAD):
-            h.update(k.encode())
-            h.update(ck["model"][k].detach().cpu().float().contiguous().numpy().tobytes())
-    return {"trunk_sha256": h.hexdigest(), "config": dict(ck["config"]), "window": dict(ck["window"]),
-            "kind": args.kind, "pz_legacy": bool(args.pz_legacy), "out_frames": args.out_frames,
-            "out_px": args.out_px, "trials": [str(t) for t in args.trials]}
+    _digest(h, {k: v for k, v in ck["model"].items() if not k.startswith(HEAD)})
+    hs = hashlib.sha256()
+    _digest(hs, {str(i): stats[str(t)] for i, t in enumerate(args.trials)})
+    return {"trunk_sha256": h.hexdigest(), "stats_sha256": hs.hexdigest(), "config": dict(ck["config"]),
+            "window": dict(ck["window"]), "kind": args.kind, "pz_legacy": bool(args.pz_legacy),
+            "out_frames": args.out_frames, "out_px": args.out_px, "trials": [str(t) for t in args.trials]}
 
 
 def build(ck, edge: bool, device):
@@ -324,7 +341,7 @@ def main():
     args.t_reach, args.s_reach = tR, sR
     if (args.extra_train or args.extra_eval) and not args.load_cache:
         raise SystemExit("--extra_train and --extra_eval extend a --load_cache")
-    source = cache_source(args, ck)
+    source = cache_source(args, ck, stats)
     trunk = None
     if args.extra_train or args.extra_eval or not args.load_cache:
         trunk = build(ck, True, device).eval()  # its parts hold the edge statistics too; ctrl ignores them
