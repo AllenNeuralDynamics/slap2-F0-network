@@ -17,7 +17,8 @@ Variants (combine the parts in one name, e.g. freepzx4):
   pz / pznew        realistic low counts, legacy draw (as S0-S3 trained) / current draw
   dim               a third of the photons (SimConfig.photon_gain 3, as evaluate's dim kinds)
   x<k>              k times the photons: gain / k, measured skew / sqrt(k) (the simulator's
-                    event-size factor stays), variance maps / k
+                    event-size factor stays), variance maps / k, and with pz the counts
+                    per zero-count event / k (as SimConfig.photon_gain 1/k)
   flat<level>       the template's baseline replaced by a flat field at level x the trial
                     scale, with no excess (flatm<level>: the template's own baseline, no excess)
   vf1               the variance-factor input set to 1 (no information)
@@ -49,21 +50,27 @@ from slap2_f0.train import EVAL_SEEDS, _forward, movmean_t  # noqa: E402
 CLASSES = ("sup", "bg", "lab")
 
 
-class FlatDataset(WindowDataset):
-    """Templates with a flat baseline at `level` x the trial scale (level <= 0: the
-    template's own baseline) and no excess; activity as the SimConfig says."""
+class ProbeDataset(WindowDataset):
+    """WindowDataset with altered templates. level (None: unchanged): a flat baseline
+    at level x the trial scale (level <= 0: the template's own baseline), and no
+    excess. k: k times the photons, where the stats come from `more_photons`; the
+    counts per zero-count event, which Template derives from the unchanged mean and
+    zero-frame maps, are divided by k here. Activity as the SimConfig says."""
 
-    def __init__(self, *args, level=1.0, **kw):
+    def __init__(self, *args, level=None, k=1.0, **kw):
         super().__init__(*args, **kw)
-        self.level = level
+        self.level, self.k = level, k
 
     def _template(self, fn):
         if fn not in self._tpl:
             tp = Template(self._trial(fn), self.stats[fn])
-            if self.level > 0:
-                tp.B = np.where(np.isfinite(tp.B), np.float32(self.level * tp.tf.scale), np.nan).astype(np.float32)
-            tp.fast = np.zeros_like(tp.fast)
-            tp.slow = np.zeros_like(tp.slow)
+            if self.level is not None:
+                if self.level > 0:
+                    tp.B = np.where(np.isfinite(tp.B), np.float32(self.level * tp.tf.scale), np.nan).astype(np.float32)
+                tp.fast = np.zeros_like(tp.fast)
+                tp.slow = np.zeros_like(tp.slow)
+            if self.k != 1 and tp.zc is not None:
+                tp.zc = (tp.zc / np.float32(self.k)).astype(np.float32)
             self._tpl[fn] = tp
         return self._tpl[fn]
 
@@ -127,14 +134,13 @@ def main():
         sess = Path(sdir).name
         for v in a.variants.split(","):
             base = "real" if v.startswith("real") else ("free" if v.startswith("free") else "sim")
-            st_v = stats
             mx = re.search(r"x(\d+)", v)
-            if mx:
-                st_v = more_photons(stats, float(mx.group(1)))
-            kw = dict(length=a.windows, seed=EVAL_SEEDS[base] + a.seed, sim=sim_config(v), flip=False)
+            k = float(mx.group(1)) if mx else 1.0
+            st_v = more_photons(stats, k) if mx else stats
             mf = re.search(r"flat(m?)([0-9.]+)", v)
-            ds = FlatDataset(files, wcfg, st_v, level=-1.0 if mf.group(1) else float(mf.group(2)), **kw) if mf \
-                else WindowDataset(files, wcfg, st_v, **kw)
+            level = None if not mf else (-1.0 if mf.group(1) else float(mf.group(2)))
+            ds = ProbeDataset(files, wcfg, st_v, level=level, k=k, length=a.windows,
+                              seed=EVAL_SEEDS[base] + a.seed, sim=sim_config(v), flip=False)
             tot = {n: {} for n, _, _ in models}
             t0 = time.time()
             for b in torch.utils.data.DataLoader(ds, batch_size=1, num_workers=a.workers):

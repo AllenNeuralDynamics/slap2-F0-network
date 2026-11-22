@@ -2,11 +2,14 @@
 trials: brightness, photons per frame, zero frames, excess and variance factor
 (docs/plan.md, "Low photon counts: the baseline sits low").
 
-usage: python lowcount_charac.py ROOT [--out charac.tsv]
+usage: python lowcount_charac.py ROOT [--sidecars DIR] [--cache DIR] [--out charac.tsv]
 
-ROOT holds <session>/<path>/trial_*.h5 with their stats sidecars
-(trial_*_stats_v5.npz). One tab-separated row per trial; per class (sup, bg,
-labns = labeled outside every footprint):
+ROOT holds <session>/<path>/trial_*.h5. Stats come through `load_stats`, as in
+training: a trial's own sidecar if it is current, else an overlay folder of
+sidecars (--sidecars), else the cache folder (--cache), else they are computed.
+Stale sidecars (e.g. one-channel exports such as 803496 and 804730) are thus
+recomputed, which takes minutes per trial. One tab-separated row per trial; per
+class (sup, bg, labns = labeled outside every footprint):
   B_*        the simulator's baseline (mean - mean activity) over the trial scale
   photons_*  mean count / gain (photons per frame)
   zero_*     share of zero frames
@@ -25,21 +28,20 @@ from scipy.ndimage import distance_transform_edt
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 from slap2_f0.io import TrialFile  # noqa: E402
 from slap2_f0.simulate import Template  # noqa: E402
-from slap2_f0.stats import sanitize  # noqa: E402
+from slap2_f0.stats import load_stats  # noqa: E402
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("root", type=Path)
+    p.add_argument("--sidecars", default="", help="overlay folder(s) of sidecars, comma-separated")
+    p.add_argument("--cache", default="", help="folder to cache computed stats in")
     p.add_argument("--out", default="")
     a = p.parse_args()
     lines = []
     for h5 in sorted(a.root.glob("*/Path*/trial_*.h5")):
-        sf = h5.with_name(h5.stem + "_stats_v5.npz")
-        if not sf.exists():
-            continue
+        st = load_stats([h5], a.cache or None, sidecar_dirs=a.sidecars)[str(h5)]
         tf = TrialFile(h5)
-        st = sanitize(dict(np.load(sf)))
         tp = Template(tf, st)
         v = tf.valid & np.isfinite(st["mean_movie"])
         cls = {"sup": v & tf.support, "bg": v & ~tf.labeled, "labns": v & tf.labeled & ~tf.support}
