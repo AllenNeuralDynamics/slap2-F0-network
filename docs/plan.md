@@ -1468,6 +1468,8 @@ All checkpoints are scored on the same windows: v10a's evaluation re-scored v9, 
 
 ## Source detection with the network baseline: queued (2026-11-20)
 
+**Done (2026-11-22):** see "Source detection with the network baseline: results (2026-11-22)".
+
 The question: once the network supplies μ and σ, is SiLo's detection the right statistic for photon counts? SiLo computes a Z-score, applies the exponential matched filter and the difference of Gaussians (DoG), then sums the squares of local maxima. Scripts are in `tools/detection/`.
 
 **Real data** (780125, 10 trials, 112 isolated sources). Each source's signal pattern comes from regressing the movie on its own GIAnT trace, cross-fitted over alternating 200-frame blocks. Detection d′ relative to SiLo's spatial filter:
@@ -2289,3 +2291,52 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - `slap2-f0 average OUT CKPT[=W] ...`: the weighted average of checkpoints, from paths, globs and weights, for soups of kept steps and WiSE-FT interpolation (`pre.pt=0.5 ft.pt=0.5`). The network has no normalization buffers, so the averaged weights are a complete model.
 - `tools/finetune_tradeoff.py`: the tables above. With `--averages`, it gives paired summaries of model variants scored on the same windows.
 - Tests: `test_ema_and_l2sp` and `test_average_checkpoints`.
+
+## Source detection with the network baseline: results (2026-11-22)
+
+The three changes queued on 2026-11-20 are now options in GIAnT-Python, all off by default: [GIAnT-Python#16](https://github.com/AllenNeuralDynamics/GIAnT-Python/pull/16) (against `dev`).
+- **Code:** a port of SiLo's per-trial localization (`loadAndProcessTrialAsync`, `localizeSources_vIM`, `getActImPeaks`) in `giant_python.extraction.raster`, with the options on top. GIAnT-MATLAB is unchanged.
+- **Agreement with GIAnT-MATLAB main (9695d27):** with the v9 baseline, the summary image's correlation is 1.00000000, and seeds at threshold 8 are identical.
+- **Options:**
+  - `surround=False`;
+  - `null="bootstrap"`: a per-brightness parametric bootstrap, replacing the sign-flip estimate of GIAnT-MATLAB#42;
+  - `variance_floor=False`;
+  - `score="soft_threshold"`: max(0, u − 2)², with u in robust SDs.
+- **Not tested on the integration capsule:** capsule 1081753 runs MATLAB SILo.
+
+**Tests:**
+- **Simulations with ground truth** (v9 fine-tuned baselines predicted from each movie):
+  - 24 low-count trials (`simpz`, `fastpz`; 780125, 803121, 878030 and 885233 as templates; 912 sources);
+  - the 8 earlier locsims trials (304 sources).
+- **Metrics on simulations:**
+  - threshold-free AP over all 3×3 maxima;
+  - the best F1 of `get_act_im_peaks` seeds over thresholds.
+- **780125, trials 1–4:** validated sources found and failed sources hit among the top N and 2N candidates (N = validated count: 182 on Path 1, 135 on Path 2; failed sources: 3 and 43).
+
+| configuration | low-count AP (− net, 95%) | low-count seed F1 (threshold) | locsims seed F1 | 780125 Path 2, top 2N: validated / failed |
+|---|---|---|---|---|
+| moving median (today) | 0.768 (−0.009 [−0.029, +0.010]) | 0.794 (5) | 0.789 | 74 / 37 |
+| net | 0.776 | 0.811 (8) | 0.810 | 92 / 18 |
+| net, no surround | 0.779 (+0.003 [−0.003, +0.010]) | 0.816 (10) | 0.819 | 93 / 16 |
+| net, bootstrap | 0.785 (+0.009 [+0.003, +0.016]) | 0.816 (8) | 0.817 | 92 / 11 |
+| **net, no surround, bootstrap** | 0.784 (+0.008 [−0.000, +0.016]) | **0.822 (8)** | **0.826** | 93 / 11 |
+| net, bootstrap, no floor | 0.780 (+0.003 [−0.011, +0.016]) | 0.805 (8) | 0.817 | 93 / 10 |
+| net, soft threshold 2 | 0.782 (+0.006 [−0.001, +0.014]) | 0.791 (16) | 0.811 | 93 / 19 |
+| net, all three | 0.793 (+0.017 [+0.006, +0.030]) | 0.784 (20) | 0.794 | 97 / 9 |
+| true baseline | 0.799 (+0.024 [+0.013, +0.038]) | 0.860 (12) | 0.862 | |
+
+**What to turn on**, with the network baseline: `surround=False` with `null="bootstrap"`, keeping the floor, at `peak_th` 8.
+- **Seeds:** the best on both simulation sets.
+- **780125:** fewer failed sources among Path 2's top candidates, 11 against 18 in the top 2N.
+- **Threshold:** 8 is the best on simulations. On 780125 it gives 15–28% more seeds than today's 8; 10 finds the same validated sources as today's 8.
+- **Cost:** localization takes about twice as long, because each trial also scores one noise movie.
+- **Not** `variance_floor=False`: no gain over the bootstrap with the floor.
+- **Not** the soft threshold:
+  - it ranks candidates better, but its seeds are worse at every threshold;
+  - it needs `peak_th` of about 16–20;
+  - with the moving median it also does not help on real data (780125 Path 2: 76 / 33).
+- **The gains are small next to the baseline's:** the true baseline is 0.04–0.05 better in seed F1. Baseline accuracy matters more than the detection statistic.
+
+**Also found:**
+- The moving median with the bootstrap and without the floor collapses (locsims AP 0.18), because the moving median is biased low at low counts. `variance_floor=False` now requires an external baseline.
+- Once in 24 trials, the port's peak fit hit a LAPACK SVD that did not converge; the same fit succeeds when rerun. Such a fit is now retried with `tr_solver="lsmr"`.
