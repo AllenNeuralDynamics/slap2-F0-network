@@ -781,3 +781,23 @@ def test_step_profiler_window_and_cleanup(capsys):
     assert StepProfiler.quiet_start(5, (1000, 500, 100)) == 20
     with pytest.raises(ValueError):  # 2 steps always hold a multiple of 2
         StepProfiler.quiet_start(2, (2, 0))
+
+
+def test_compile_log_turns_on_recompile_logging(monkeypatch):
+    """--compile_log: fast_model asks torch._logging for recompile and graph-break logs."""
+    import argparse
+
+    import torch
+
+    import slap2_f0.train as tr
+
+    calls = {}
+    monkeypatch.setattr(torch._logging, "set_logs", lambda **kw: calls.update(kw))
+    monkeypatch.setattr(torch, "compile", lambda m, **kw: m)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    m = torch.nn.Linear(2, 2)
+    out = tr.fast_model(m, torch.device("cuda"), argparse.Namespace(compile_log=True))
+    assert out is m and calls.get("recompiles") and calls.get("graph_breaks")
+    calls.clear()
+    tr.fast_model(m, torch.device("cuda"), argparse.Namespace())
+    assert calls == {}
