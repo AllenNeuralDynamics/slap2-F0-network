@@ -99,45 +99,79 @@ class LoaderWait:
 
 
 class StepProfiler:
-    """--profile_steps N: profile N optimizer steps after ``start`` warm-up
-    steps (torch.profiler, CPU and CUDA), then print the operations with the
-    most self time on the GPU and on the CPU, the GPU's busy share of the
-    wall time, and torch.compile's counters (frames compiled, graph breaks,
-    recompilations). For finding what limits a training step."""
+    """--profile_steps N: profile N optimizer steps (torch.profiler, CPU and
+    CUDA) and print the operations with the most self time on the GPU and on
+    the CPU, the GPU's busy share of the wall time (the union of its kernels'
+    intervals), and torch.compile's counters (frames compiled, graph breaks,
+    recompilations). For finding what limits a training step.
+
+    The window opens after step ``start`` has finished (its validation and
+    checkpoints included) and closes after step ``start + n``'s optimizer step,
+    before that step's validation; ``quiet_start`` picks a start whose window
+    holds no validation or checkpoint. ``finish`` closes a window that training
+    left open (it ended early or raised) and says so."""
 
     def __init__(self, n: int, start: int = 20, device: str = "cuda"):
+        if n < 0:
+            raise ValueError(f"--profile_steps must be 0 (off) or positive, not {n}")
         self.n, self.start, self.prof, self.t = n, start, None, 0.0
         self.acts = [torch.profiler.ProfilerActivity.CPU] + (
             [torch.profiler.ProfilerActivity.CUDA] if device == "cuda" else [])
 
-    def step(self, step: int) -> None:
-        if not self.n:
-            return
-        if step == self.start:
+    @staticmethod
+    def quiet_start(n: int, everies, first: int = 20) -> int:
+        """The first start >= first whose window (start, start + n] holds no
+        multiple of any of ``everies`` (validation, saving, keeping; 0 = never)."""
+        ev = [e for e in everies if e and e > 0]
+        s = first
+        while any(k % e == 0 for e in ev for k in range(s + 1, s + n + 1)):
+            s += 1
+        return s
+
+    def after_step(self, step: int) -> None:
+        """At the end of an optimizer step's iteration (after validation and checkpoints)."""
+        if self.n and self.prof is None and step == self.start:
             self.prof = torch.profiler.profile(activities=self.acts)
             self.prof.__enter__()
             self.t = time.time()
-        elif self.prof is not None and step == self.start + self.n:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            wall = time.time() - self.t
-            self.prof.__exit__(None, None, None)
-            ev = self.prof.key_averages()
-            gpu = sum(getattr(e, "self_device_time_total", 0) for e in ev) / 1e6
-            print(f"profile of {self.n} steps: {wall:.1f} s wall, GPU kernels {gpu:.1f} s "
-                  f"({100 * gpu / max(wall, 1e-9):.0f}% busy)", flush=True)
-            for key in ("self_cuda_time_total", "self_cpu_time_total"):
-                try:
-                    print(ev.table(sort_by=key, row_limit=20, max_name_column_width=70), flush=True)
-                except Exception as e:  # noqa: BLE001
-                    print(f"profile table by {key}: {e}", flush=True)
+
+    def before_val(self, step: int) -> None:
+        """Right after an optimizer step, before its validation and checkpoints."""
+        if self.prof is not None and step == self.start + self.n:
+            self._close(self.n)
+
+    def finish(self, step: int) -> None:
+        if self.prof is not None:
+            self._close(max(0, step - self.start), incomplete=True)
+
+    def _close(self, steps: int, incomplete: bool = False) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        wall = time.time() - self.t
+        prof, self.prof = self.prof, None
+        prof.__exit__(None, None, None)
+        spans = sorted((e.time_range.start, e.time_range.end) for e in prof.events()
+                       if getattr(e, "device_type", None) == torch.autograd.DeviceType.CUDA)
+        busy, end = 0.0, float("-inf")  # union of kernel intervals (us)
+        for a0, a1 in spans:
+            if a1 > end:
+                busy += a1 - max(a0, end)
+                end = a1
+        note = f" (incomplete: {steps} of {self.n} steps)" if incomplete else ""
+        print(f"profile of {steps} steps{note}: {wall:.1f} s wall, GPU busy {busy / 1e6:.1f} s "
+              f"({100 * busy / 1e6 / max(wall, 1e-9):.0f}%)", flush=True)
+        ev = prof.key_averages()
+        for key in ("self_cuda_time_total", "self_cpu_time_total"):
             try:
-                from torch._dynamo.utils import counters
-                print("torch.compile counters: " + json.dumps({k: dict(v) for k, v in counters.items()},
-                                                               default=str)[:4000], flush=True)
+                print(ev.table(sort_by=key, row_limit=20, max_name_column_width=70), flush=True)
             except Exception as e:  # noqa: BLE001
-                print(f"torch.compile counters: {e}", flush=True)
-            self.prof = None
+                print(f"profile table by {key}: {e}", flush=True)
+        try:
+            from torch._dynamo.utils import counters
+            print("torch.compile counters: " + json.dumps({k: dict(v) for k, v in counters.items()},
+                                                           default=str)[:4000], flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"torch.compile counters: {e}", flush=True)
 
 
 def quality_files(files: list[Path], args) -> list[Path]:
@@ -914,46 +948,52 @@ def train(args) -> None:
     # time spent waiting for the data loaders, per log interval: the rest is the
     # model (and validation); near the interval's length means data-bound
     waits = LoaderWait()
-    prof = StepProfiler(getattr(args, "profile_steps", 0), device=device.type)
-    for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
-        waits.got()
-        b, mu, var = _forward(net, b, device, amp_dtype, region)
-        loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
-        scaler.scale(loss / args.accum).backward()
-        if micro % args.accum:
+    n_prof = getattr(args, "profile_steps", 0)
+    prof = StepProfiler(n_prof, StepProfiler.quiet_start(n_prof, (args.val_every, args.save_every, args.keep_every)),
+                        device=device.type)
+    try:
+        for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
+            waits.got()
+            b, mu, var = _forward(net, b, device, amp_dtype, region)
+            loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
+            scaler.scale(loss / args.accum).backward()
+            if micro % args.accum:
+                waits.idle()
+                continue
+            step = micro // args.accum
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
+            lr_step = sched.get_last_lr()[0]  # the rate this step used
+            prof.before_val(step)
+            sched.step()
+            with torch.no_grad():
+                if anchor is not None:  # --l2sp: back toward the initial weights by lr x l2sp of the distance
+                    torch._foreach_lerp_(list(model.parameters()), anchor, min(1.0, lr_step * args.l2sp))
+                if avg_model is not None:
+                    torch._foreach_lerp_(list(avg_model.parameters()), list(model.parameters()), 1.0 - args.ema)
+            ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
+            if step % args.log_every == 0 or step == 1:
+                mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
+                wait, interval = waits.report()
+                print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
+                      f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}; data wait {wait:.1f} of "
+                      f"{interval:.1f} s", flush=True)
+            last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
+            if step % args.val_every == 0 or last_step:
+                validate(step)
+            if step % args.save_every == 0 or last_step:
+                save("last.pt", step)
+            if args.keep_every and (step % args.keep_every == 0 or last_step):
+                keep(step)
+            prof.after_step(step)
+            if last_step:
+                break
             waits.idle()
-            continue
-        step = micro // args.accum
-        scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(opt)
-        scaler.update()
-        opt.zero_grad(set_to_none=True)
-        lr_step = sched.get_last_lr()[0]  # the rate this step used
-        prof.step(step)
-        sched.step()
-        with torch.no_grad():
-            if anchor is not None:  # --l2sp: back toward the initial weights by lr x l2sp of the distance
-                torch._foreach_lerp_(list(model.parameters()), anchor, min(1.0, lr_step * args.l2sp))
-            if avg_model is not None:
-                torch._foreach_lerp_(list(avg_model.parameters()), list(model.parameters()), 1.0 - args.ema)
-        ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
-        if step % args.log_every == 0 or step == 1:
-            mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
-            wait, interval = waits.report()
-            print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
-                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}; data wait {wait:.1f} of "
-                  f"{interval:.1f} s", flush=True)
-        last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
-        if step % args.val_every == 0 or last_step:
-            validate(step)
-        if step % args.save_every == 0 or last_step:
-            save("last.pt", step)
-        if args.keep_every and (step % args.keep_every == 0 or last_step):
-            keep(step)
-        if last_step:
-            break
-        waits.idle()
+    finally:
+        prof.finish(step)  # a window left open (training ended early or raised)
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
 
 
