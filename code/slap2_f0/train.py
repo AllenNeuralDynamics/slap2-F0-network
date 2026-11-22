@@ -123,6 +123,9 @@ class StepProfiler:
         """The first start >= first whose window (start, start + n] holds no
         multiple of any of ``everies`` (validation, saving, keeping; 0 = never)."""
         ev = [e for e in everies if e and e > 0]
+        if n and ev and n >= min(ev):  # every n consecutive steps would hold a validation or checkpoint
+            raise ValueError(f"--profile_steps {n} must be smaller than every enabled interval "
+                             f"(--val_every, --save_every, --keep_every: {sorted(ev)})")
         s = first
         while any(k % e == 0 for e in ev for k in range(s + 1, s + n + 1)):
             s += 1
@@ -982,6 +985,8 @@ def train(args) -> None:
                       f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}; data wait {wait:.1f} of "
                       f"{interval:.1f} s", flush=True)
             last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
+            if last_step:  # close a window that training ends inside, before the final validation and saves
+                prof.finish(step)
             if step % args.val_every == 0 or last_step:
                 validate(step)
             if step % args.save_every == 0 or last_step:

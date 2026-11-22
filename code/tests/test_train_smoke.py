@@ -779,3 +779,5 @@ def test_step_profiler_window_and_cleanup(capsys):
     assert StepProfiler.quiet_start(2, (20, 0)) == 20  # steps 21-22 are free
     assert StepProfiler.quiet_start(3, (22,)) == 22  # 21-23 would hold 22
     assert StepProfiler.quiet_start(5, (1000, 500, 100)) == 20
+    with pytest.raises(ValueError):  # 2 steps always hold a multiple of 2
+        StepProfiler.quiet_start(2, (2, 0))
