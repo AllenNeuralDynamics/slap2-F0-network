@@ -66,11 +66,20 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .data import WindowConfig, WindowDataset, loss_region
-from .io import TrialFile, list_trials
+from .io import TrialFile, filter_trials, list_trials
 from .losses import gaussian_nll, student_t_nll
 from .model import ModelConfig, SlabBlindSpotNet, blind_window_stats, config_from_dict, make_inputs
 from .simulate import SimConfig, excess_summary
 from .stats import load_stats
+
+
+def quality_files(files: list[Path], args) -> list[Path]:
+    """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
+    kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
+    if report:
+        print(f"trial quality: left out {len(files) - len(kept)} of {len(files)} trials:\n  " + "\n  ".join(report),
+              flush=True)
+    return kept
 
 
 def session_groups(files: list[Path]) -> dict[str, list[Path]]:
@@ -661,7 +670,7 @@ def train(args) -> None:
     if args.l2sp and not args.init:
         raise SystemExit("--l2sp pulls toward the --init checkpoint: give --init")
     torch.manual_seed(args.seed)
-    files = list_trials(args.root)
+    files = quality_files(list_trials(args.root), args)
     if args.exclude:
         skip = set(args.exclude.split(","))
         groups = session_groups(files)
@@ -876,7 +885,7 @@ def evaluate_checkpoints(args) -> None:
     training seed, the first ``val_windows`` of a held-out session are the
     ones its training validation used. With --per_window, windows.csv has
     each window's error sums (see ``evaluate``)."""
-    files = list_trials(args.root)
+    files = quality_files(list_trials(args.root), args)
     if not files:
         raise SystemExit(f"no trial files under {args.root}")
     groups = session_groups(files)
@@ -1016,6 +1025,15 @@ def excess_report(groups: dict, stats: dict, path: Path) -> None:
               + f"brightness {med('top10_mean_over_scale'):.1f}x scale; support px {med('support_px'):.0f}", flush=True)
 
 
+def add_quality_arguments(p) -> None:
+    p.add_argument("--min_peak_r", type=float, default=0.3,
+                   help="leave out trials whose activity calibration failed: the exporter's peak correlation "
+                        "(attribute peakR) below this (0: keep all; io.filter_trials)")
+    p.add_argument("--min_path_trials", type=int, default=4,
+                   help="leave out an imaging path whole if fewer than this many of its trials are usable (calibrated "
+                        "exports only; 0: keep all)")
+
+
 def add_eval_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
     p.add_argument("--ckpt", nargs="+", required=True,
@@ -1045,6 +1063,7 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--sidecars", default="",
                    help="comma-separated stats overlay folders (<session>/<path>/<trial>_stats_v5.npz, e.g. a data "
                         "asset made by `slap2-f0 stats ROOT --out DIR`), searched after each trial's own sidecar")
+    add_quality_arguments(p)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--device", default="auto")
     p.add_argument("--no_amp", action="store_true")
@@ -1231,6 +1250,7 @@ def add_arguments(p) -> None:
     p.add_argument("--sidecars", default="",
                    help="comma-separated stats overlay folders (<session>/<path>/<trial>_stats_v5.npz, e.g. a data "
                         "asset made by `slap2-f0 stats ROOT --out DIR`), searched after each trial's own sidecar")
+    add_quality_arguments(p)
     p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
     p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
     p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")

@@ -18,6 +18,7 @@ Attributes on the root group hold QC and provenance (see the export function).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -135,3 +136,64 @@ def list_trials(root: str | Path) -> list[Path]:
         except OSError:
             continue
     return out
+
+
+def _path_id(attr, folder: str) -> int | str:
+    """An imaging path's number from the exporter's ``path`` attribute or,
+    without it, from the folder name (Path2 -> 2), so both name one path."""
+    if attr is not None:
+        try:
+            return int(float(attr))
+        except (TypeError, ValueError):
+            pass
+    m = re.fullmatch(r"(?i)path_?(\d+)", folder)
+    return int(m.group(1)) if m else folder
+
+
+def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: int = 4) -> tuple[list[Path], list[str]]:
+    """Leave out trials whose activity calibration failed, and imaging paths
+    left with too few trials. Returns the kept files, in the order given,
+    and one report line per trial or path left out.
+
+    - Calibration: the exporter scales GIAnT's activity to the movie and
+      records how well its peaks match (attribute ``peakR``). Below
+      ``min_peak_r`` the fit does not describe the movie: in the 2025-2026
+      exports 34 of 3,026 trials scored 0.03-0.27, with the gain and blur
+      pinned at their bounds, against 0.30 or more for the rest (median
+      0.43). Their training target (movie - activity) is wrong wherever the
+      activity is.
+    - Paths: a path with fewer than ``min_path_trials`` trials left after
+      the calibration cut is left out whole. This applies only to paths of
+      calibrated exports (some trial has ``peakR``); trials of older or
+      synthetic files without it are never left out.
+    0 turns either rule off.
+    """
+    info = []
+    for f in files:
+        with h5py.File(f, "r") as h:
+            a = {k: _scalar(h.attrs[k]) for k in ("label", "path", "trial", "peakR") if k in h.attrs}
+        digits = f.stem[len("trial_"):]
+        trial = int(a["trial"]) if "trial" in a else (int(digits) if digits.isdigit() else 0)
+        info.append((f, str(a.get("label", f.parent.parent.name)), _path_id(a.get("path"), f.parent.name), trial,
+                     float(a["peakR"]) if "peakR" in a else float("nan")))
+    report, failed = [], set()
+    if min_peak_r > 0:
+        for f, s, p, t, r in info:
+            if r < min_peak_r:  # NaN (no attribute) compares False and is kept
+                failed.add(f)
+                report.append(f"{s} path {p} trial {t}: calibration failed (peak r {r:.2f} < {min_peak_r:g})")
+    dropped_paths = set()
+    if min_path_trials > 0:
+        kept: dict[tuple, int] = {}
+        calibrated: set[tuple] = set()
+        for f, s, p, _, r in info:
+            kept[(s, p)] = kept.get((s, p), 0) + (f not in failed)
+            if r == r:  # has peakR
+                calibrated.add((s, p))
+        for key in sorted(calibrated, key=str):
+            if kept[key] < min_path_trials:
+                dropped_paths.add(key)
+                report.append(f"{key[0]} path {key[1]}: left out whole, {kept[key]} usable trials "
+                              f"(< {min_path_trials})")
+    out = [f for f, s, p, _, _ in info if f not in failed and (s, p) not in dropped_paths]
+    return out, report
