@@ -73,6 +73,31 @@ from .simulate import SimConfig, excess_summary
 from .stats import load_stats
 
 
+class LoaderWait:
+    """Time the training loop spends waiting for the data loaders, per log
+    interval. ``idle()`` when the loop goes back for the next batch, ``got()``
+    when it has it; ``report()`` gives (wait, interval) since the last report
+    and starts a new interval. Work between ``got()`` and ``idle()``
+    (forward, backward, validation) counts towards the interval only."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.wait = 0.0
+        self.t_log = self.tick = clock()
+
+    def idle(self) -> None:
+        self.tick = self.clock()
+
+    def got(self) -> None:
+        self.wait += self.clock() - self.tick
+
+    def report(self) -> tuple[float, float]:
+        now = self.clock()
+        out = (self.wait, now - self.t_log)
+        self.wait, self.t_log = 0.0, now
+        return out
+
+
 def quality_files(files: list[Path], args) -> list[Path]:
     """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
     kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
@@ -846,14 +871,14 @@ def train(args) -> None:
     opt.zero_grad(set_to_none=True)
     # time spent waiting for the data loaders, per log interval: the rest is the
     # model (and validation); near the interval's length means data-bound
-    data_wait, t_log, tick = 0.0, time.time(), time.time()
+    waits = LoaderWait()
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
-        data_wait += time.time() - tick
+        waits.got()
         b, mu, var = _forward(net, b, device, amp_dtype, region)
         loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
         scaler.scale(loss / args.accum).backward()
         if micro % args.accum:
-            tick = time.time()
+            waits.idle()
             continue
         step = micro // args.accum
         scaler.unscale_(opt)
@@ -871,11 +896,10 @@ def train(args) -> None:
         ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
             mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
-            now = time.time()
+            wait, interval = waits.report()
             print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
-                  f"lr {sched.get_last_lr()[0]:.2e} {now - t0:.0f} s{mem}; data wait {data_wait:.1f} of "
-                  f"{now - t_log:.1f} s", flush=True)
-            data_wait, t_log = 0.0, now
+                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}; data wait {wait:.1f} of "
+                  f"{interval:.1f} s", flush=True)
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
         if step % args.val_every == 0 or last_step:
             validate(step)
@@ -885,7 +909,7 @@ def train(args) -> None:
             keep(step)
         if last_step:
             break
-        tick = time.time()
+        waits.idle()
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
 
 

@@ -730,3 +730,20 @@ def test_average_checkpoints(tmp_path):
           "--val_windows", "2", "--stats_cache", str(out / "stats"), "--width", "6"] + SMALL[2:])
     with pytest.raises(SystemExit):  # another width
         main(["average", str(tmp_path / "bad.pt"), str(out / "best.pt"), str(other / "best.pt")])
+
+
+def test_loader_wait_accumulates_and_resets():
+    """LoaderWait: waits add up over micro-batches; report() returns (wait,
+    interval) and starts a new interval; validation between got() and idle()
+    is interval time, not wait."""
+    from slap2_f0.train import LoaderWait
+
+    t = iter([0.0, 2.0, 5.0, 6.0, 8.0, 20.0, 21.0, 22.0])
+    w = LoaderWait(clock=lambda: next(t))  # t0 = 0
+    w.got()        # 2: first batch after 2 s of waiting
+    w.idle()       # 5: forward and backward took 3 s
+    w.got()        # 6: second micro-batch after 1 s
+    assert w.report() == (3.0, 8.0)  # 8: step logged
+    w.idle()       # 20: validation ran from 8 to 20
+    w.got()        # 21
+    assert w.report() == (1.0, 14.0)  # 22: only the 1 s fetch is wait
