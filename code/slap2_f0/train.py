@@ -39,10 +39,17 @@ for the training ones), and the training data capped per session and path
 Outputs in --out: config.json, metrics.csv (one row per validation),
 last.pt, best.pt, steps/step_<N>.pt with ``--keep_every`` (model only), and
 stats/ (cached whole-trial statistics).
+
+Fine-tuning regularizers (docs/plan.md, "Fine-tuning trade-off", 2026-11-21):
+``--ema`` validates, selects and saves an exponential moving average of the
+weights ("model"; the raw weights go to "model_raw"), which averages out the
+checkpoint-to-checkpoint noise; ``--l2sp`` pulls the weights back toward the
+``--init`` checkpoint after every step (decoupled, like AdamW's weight decay).
 """
 
 from __future__ import annotations
 
+import copy
 import csv
 import itertools
 import json
@@ -648,6 +655,12 @@ def train(args) -> None:
         print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
     n_params = sum(p.numel() for p in model.parameters())
     net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
+    if args.l2sp and not args.init:
+        raise SystemExit("--l2sp pulls toward the --init checkpoint: give --init")
+    anchor = [p.detach().clone() for p in model.parameters()] if args.l2sp else None
+    # --ema: the moving average (from the initial weights) is what validation scores and the checkpoints hold
+    avg_model = copy.deepcopy(model).requires_grad_(False) if args.ema else None
+    net_val = net if avg_model is None else fast_model(avg_model, device, args)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     warm = min(1000, max(1, args.steps // 5))
@@ -707,14 +720,19 @@ def train(args) -> None:
     best = math.inf
     ema = None
 
+    def weights():  # with --ema the average is the model; the raw weights are kept beside it
+        if avg_model is None:
+            return {"model": model.state_dict()}
+        return {"model": avg_model.state_dict(), "model_raw": model.state_dict()}
+
     def save(name, step):
-        torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "config": asdict(mcfg),
+        torch.save({**weights(), "optimizer": opt.state_dict(), "config": asdict(mcfg),
                     "window": asdict(wcfg), "step": step}, out / name)
 
     def keep(step):  # --keep_every: the model at this step, for later selection studies (no optimizer state)
         if args.keep_every:
             (out / "steps").mkdir(exist_ok=True)
-            torch.save({"model": model.state_dict(), "config": asdict(mcfg), "window": asdict(wcfg), "step": step},
+            torch.save({**weights(), "config": asdict(mcfg), "window": asdict(wcfg), "step": step},
                        out / "steps" / f"step_{step:06d}.pt")
 
     def validate(step):
@@ -722,7 +740,7 @@ def train(args) -> None:
         row = {"step": step, "train_loss": ema if ema is not None else float("nan")}
         per_group = {}  # set -> group -> that group's selection value
         for name, loaders in evals.items():
-            res = {g: evaluate(net, ld, region, device, amp_dtype, args) for g, ld in loaders.items()}
+            res = {g: evaluate(net_val, ld, region, device, amp_dtype, args) for g, ld in loaders.items()}
             for k in dict.fromkeys(k for r in res.values() for k in r):  # mean over groups, the old column names
                 vals = [r[k] for r in res.values() if k in r and math.isfinite(r[k])]
                 row[f"{name}_{k}"] = float(np.mean(vals)) if vals else math.nan
@@ -763,7 +781,13 @@ def train(args) -> None:
         scaler.step(opt)
         scaler.update()
         opt.zero_grad(set_to_none=True)
+        lr_step = sched.get_last_lr()[0]  # the rate this step used
         sched.step()
+        with torch.no_grad():
+            if anchor is not None:  # --l2sp: back toward the initial weights by lr x l2sp of the distance
+                torch._foreach_lerp_(list(model.parameters()), anchor, min(1.0, lr_step * args.l2sp))
+            if avg_model is not None:
+                torch._foreach_lerp_(list(avg_model.parameters()), list(model.parameters()), 1.0 - args.ema)
         ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
             mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
@@ -1129,6 +1153,14 @@ def add_arguments(p) -> None:
     p.add_argument("--val_free", action="store_true",
                    help="also validate on held-out windows simulated without activity (free_*)")
     p.add_argument("--init", default="", help="start from this checkpoint (e.g. a simulation-pretrained best.pt)")
+    p.add_argument("--ema", type=float, default=0.0,
+                   help="validate, select and save an exponential moving average of the weights, this decay per "
+                        "optimizer step (0.995: a 200-step horizon), starting at the initial weights; the raw "
+                        "weights are saved as model_raw (0: off)")
+    p.add_argument("--l2sp", type=float, default=0.0,
+                   help="with --init: after each step, move the weights back toward the initial ones by "
+                        "lr x l2sp of the distance (decoupled L2-SP; at lr 1e-4, 10 is a 1000-step time constant; "
+                        "0: off)")
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
     p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. an earlier run's)")
     p.add_argument("--sidecars", default="",

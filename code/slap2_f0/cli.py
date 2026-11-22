@@ -6,6 +6,7 @@ import argparse
 
 import numpy as np
 
+from . import average as average_mod
 from . import ceiling as ceiling_mod
 from . import gpu_bench as bench_mod
 from . import predict as predict_mod
@@ -43,6 +44,9 @@ def main(argv=None) -> None:
     pe = sub.add_parser("evaluate", help="score saved checkpoints on each session's windows (real and simulated)")
     train_mod.add_eval_arguments(pe)
     pe.set_defaults(func=train_mod.evaluate_checkpoints)
+    pa = sub.add_parser("average", help="weighted average of checkpoints: soups of kept steps, WiSE-FT interpolation")
+    average_mod.add_arguments(pa)
+    pa.set_defaults(func=average_mod.run)
     pr = sub.add_parser("predict", help="full-trial baselines of saved checkpoints and SiLo, for viewing")
     predict_mod.add_arguments(pr)
     pr.set_defaults(func=predict_mod.run)
