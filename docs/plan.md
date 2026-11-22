@@ -2344,3 +2344,33 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - `slap2-f0 average OUT CKPT[=W] ...`: the weighted average of checkpoints, from paths, globs and weights, for soups of kept steps and WiSE-FT interpolation (`pre.pt=0.5 ft.pt=0.5`). The network has no normalization buffers, so the averaged weights are a complete model.
 - `tools/finetune_tradeoff.py RESULTS_DIR`: the tables above. Add `--averages WINDOWS_CSV` (a per-window table of models named `<run>@<variant>`) to score them against the same run's fine-tuning steps on shared windows (the weight-averaging tables). `--averages WINDOWS_CSV` alone gives paired summaries of any models scored on the same windows.
 - Tests: `test_ema_and_l2sp` and `test_average_checkpoints`.
+
+## Next batch (S4): arms, and the deep arm as depth without reach (2026-11-22)
+
+**The deep arm (the user's intent):** more nonlinear processing of the same window in space and time, not a larger window or reach.
+- **Layers after the combination matter most.** The branches, the window statistics and the same-frame context meet in two pointwise fusion layers. If they need to be combined in sophisticated ways, that takes more layers there.
+- **More processing may also let per-trial statistics count for more.** One example is how a target pixel covaries with its neighbours in the window.
+- **The earlier plan did not match this.** Repeating every branch's dilation list (`gpu_bench extra_blocks`) doubles the temporal reach (254 → 508 frames per side, window 718 → about 1,226 frames) and adds nothing after the fusion.
+
+**Design (`ModelConfig.fuse_blocks`, `branch_mlp`; `--fuse_blocks`, `--branch_mlp`):**
+- **Pointwise residual blocks**, x + α · W2(GELU(W1 x)), all 1×1×1, with W1 widening to 2× the channels.
+  - α starts at 0 (ReZero, like the existing blocks), so a checkpoint without these blocks warm-starts exactly.
+  - The arm therefore starts from v6r like the others.
+- **`fuse_blocks` N** adds N blocks after the two fusion layers.
+  - They must be pointwise: any spatial or temporal mixing after the fusion would let an output see its hidden frames through a neighbour's features.
+  - They run on the loss region only.
+- **`branch_mlp` K** adds K blocks after every dilated block of every branch (causal and half-plane): more nonlinear stages on the same receptive field.
+- **Tested:** the blind spot (slab and box) and the reach are unchanged, the warm start is exact, and region and full outputs agree.
+
+**Batch, all from v6r with the S4 recipe** (see "Selection, evaluation and stats for the next training" and the fine-tuning recommendation):
+
+| arm | difference |
+|---|---|
+| control | none |
+| second seed | `--seed 1`: the seed spread that the scaling rule needs |
+| low-count | `--photon_gain 1,4 --silent_trial 0.2` |
+| edge | `--edge_features` |
+| deep | `--fuse_blocks 4 --branch_mlp 1`: 10 pointwise layers after the combination instead of 2, and a nonlinear stage after each dilated block; same reach |
+
+- **Fine-tuning:** every arm keeps steps every 100 (`--keep_every 100`). The shipped model is WiSE-FT 0.5, made from the soup of fine-tuning steps 750–1700 with step 0 (`slap2-f0 average`), and the evaluation scores both.
+- **Evaluation** scores all arms' checkpoints on shared windows, with kinds real, sim, free, fast, freedim and fastdim. `tools/edge_windows.py` runs on every arm.

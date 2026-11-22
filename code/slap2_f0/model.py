@@ -142,6 +142,19 @@ class ModelConfig:
     full_res_blocks: int = 1
     downsample: int = 2
     checkpoint: bool = True
+    # depth without reach: pointwise (1x1x1) residual blocks, each
+    # x + alpha * W2(GELU(W1 x)) with W1 widening by mlp_hidden and alpha
+    # starting at 0 (ReZero), so a checkpoint without them warm-starts exactly.
+    # branch_mlp follows every dilated block of every branch (more nonlinear
+    # processing of the same window); fuse_blocks follows the two fusion layers
+    # (more processing after the branches, window statistics and same-frame
+    # context are combined). Pointwise layers see one voxel's features, so the
+    # blind spot and the reach are unchanged; spatial or temporal mixing after
+    # the fusion would let an output see its hidden frames through a
+    # neighbour's features
+    branch_mlp: int = 0
+    fuse_blocks: int = 0
+    mlp_hidden: int = 2
 
     @property
     def spatial_factor(self) -> int:
@@ -217,6 +230,25 @@ def _residual(x: torch.Tensor, alpha: torch.Tensor, h: torch.Tensor) -> torch.Te
     return x + alpha * h
 
 
+class PointwiseBlock(nn.Module):
+    """x + alpha * W2(GELU(W1 x)), all 1x1x1: nonlinear processing at each
+    voxel without reach. alpha starts at 0 (ReZero), so the block starts as
+    the identity."""
+
+    def __init__(self, width: int, hidden: int):
+        super().__init__()
+        self.w1 = nn.Conv3d(width, hidden, 1)
+        self.w2 = nn.Conv3d(hidden, width, 1)
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return _residual(x, self.alpha, self.w2(F.gelu(self.w1(x))))
+
+
+def _pointwise(width: int, cfg: "ModelConfig", n: int) -> nn.ModuleList:
+    return nn.ModuleList([PointwiseBlock(width, cfg.mlp_hidden * width) for _ in range(n)])
+
+
 class CausalBlock(nn.Module):
     """Per-frame spatial conv, then a causal dilated temporal conv, residual.
 
@@ -226,8 +258,9 @@ class CausalBlock(nn.Module):
     hidden frames into the output, and a per-position channel norm costs
     several full-size temporaries per block."""
 
-    def __init__(self, width: int, t_dil: int, s_dil: int, s_kernel: int):
+    def __init__(self, width: int, t_dil: int, s_dil: int, s_kernel: int, mlp: nn.ModuleList | None = None):
         super().__init__()
+        self.mlp = mlp if mlp is not None and len(mlp) else None  # pointwise blocks after this one (branch_mlp)
         self.t_pad = 2 * t_dil  # kernel 3 in time
         if s_kernel > 1:
             pad = (s_kernel // 2) * s_dil
@@ -243,7 +276,10 @@ class CausalBlock(nn.Module):
         # is the same and saves a padded copy of h
         h = F.conv3d(h, self.temporal.weight, self.temporal.bias, padding=(self.t_pad, 0, 0),
                      dilation=self.temporal.dilation)[:, :, : x.shape[2]]
-        return _residual(x, self.alpha, F.gelu(h))
+        out = _residual(x, self.alpha, F.gelu(h))
+        for b in self.mlp or ():
+            out = b(out)
+        return out
 
 
 class CausalBranch(nn.Module):
@@ -259,7 +295,8 @@ class CausalBranch(nn.Module):
         self.cfg = cfg
         w, s_dils, f = cfg.width, cfg.spatial_dilations, cfg.spatial_factor
         self.inp = nn.Conv3d(cfg.n_inputs, w, 1)
-        blocks = [CausalBlock(w, d, s_dils[min(i, len(s_dils) - 1)], cfg.spatial_kernel)
+        blocks = [CausalBlock(w, d, s_dils[min(i, len(s_dils) - 1)], cfg.spatial_kernel,
+                              _pointwise(w, cfg, cfg.branch_mlp))
                   for i, d in enumerate(cfg.temporal_dilations)]
         n_full = len(blocks) if f == 1 else min(cfg.full_res_blocks, len(blocks))
         self.full = nn.ModuleList(blocks[:n_full])
@@ -295,8 +332,9 @@ class HalfPlaneBlock(nn.Module):
     padding; columns symmetric), then a symmetric dilated temporal conv,
     residual with a ReZero scale."""
 
-    def __init__(self, width: int, t_dil: int, s_dil: int):
+    def __init__(self, width: int, t_dil: int, s_dil: int, mlp: nn.ModuleList | None = None):
         super().__init__()
+        self.mlp = mlp if mlp is not None and len(mlp) else None  # pointwise blocks after this one (branch_mlp)
         self.t_dil, self.s_dil = t_dil, s_dil
         self.spatial = nn.Conv3d(width, width, (1, 2, 3), dilation=(1, s_dil, s_dil))
         self.temporal = nn.Conv3d(width, width, (3, 1, 1), dilation=(t_dil, 1, 1))
@@ -310,7 +348,10 @@ class HalfPlaneBlock(nn.Module):
                      dilation=self.spatial.dilation)[:, :, :, : x.shape[3]]
         h = F.conv3d(F.gelu(h), self.temporal.weight, self.temporal.bias, padding=(self.t_dil, 0, 0),
                      dilation=self.temporal.dilation)
-        return _residual(x, self.alpha, F.gelu(h))
+        out = _residual(x, self.alpha, F.gelu(h))
+        for b in self.mlp or ():
+            out = b(out)
+        return out
 
 
 class HalfPlaneBranch(nn.Module):
@@ -327,7 +368,8 @@ class HalfPlaneBranch(nn.Module):
         self.cfg = cfg
         w = cfg.hp_width
         self.inp = nn.Conv3d(cfg.n_inputs, w, 1)
-        blocks = [HalfPlaneBlock(w, td, sd) for td, sd in zip(cfg.hp_temporal_dilations, cfg.hp_spatial_dilations)]
+        blocks = [HalfPlaneBlock(w, td, sd, _pointwise(w, cfg, cfg.branch_mlp))
+                  for td, sd in zip(cfg.hp_temporal_dilations, cfg.hp_spatial_dilations)]
         nf = min(cfg.hp_full_res_blocks, len(blocks))
         self.full = nn.ModuleList(blocks[:nf])
         self.low = nn.ModuleList(blocks[nf:])
@@ -547,6 +589,8 @@ class SlabBlindSpotNet(nn.Module):
         self.hp_views = nn.ModuleList([HalfPlaneBranch(self.cfg) for _ in range(4)])             if self.cfg.box and not self.cfg.hp_shared else None
         n_in = sum(n for _, n in self.cfg.fusion_inputs())  # concatenated in this order in ``head``
         self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
+        # more pointwise layers after the fusion (fuse_blocks); None keeps checkpoints' keys
+        self.fuse_more = _pointwise(w, self.cfg, self.cfg.fuse_blocks) if self.cfg.fuse_blocks else None
         self.head_mu = nn.Conv3d(w, 1, 1)
         self.head_mix = nn.Conv3d(w, 1, 1)
         self.head_var = nn.Conv3d(w, 1, 1)
@@ -655,6 +699,8 @@ class SlabBlindSpotNet(nn.Module):
         edge = [] if p.get("edge") is None else [p["edge"]]
         # in the order of ModelConfig.fusion_inputs (load_compatible matches columns by it)
         h = self.fuse(torch.cat([hp, hf, feats] + [e.to(hp.dtype) for e in extra + edge], 1))
+        for b in self.fuse_more or ():
+            h = b(h)
         mi = x[:, 2].float()
         wm = torch.where(n > 0, wm, mi)
         mix = torch.tanh(self.head_mix(h)[:, 0].float())
