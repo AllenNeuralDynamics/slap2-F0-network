@@ -172,7 +172,7 @@ class SimConfig:
     # Why: below about 1 photon per frame at footprint support (776270, 876767,
     # 878030; training mice 0.4-1.0) the S0-S3 networks set the baseline 5-10% low
     # in activity-free simulations, in every pixel class, also on flat fields
-    # without any structure; at 4x the photons the bias falls to 0.5-2%
+    # without any structure; at 4x the photons the bias falls to 0.4-2%
     # (docs/plan.md, "Low photon counts: the baseline sits low").
     photon_gain: tuple[float, float] = (1.0, 1.0)
     # residual motion (0 = none): per axis (rows, columns) an OU process with SD
