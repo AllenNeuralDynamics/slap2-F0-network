@@ -1807,6 +1807,16 @@ Each cell gives 48 / 192 windows per mouse:
 - **Short paths:** 801381_2025-09-26 path 2 (12 of 32 trials), 838410_2026-03-18 path 2 (14 of 49), 801381_2025-05-29 path 2 (30 of 49). The exporter recorded no errors; it skips trials for which GIAnT produced no frames.
 - **One-channel sessions:** 804733's exports keep the channel axis (mean image 1 × H × W, or 2 × H × W in its two-channel session). Their sidecars are therefore valid and are not recomputed.
 
+**Trial quality filter (the user's decision, 2026-11-22): training and evaluation leave out failed calibrations and paths that lost many trials** (`io.filter_trials`, on by default in `train` and `evaluate`).
+- **Calibration:** a trial is left out if the exporter's peak correlation (attribute `peakR`) is below 0.3 (`--min_peak_r`).
+  - Over all 3,026 trials of both phases, peak correlation is 0.30 or more for 2,992 (median 0.43). 30 trials lie at 0.03–0.18 and 4 at 0.20–0.27.
+  - The 34 are 780125_2025-03-18 path 1 (20 trials, including two partial failures with blur 1.25 and gain 0.54), 867430_2026-06-16 path 2 (12), and two others between 0.20 and 0.30.
+- **Paths:** a path is left out whole if fewer than half of its session's trials remain usable (`--min_path_trials` 0.5). A session's trials run from its lowest to its highest trial number over both paths.
+  - Left out: 780125_2025-03-18 path 1 (12 of 32 usable), 801381_2025-09-26 path 2 (12 of 31) and 838410_2026-03-18 path 2 (14 of 48).
+  - Kept: 801381_2025-05-29 path 2 (30 of 49) and 867430_2026-06-16 path 2 (31 of 49, after its 12 failed trials are left out).
+- Trials without the attributes are kept. `--min_peak_r 0 --min_path_trials 0` restores S0–S3's data.
+- Runs print what was left out under "trial quality".
+
 ## GPU machine: re-evaluation (2026-11-21)
 
 **Question (the user's).** Is g5.4xlarge (one A10G, 24 GB) still the right machine for the GPU capsule, or would a larger GPU be faster at a reasonable cost? Consider also the deeper network planned once phase 2's data are in.

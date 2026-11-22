@@ -135,3 +135,53 @@ def list_trials(root: str | Path) -> list[Path]:
         except OSError:
             continue
     return out
+
+
+def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: float = 0.5) -> tuple[list[Path], list[str]]:
+    """Leave out trials whose activity calibration failed, and imaging paths
+    that keep too few of their session's trials. Returns the kept files, in
+    the order given, and one report line per trial or path left out.
+
+    - Calibration: the exporter scales GIAnT's activity to the movie and
+      records how well its peaks match (attribute ``peakR``). Below
+      ``min_peak_r`` the fit does not describe the movie: in the 2025-2026
+      exports 34 of 3,026 trials scored 0.03-0.27, with the gain and blur
+      pinned at their bounds, against 0.30 or more for the rest (median
+      0.43). Their training target (movie - activity) is wrong wherever the
+      activity is.
+    - Paths: a path keeps ``min_path_trials`` or more of its session's
+      trials (lowest to highest trial number over all paths of the
+      session) after the calibration cut, or is left out whole. Trials are
+      missing where GIAnT produced no frames for them.
+    Trials without the attributes are kept. 0 turns either rule off.
+    """
+    info = []
+    for f in files:
+        with h5py.File(f, "r") as h:
+            a = {k: _scalar(h.attrs[k]) for k in ("label", "path", "trial", "peakR") if k in h.attrs}
+        digits = f.stem[len("trial_"):]
+        trial = int(a["trial"]) if "trial" in a else (int(digits) if digits.isdigit() else 0)
+        info.append((f, str(a.get("label", f.parent.parent.name)), str(a.get("path", f.parent.name)), trial,
+                     float(a["peakR"]) if "peakR" in a else float("nan")))
+    report, failed = [], set()
+    if min_peak_r > 0:
+        for f, s, p, t, r in info:
+            if r < min_peak_r:  # NaN (no attribute) compares False and is kept
+                failed.add(f)
+                report.append(f"{s} path {p} trial {t}: calibration failed (peak r {r:.2f} < {min_peak_r:g})")
+    dropped_paths = set()
+    if min_path_trials > 0:
+        span: dict[str, tuple[int, int]] = {}
+        kept: dict[tuple[str, str], int] = {}
+        for f, s, p, t, _ in info:
+            lo, hi = span.get(s, (t, t))
+            span[s] = (min(lo, t), max(hi, t))
+            kept[(s, p)] = kept.get((s, p), 0) + (f not in failed)
+        n_session = {s: hi - lo + 1 for s, (lo, hi) in span.items()}
+        for (s, p), k in sorted(kept.items()):
+            if n_session[s] > 0 and k < min_path_trials * n_session[s]:
+                dropped_paths.add((s, p))
+                report.append(f"{s} path {p}: left out whole, {k} of {n_session[s]} trials usable "
+                              f"(< {min_path_trials:g})")
+    out = [f for f, s, p, _, _ in info if f not in failed and (s, p) not in dropped_paths]
+    return out, report
