@@ -1709,6 +1709,30 @@ Each cell gives 48 / 192 windows per mouse:
 - Merge main into the GPU capsule. It needs 8bc88b6 (no simulated activity at GIAnT fit artifacts) and 82860cb (realistic low counts).
 - Change selection as Experiment 2 suggests: 3–4 validation mice at 48 windows each, no labeled-pixel term, simulated windows in fine-tuning selection.
 
+**Results (2026-11-22): 20 of 23 sessions exported, 3 rerunning.**
+- **Out of memory in SILo's localization (4 sessions):**
+  - 796630 and 801381 (2025-09-26) passed with `--n_workers 6`, and 828409_2025-11-20 with 2 (9.6 h).
+  - Cause: SILo sized its pool from each path's first trial, which is often partial. 828409_2025-11-20's was a few frames long, so SILo estimated 1.2 GB per trial against at least 20 GB used. GIAnT-MATLAB PR #51 sizes the pool for the largest trial.
+- **Out of memory in the exporter (3 sessions):** 787725_2025-02-26, 776266_2025-01-09 and 803121_2025-11-05.
+  - They were killed after GIAnT had finished both paths: memory stood at 140–170 GB when the exporter opened its 8-worker pool, and peaked at 180–200 GB of 246.
+  - Rerunning in full with `--export_workers 4`, since a run cannot resume from GIAnT's outputs. 787725 is a new mouse with no other session.
+- **QC against phase 1** (per-path medians of the exporter's calibration):
+
+  | | phase 1 (34 paths, 1,428 trials) | phase 2 (40 paths, 1,598 trials) |
+  |---|---|---|
+  | activity gain | 0.62 (0.50–0.86) | 0.66 (0.50–0.86) |
+  | peak slope | 1.09 (0.99–1.34) | 1.03 (0.69–1.35) |
+  | blur | 0 (0–0.75 px) | 0 (0–1.5 px) |
+  | event residual | 0.13 (−0.01 to 0.32) | 0.12 (0 to 0.32) |
+
+- **Trials where GIAnT's activity does not match the movie:** gain at its lower bound (0.50), blur at its upper bound (1.5 px), peak correlation 0.03–0.18, and event residuals down to −1.5 (activity above the events).
+  - 780125_2025-03-18 path 1, 18 of 30 trials (2–18, 20, 21; mostly the first ones), and phase 1's 867430_2026-06-16 path 2, 12 trials (30 onwards). S0–S3 trained on the latter.
+  - Their training targets (movie minus activity) are too low wherever activity is overestimated.
+  - Trials where only the gain hits its bound and the correlation stays normal (about 0.37: 803121_2025-10-29, 804733_2025-07-25 and 885234 path 2) look fine.
+  - `--exclude` works per session only, so it cannot leave out these trials alone.
+- **Short paths:** 801381_2025-09-26 path 2 (12 of 32 trials), 838410_2026-03-18 path 2 (14 of 49), 801381_2025-05-29 path 2 (30 of 49). The exporter recorded no errors; it skips trials for which GIAnT produced no frames.
+- **One-channel sessions:** 804733's exports keep the channel axis (mean image 1 × H × W, or 2 × H × W in its two-channel session). Their sidecars are therefore valid and are not recomputed.
+
 ## GPU machine: re-evaluation (2026-11-21)
 
 **Question (the user's).** Is g5.4xlarge (one A10G, 24 GB) still the right machine for the GPU capsule, or would a larger GPU be faster at a reasonable cost? Consider also the deeper network planned once phase 2's data are in.
