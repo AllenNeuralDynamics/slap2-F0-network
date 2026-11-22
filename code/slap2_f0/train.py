@@ -484,16 +484,44 @@ def adapt_varfac_input(state: dict, width: int) -> dict:
     return state
 
 
-def load_compatible(model: torch.nn.Module, state: dict) -> str:
+def fusion_columns(src: ModelConfig, dst: ModelConfig) -> list[tuple[slice, slice]]:
+    """(source columns, target columns) of the first fusion layer for each input
+    part (``ModelConfig.fusion_inputs``) the source has; the target must have
+    each with the same size."""
+    def offsets(cfg):  # name -> (first column, count)
+        out, at = {}, 0
+        for name, n in cfg.fusion_inputs():
+            out[name], at = (at, n), at + n
+        return out
+
+    s, d = offsets(src), offsets(dst)
+    pairs = []
+    for name, (a, n) in s.items():
+        if not n:
+            continue
+        b, m = d[name]
+        if m != n:
+            raise SystemExit(f"checkpoint fusion input {name} ({n} channels) does not fit the model's ({m})")
+        pairs.append((slice(a, a + n), slice(b, b + n)))
+    return pairs
+
+
+def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | ModelConfig | None = None) -> str:
     """Load a checkpoint into a model that may have more parts (e.g. a slab
     model's weights into a box model): matching tensors are copied; a tensor
-    whose input-channel axis grew (the first fusion layer, whose inputs are
-    concatenated with the new ones last) gets the old columns and zeros for
-    the new ones, so the model starts out computing what the old one did.
-    Returns a summary."""
+    whose input-channel axis grew gets the old columns and zeros for the new
+    ones, so the model starts out computing what the old one did. For the
+    first fusion layer the columns are matched by input part
+    (``ModelConfig.fusion_inputs``) given the checkpoint's config
+    (``src_config``): a new part may sit before an old one (motion or box
+    features added to a model with edge features). Without it the old columns
+    are copied as a prefix, which is right only when the new parts come last
+    (refused for a checkpoint with edge features). Returns a summary."""
     own = model.state_dict()
     copied, grown, new = 0, [], []
     state = dict(state)
+    if src_config is not None and not isinstance(src_config, ModelConfig):
+        src_config = config_from_dict(src_config)
     if any(k.startswith("hp_views.") for k in own) and any(k.startswith("hp.") for k in state):
         for k in own:  # a shared half-plane trunk (hp.*) starts every per-direction trunk (hp_views.<k>.*)
             src = "hp." + k.split(".", 2)[2] if k.startswith("hp_views.") else None
@@ -510,7 +538,17 @@ def load_compatible(model: torch.nn.Module, state: dict) -> str:
             copied += 1
         elif w.dim() == v.dim() and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:] and w.shape[1] < v.shape[1]:
             nv = torch.zeros_like(v)
-            nv[:, : w.shape[1]] = w
+            if k == "fuse.0.weight" and src_config is not None:
+                pairs = fusion_columns(src_config, model.cfg)
+                if sum(s.stop - s.start for s, _ in pairs) != w.shape[1]:
+                    raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not match its config")
+                for s, d in pairs:
+                    nv[:, d] = w[:, s]
+            elif k == "fuse.0.weight" and "head_edge.weight" in state:
+                raise SystemExit("a checkpoint with edge features grows only with its config (load_compatible "
+                                 "src_config): new fusion inputs come before the edge features")
+            else:
+                nv[:, : w.shape[1]] = w
             own[k] = nv
             grown.append(k)
         else:
@@ -646,7 +684,7 @@ def train(args) -> None:
         if config_from_dict(ck["config"]).varfac_norm == "window" and mcfg.varfac_norm == "trial":
             state = adapt_varfac_input(state, mcfg.width)
             print("variance-factor weights folded from the window-median input to the trial-median input")
-        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
+        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state, ck['config'])}")
     n_params = sum(p.numel() for p in model.parameters())
     net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)

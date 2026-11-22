@@ -124,8 +124,10 @@ class ModelConfig:
     # run of discarded frames) one side is empty; the pooled statistics say only
     # how much of the window is missing, not which side or how near, and a
     # fusion that adds up what each side saw sets the baseline 2-4% too high at
-    # source pixels when the future is missing (docs/plan.md, 2026-11-21)
+    # source pixels when the future is missing (docs/plan.md, 2026-11-22)
     edge_features: bool = False
+    # used as min(edge_near, window_reach): the near span then lies within the
+    # window statistics' span, which every tile's halo covers
     edge_near: int = 16
     # variance-factor input: "trial" = log of the factor relative to its median
     # over the trial's imaged pixels (``io.TrialFile``), the same in every
@@ -196,6 +198,15 @@ class ModelConfig:
     @property
     def n_edge(self) -> int:
         return N_EDGE if self.edge_features else 0
+
+    def fusion_inputs(self) -> list[tuple[str, int]]:
+        """The first fusion layer's input channels, in order: (name, count),
+        counts of 0 for parts the model does not have. ``train.load_compatible``
+        matches a checkpoint's fusion columns to a grown model by these names."""
+        box = self.box
+        return [("past", self.width), ("future", self.width), ("window", N_FEATS),
+                ("half_planes", 4 * self.hp_width if box else 0), ("pooled", self.n_pool),
+                ("motion", self.n_motion), ("edge", self.n_edge)]
 
 
 def _residual(x: torch.Tensor, alpha: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
@@ -489,13 +500,16 @@ def edge_features(m: torch.Tensor, v: torch.Tensor, mi: torch.Tensor, gap: int, 
     mean image. Over the past (t - gap - reach <= t' < t - gap) and the future
     (t + gap < t' <= t + gap + reach) frames: log1p(count) / log1p(reach) and
     the count within ``near`` frames of the gap, / near (both 1 in a trial's
-    middle, 0 where that side is empty), and log(side mean / mean image),
+    middle, 0 where that side is empty; near is capped at reach, so a frame
+    whose window statistics are complete has complete near counts too, at a
+    tile's edge as well), and log(side mean / mean image),
     clamped to +-3 (0 where empty). Returns the features (B, 6, T', H, W) for
     the output frames ``frames`` = (t0, t1) (default all), past and future of
     each, and the gates (B, 2, T', H, W): the share of the past and of the
     future side without data, 1 - count / reach (0 in a trial's middle, 1
     where that side is empty). Frames within the gap are never used."""
     T = m.shape[1]
+    near = min(near, reach)
     m, v = m.float(), v.float()
     # the near counts get a cumulative sum of their own: sharing one, the gradient of the hidden
     # frames' validity would be a float rounding residue instead of exactly 0 (test_blindspot)
@@ -531,8 +545,7 @@ class SlabBlindSpotNet(nn.Module):
         self.future = CausalBranch(self.cfg)
         self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box and self.cfg.hp_shared else None
         self.hp_views = nn.ModuleList([HalfPlaneBranch(self.cfg) for _ in range(4)])             if self.cfg.box and not self.cfg.hp_shared else None
-        n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool + self.cfg.n_motion if self.cfg.box else 0) \
-            + self.cfg.n_edge
+        n_in = sum(n for _, n in self.cfg.fusion_inputs())  # concatenated in this order in ``head``
         self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
         self.head_mix = nn.Conv3d(w, 1, 1)
@@ -615,7 +628,7 @@ class SlabBlindSpotNet(nn.Module):
             hh = self._half_planes(x[:, :, a:b])[:, :, t0 - a: t1 - a]
             pf = pooled_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales)
             extra = [hh, pf]
-            if self.cfg.motion_features:  # last, so a checkpoint without them warm-starts exactly (load_compatible)
+            if self.cfg.motion_features:  # order: ModelConfig.fusion_inputs
                 extra.append(motion_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales))
             if region is not None:
                 sp = (slice(None), slice(None), slice(None)) + tuple(region[1:])
@@ -639,7 +652,8 @@ class SlabBlindSpotNet(nn.Module):
         hp, hf, wm, wv, n, extra, x, s, g = (p[k] for k in ("hp", "hf", "wm", "wv", "n", "extra", "x", "s", "g"))
         gs = (g / s).view(-1, 1, 1, 1)  # gain in scale units: var = gs * mu
         feats = self._features(x.float(), wm, wv, n, gs).to(hp.dtype)
-        edge = [] if p.get("edge") is None else [p["edge"]]  # last, so a checkpoint without them warm-starts exactly
+        edge = [] if p.get("edge") is None else [p["edge"]]
+        # in the order of ModelConfig.fusion_inputs (load_compatible matches columns by it)
         h = self.fuse(torch.cat([hp, hf, feats] + [e.to(hp.dtype) for e in extra + edge], 1))
         mi = x[:, 2].float()
         wm = torch.where(n > 0, wm, mi)

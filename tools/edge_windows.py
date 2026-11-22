@@ -100,9 +100,10 @@ def wait_for_gpu(device, need_gb: float, poll_s: float = 20.0):
     Windows page GPU memory to the host and a forward pass takes minutes instead of 0.5 s."""
     if device.type != "cuda" or need_gb <= 0:
         return
-    torch.cuda.empty_cache()  # this process's cached blocks count as used
-    while torch.cuda.mem_get_info()[0] < need_gb * 2**30:
-        time.sleep(poll_s)
+    with torch.cuda.device(device):  # the requested GPU, not the current one
+        torch.cuda.empty_cache()  # this process's cached blocks count as used
+        while torch.cuda.mem_get_info(device)[0] < need_gb * 2**30:
+            time.sleep(poll_s)
 
 
 SWAPS = {"trunk": None, "stats": ("wm", "wv", "n", "edge", "gates"), "extra": ("extra",)}

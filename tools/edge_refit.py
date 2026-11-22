@@ -11,7 +11,7 @@ run once on simulated windows and its outputs cached; only the fusion layers
 and heads are then trained, from the checkpoint's weights, with training's
 loss (``train._losses``), in up to three arms on the same cache:
 
-* ctrl: the checkpoint's architecture;
+* ctrl: the checkpoint's architecture (edge features only if it has them);
 * edge: with ``edge_features`` (per-side window statistics into the fusion and
   edge-gated corrections), warm-started so that it starts as ctrl;
 * gated: the same model, but only the edge-gated head is trained (132
@@ -54,10 +54,11 @@ HEAD = ("fuse", "head_mu", "head_mix", "head_var", "head_edge", "log_floor")  # 
 
 
 def build(ck, edge: bool, device):
+    """The checkpoint's model, with edge features added if ``edge`` (a checkpoint that has them keeps them)."""
     cfg = config_from_dict(ck["config"])
-    cfg.edge_features = edge
+    cfg.edge_features = cfg.edge_features or edge
     m = SlabBlindSpotNet(cfg).to(device)
-    load_compatible(m, ck["model"])
+    load_compatible(m, ck["model"], ck["config"])
     return m
 
 
@@ -334,7 +335,10 @@ def main():
               only=("head_edge",) if arm == "gated" else HEAD)
         results[arm] = evaluate(model, evals, device)
         show(f"refit {arm} ({time.time() - t0:.0f} s)", results[arm])
-        torch.save({"model": model.state_dict(), "config": copy.deepcopy(vars(model.cfg))}, out / f"{arm}.pt")
+        # as training saves them (predict.load_checkpoint, edge_windows.py and --ckpt here read "window")
+        torch.save({"model": model.state_dict(), "config": copy.deepcopy(vars(model.cfg)), "window": ck["window"],
+                    "step": ck.get("step"), "refit": {"arm": arm, "of": str(args.ckpt), "steps": args.steps}},
+                   out / f"{arm}.pt")
     (out / "results.json").write_text(json.dumps(results, indent=1))
 
 

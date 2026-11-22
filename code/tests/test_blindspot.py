@@ -410,6 +410,27 @@ def test_edge_features_match_brute_force():
     assert torch.all(g[:, 1, last] == 1) and torch.all(g[:, 0, last] < 1)
 
 
+def test_edge_near_capped_at_reach():
+    """With edge_near > window_reach the near counts span reach frames, so a
+    frame with complete window statistics gets the same features in a tile cut
+    to its halo (gap + reach frames each side) as in the whole movie."""
+    from slap2_f0.model import edge_features
+
+    torch.manual_seed(8)
+    T, gap, reach, near = 40, 2, 5, 16
+    m = torch.rand(1, T, 3, 4, dtype=torch.float64) + 0.5
+    v = torch.ones_like(m)
+    mi = torch.rand(1, 3, 4, dtype=torch.float64) + 0.5
+    f, g = edge_features(m, v, mi, gap, reach, near)
+    t, h = 20, gap + reach
+    fc, gc = edge_features(m[:, t - h: t + h + 1], v[:, t - h: t + h + 1], mi, gap, reach, near)
+    # counts and gates exact; the side means differ by float32 rounding of the cumulative sums (~4e-7)
+    assert torch.equal(fc[:, :4, h], f[:, :4, t]) and torch.equal(gc[:, :, h], g[:, :, t])
+    assert torch.allclose(fc[:, 4:, h], f[:, 4:, t], atol=1e-5)
+    assert torch.all(f[:, 2:4, t] == 1)
+    assert torch.allclose(f, edge_features(m, v, mi, gap, reach, reach)[0])
+
+
 @pytest.mark.parametrize("box", [False, True])
 @pytest.mark.parametrize("which", [0, 1])  # mu, var
 def test_blind_spot_with_edge_features(box, which):
@@ -485,3 +506,36 @@ def test_edge_features_warm_start_and_region():
     m2.load_state_dict(ref.state_dict())
     assert torch.allclose(m1(xm)[0][:, 5:19], m2(xm)[0][:, 5:19])
     assert not torch.allclose(m1(xm)[0][:, -2:], m2(xm)[0][:, -2:])
+
+
+@pytest.mark.parametrize("grow", ["motion", "box"])
+def test_edge_features_warm_start_into_more_inputs(grow):
+    """A checkpoint with edge features warm-starts a model with more fusion
+    inputs exactly: the new ones (motion features, or the box's half-planes and
+    pooled features) come before the edge features, so load_compatible matches
+    the columns by input part, given the checkpoint's config (and refuses
+    without it)."""
+    from slap2_f0.train import load_compatible
+
+    torch.manual_seed(11)
+    kw = dict(gap=2, width=6, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6, full_res_blocks=1,
+              edge_features=True, edge_near=4)
+    box = dict(box_radius=2, hp_width=4, hp_temporal_dilations=[1, 2], hp_spatial_dilations=[1, 1],
+               hp_full_res_blocks=1, pool_scales=[3, 0])
+    src, dst = (dict(kw, **box), dict(kw, **box, motion_features=True)) if grow == "motion" else (kw, dict(kw, **box))
+    old = SlabBlindSpotNet(ModelConfig(**src)).double().eval()
+    _activate_box(old) if grow == "motion" else _activate(old)
+    torch.nn.init.normal_(old.fuse[0].weight, std=0.5)  # the edge columns count too
+    torch.nn.init.normal_(old.head_edge.weight, std=0.5)
+    new = SlabBlindSpotNet(ModelConfig(**dst)).double().eval()
+    with pytest.raises(SystemExit):
+        load_compatible(new, old.state_dict())
+    msg = load_compatible(new, old.state_dict(), old.cfg)
+    assert "fuse.0.weight" in msg
+    x = torch.randn(1, 5, 24, 12, 12, dtype=torch.float64)
+    x[:, 1] = 1.0
+    x[:, 1, 18:] = 0  # a trial edge inside the window
+    x[:, 0] = x[:, 0].abs() * x[:, 1]
+    x[:, 2] = x[:, 2].abs() + 1
+    a, b = old(x), new(x)
+    assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
