@@ -750,7 +750,8 @@ def train(args) -> None:
     mk = lambda fl, n, seed, s, fr=1.0: DataLoader(  # noqa: E731
         WindowDataset(fl, wcfg_train if seed == args.seed else wcfg, stats, length=n, seed=seed, sim=s,
                       flip=("none" if args.no_flip else args.flip) if seed == args.seed else "none",
-                      sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
+                      sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0,
+                      max_open=getattr(args, "max_open", 32)),
         batch_size=args.batch, persistent_workers=False, **kw)
     dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
     # validation sets: one loader per validation mouse (session), --val_windows
@@ -843,11 +844,16 @@ def train(args) -> None:
     keep(0)
     step = 0
     opt.zero_grad(set_to_none=True)
+    # time spent waiting for the data loaders, per log interval: the rest is the
+    # model (and validation); near the interval's length means data-bound
+    data_wait, t_log, tick = 0.0, time.time(), time.time()
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
+        data_wait += time.time() - tick
         b, mu, var = _forward(net, b, device, amp_dtype, region)
         loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
         scaler.scale(loss / args.accum).backward()
         if micro % args.accum:
+            tick = time.time()
             continue
         step = micro // args.accum
         scaler.unscale_(opt)
@@ -865,8 +871,11 @@ def train(args) -> None:
         ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
             mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
+            now = time.time()
             print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
-                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}", flush=True)
+                  f"lr {sched.get_last_lr()[0]:.2e} {now - t0:.0f} s{mem}; data wait {data_wait:.1f} of "
+                  f"{now - t_log:.1f} s", flush=True)
+            data_wait, t_log = 0.0, now
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
         if step % args.val_every == 0 or last_step:
             validate(step)
@@ -876,6 +885,7 @@ def train(args) -> None:
             keep(step)
         if last_step:
             break
+        tick = time.time()
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
 
 
@@ -1192,6 +1202,9 @@ def add_arguments(p) -> None:
                         "(and --event_margin frames around); > 1 makes a baseline that follows the activity cost more")
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=1, help="micro-batches of --batch windows per optimizer step")
+    p.add_argument("--max_open", type=int, default=32,
+                   help="trials (with their simulation templates, about 8 MB each) each data-loader worker keeps "
+                        "open, least recently used first out; 0 = no limit")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=2e-4)
