@@ -2313,22 +2313,38 @@ The three changes queued on 2026-11-20 are now options in GIAnT-Python, all off 
   - the best F1 of `get_act_im_peaks` seeds over thresholds.
 - **780125, trials 1–4:** validated sources found and failed sources hit among the top N and 2N candidates (N = validated count: 182 on Path 1, 135 on Path 2; failed sources: 3 and 43).
 
+**All configurations, before the review fixes (33cf5b5):**
+
 | configuration | low-count AP (− net, 95%) | low-count seed F1 (threshold) | locsims seed F1 | 780125 Path 2, top 2N: validated / failed |
 |---|---|---|---|---|
 | moving median (today) | 0.768 (−0.009 [−0.029, +0.010]) | 0.794 (5) | 0.789 | 74 / 37 |
 | net | 0.776 | 0.811 (8) | 0.810 | 92 / 18 |
 | net, no surround | 0.779 (+0.003 [−0.003, +0.010]) | 0.816 (10) | 0.819 | 93 / 16 |
 | net, bootstrap | 0.785 (+0.009 [+0.003, +0.016]) | 0.816 (8) | 0.817 | 92 / 11 |
-| **net, no surround, bootstrap** | 0.784 (+0.008 [−0.000, +0.016]) | **0.822 (8)** | **0.826** | 93 / 11 |
+| net, no surround, bootstrap | 0.784 (+0.008 [−0.000, +0.016]) | 0.822 (8) | 0.826 | 93 / 11 |
 | net, bootstrap, no floor | 0.780 (+0.003 [−0.011, +0.016]) | 0.805 (8) | 0.817 | 93 / 10 |
 | net, soft threshold 2 | 0.782 (+0.006 [−0.001, +0.014]) | 0.791 (16) | 0.811 | 93 / 19 |
 | net, all three | 0.793 (+0.017 [+0.006, +0.030]) | 0.784 (20) | 0.794 | 97 / 9 |
 | true baseline | 0.799 (+0.024 [+0.013, +0.038]) | 0.860 (12) | 0.862 | |
 
+**After GIAnT-Python#16's review fixes (78255a3).** They change the bootstrap's null: per-pixel variance next to bright pixels, and lag correlations that skip discarded frames. The configurations that matter were rerun:
+
+| configuration | low-count AP (− net, 95%) | low-count seed F1 (threshold) | locsims seed F1 (threshold) | 780125 Path 2, top 2N: validated / failed |
+|---|---|---|---|---|
+| net | 0.776 | 0.811 (8) | 0.808 (8) | 92 / 18 |
+| net, no surround | 0.779 (+0.003 [−0.003, +0.010]) | 0.818 (8) | 0.821 (6) | 93 / 16 |
+| net, bootstrap | 0.782 (+0.006 [+0.001, +0.013]) | 0.822 (8) | 0.820 (8) | 92 / 11 |
+| **net, no surround, bootstrap** | 0.784 (+0.008 [−0.001, +0.016]) | 0.819 (8) | **0.831 (8)** | **94 / 11** |
+
 **What to turn on**, with the network baseline: `surround=False` with `null="bootstrap"`, keeping the floor, at `peak_th` 8.
-- **Seeds:** the best on both simulation sets.
-- **780125:** fewer failed sources among Path 2's top candidates, 11 against 18 in the top 2N.
-- **Threshold:** 8 is the best on simulations. On 780125 it gives 15–28% more seeds than today's 8; 10 finds the same validated sources as today's 8.
+- **The bootstrap does most of the work.** It has the only significant AP gain, and on 780125 it cuts the failed sources among Path 2's top candidates: 11 against 18 in the top 2N.
+- **No surround adds a little:**
+  - locsims seeds: 0.831 against 0.820;
+  - 780125 Path 1: 121 against 117 validated in the top 2N;
+  - on the low-count set it is level (0.819 against 0.822), and it is faster.
+- **Threshold:** 8 is the best on all simulations. On 780125, the network baseline without options at 8 is the comparator:
+  - at 8 the combination gives 16–33% more seeds;
+  - at 10 it finds the same validated sources (Path 1: 134 against 132; Path 2: 97 against 95).
 - **Cost:** localization takes about twice as long, because each trial also scores one noise movie.
 - **Not** `variance_floor=False`: no gain over the bootstrap with the floor.
 - **Not** the soft threshold:
