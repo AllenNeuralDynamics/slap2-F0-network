@@ -6,7 +6,8 @@ One configuration (run as ``python -m slap2_f0.gpu_bench CKPT key=value ...``):
   mode=eval    the forward pass alone, as in evaluation;
   mode=loader  windows per second from the data loaders (needs data=ROOT).
 keys: out_px, out_frames, batch, width, hp_width, extra_blocks (repeat every
-branch's dilation lists this many more times), checkpoint (0/1, activation
+branch's dilation lists this many more times), fuse_blocks and branch_mlp
+(pointwise depth without reach, ModelConfig), checkpoint (0/1, activation
 checkpointing), bench (0/1, cuDNN autotuning), cl (0/1, channels-last),
 compile (0/1, torch.compile), steps, profile (0/1, top CUDA kernels); for
 mode=loader: data, kind (real, sim, fast), workers, windows. out=FILE appends a
@@ -55,6 +56,7 @@ def _one(ckpt: str, kv: dict) -> dict:
     reps = g("extra_blocks", 0)
     rep = (lambda a: list(a) * (1 + reps)) if reps else (lambda a: a)
     mcfg = replace(mcfg, checkpoint=bool(g("checkpoint", 1)), width=g("width", mcfg.width),
+                   fuse_blocks=g("fuse_blocks", mcfg.fuse_blocks), branch_mlp=g("branch_mlp", mcfg.branch_mlp),
                    hp_width=g("hp_width", mcfg.hp_width), temporal_dilations=rep(mcfg.temporal_dilations),
                    spatial_dilations=rep(mcfg.spatial_dilations), hp_temporal_dilations=rep(mcfg.hp_temporal_dilations),
                    hp_spatial_dilations=rep(mcfg.hp_spatial_dilations))

@@ -2227,9 +2227,10 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - **It corrects a level.**
   - At step 0 the network's baseline is too low at background, on real windows (bias +0.007 to +0.020, target − net) and on fast simulations (+0.011 to +0.023) alike. Fine-tuning brings both to about 0.
   - This looks like the low baseline at low photon counts ("Low photon counts: the baseline sits low", above): pretraining puts it in. If the "lowcount" arm (`--photon_gain 1,4 --silent_trial 0.2`) removes it, most of this gain may become unnecessary.
-  - It is not the output heads: `head_mu`'s bias moves by 0.0002. The whole trunk moves, 2.3% of the weights' norm (pretraining moves them about 9%).
+  - It is not a shift of `head_mu`'s bias, which moves by 0.0002. The whole trunk moves, 2.3% of the weights' norm (pretraining moves them about 9%).
+  - Yet the fine-tuned output heads on the pretrained trunk carry half of S3's gain ("Weight averaging", below).
 
-**The simulation cost is mostly checkpoint noise and lost selection luck, not drift:**
+**Checkpoint noise and selection luck add to the simulation cost.** (Revised 2026-11-22: the weight averages below show that most of the cost is drift after all, and about 1 point is noise.)
 
 | test mice, fast vs oracle | S0 | S1 | S2 | S3 |
 |---|---|---|---|---|
@@ -2245,6 +2246,7 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - **Step 0 had the selection's luck.**
   - It is pretraining's pick among 13 checkpoints, chosen on the validation mice's fast windows. On the test mice it is 0–7 points better than the late pretraining mean (S3: 24.5 against 31.7).
   - Fine-tuning selects on real windows, which barely rank fast windows, and so gives that luck back.
+  - 2026-11-22: the soup of pretraining steps 2000–3000 scores like step 0 (+28.5 against +29.0). So step 0 sits near the centre of late pretraining. It is lucky only against single checkpoints, each of which is noisy.
 - **The good fine-tuning checkpoints cost little.** Picking each run's best checkpoint on the test mice's own fast windows (step 0 included, so an upper bound) gives +28.6 against step 0's +29.0, and keeps part of the real gain (−3.16, against −3.01 at step 0 and −3.24 late).
 
 **Selecting on both readouts** (fine-tuning checkpoints with step 0, chosen by the validation mice's real score + w × their fast score, both balanced against the mean image; read on the test mice, mean of the four runs):
@@ -2260,37 +2262,120 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - Real alone already does most of it, because real and fast co-vary within runs. Fast decides where real cannot (S2).
 - The weight hardly matters: every w from 0.03 to fast alone picks the same checkpoints.
 
-**Weight averaging:** not yet scored.
-- **Queued locally:** on 10 trials of each test mouse (48 fast and 96 real windows per mouse):
-  - S3's fine-tuning soup (steps 750–1700) and WiSE-FT interpolations from step 0 toward it (0.25, 0.5);
-  - the pretrained trunk with the fine-tuned heads, and the reverse;
-  - a soup of pretraining steps 2000–3000.
-- The local GPU is busy with other sessions' jobs, so the results will be added here when they finish.
-- They show whether averaging alone recovers the simulation accuracy. The EMA arm below tests that in training in any case.
+**Weight averaging (scored 2026-11-22): averaging along fine-tuning does not help, but interpolating halfway back to step 0 does.**
+- **What was scored**, for each of S0–S3, built from the kept steps (step 0 is the `--init` checkpoint):
+  - soupFT, the uniform average of fine-tuning steps 750–1700 (5 checkpoints);
+  - soupLate, a uniform soup of steps 1250–1700, which spans about the horizon of `--ema 0.998` but is not that EMA (see below);
+  - WiSE-FT 0.5, which is 0.5 × step 0 + 0.5 × soupFT;
+  - soupPT, the average of pretraining steps 2000–3000;
+  - S3 only: WiSE-FT 0.25, soupFTall (steps 250–1700), and the trunk of one model with the output heads (`head_mu`, `head_mix`, `head_var`, `log_floor`) of the other.
+- **How:**
+  - `slap2-f0 average` built the models. `evaluate --per_window` scored them on the GPU machine, on the same 192 windows per mouse and kind as the held-out evaluation.
+  - `tools/finetune_tradeoff.py RESULTS_DIR --averages WINDOWS_CSV` pairs them with the same run's fine-tuning steps.
+  - **Check:** copies of S3's steps 0 and 1700, scored in the same evaluation, reproduce the held-out scores within 0.01 points on real windows and 0.1 on fast ones. The inputs and references are identical, so the difference is GPU rounding.
+  - The tool's check line reads 1.0 only because 804730's simulations changed in between (8bc88b6). Every readout leaves that mouse's simulations out.
+
+| test mice, mean of S0–S3: score (change from step 0, 95% over mice and windows) | real vs mean image | fast vs oracle |
+|---|---|---|
+| step 0 | −3.01 | +29.0 |
+| late steps (mean) | −3.24 (−0.23 [−0.39, −0.05]) | +34.6 (+5.6 [−2.0, +13.5]) |
+| selected on real + fast (above) | −3.30 (−0.30 [−0.40, −0.11]) | +31.5 (+2.6 [−0.6, +6.1]) |
+| soupFT | −3.27 (−0.27 [−0.43, −0.09]) | +33.7 (+4.7 [−3.0, +12.6]) |
+| soupLate (steps 1250–1700) | −3.25 (−0.24 [−0.42, −0.05]) | +34.5 (+5.6 [−2.4, +13.8]) |
+| **WiSE-FT 0.5** | **−3.18 (−0.18 [−0.26, −0.08])** | **+29.3 (+0.3 [−4.1, +4.9])** |
+| soupPT | −2.98 (+0.02 [−0.00, +0.06]) | +28.5 (−0.5 [−1.5, +0.4]) |
+
+| change from step 0: real (all 8 held-out mice) / fast (test mice) | S0 | S1 | S2 | S3 |
+|---|---|---|---|---|
+| soupFT | −0.24 / +3.5 | −0.23 / +5.1 | −0.35 / +4.3 | −0.34 / +6.0 |
+| WiSE-FT 0.5 | −0.15 / −0.1 | −0.16 / +0.8 | −0.21 / +0.5 | −0.24 / +0.1 |
+
+| S3 only: change from step 0, real (all 8 mice) / fast (test mice) | |
+|---|---|
+| WiSE-FT 0.25 / 0.5 / 1 (soupFT) | −0.14 / −1.2, −0.24 / +0.1, −0.34 / +6.0 |
+| step 0 trunk with soupFT heads | −0.17 / +0.4 |
+| soupFT trunk with step 0 heads | −0.23 / +2.7 |
+| soupFTall (steps 250–1700) | −0.28 / +7.2 |
+
+- **Averaging along fine-tuning lands where the late steps are.**
+  - soupFT and soupLate score like the late mean on both readouts. So most of the simulation cost is not checkpoint noise.
+  - The centre of the fine-tuning steps is itself about 5 points worse on fast windows than step 0 (+3.5 to +6.0 per run). Noise adds only about 1 point (late mean +34.6, against +33.7 for soupFT).
+  - This revises the reading above, which put the cost on noise and selection luck. Pretraining is the opposite: its soup scores like step 0.
+- **Averaging the last ~500 steps does not help, but `--ema 0.998` is untested.**
+  - Measured: soupLate, a uniform soup over about the EMA's horizon, does no better than the late steps.
+  - Not measured: what `--ema 0.998` would do. The EMA starts at the initial weights and is updated at every step with exponential weights. It still holds 0.998^1700 ≈ 3% of the initial weights at step 1700, and about 50% at step 350.
+  - So an early EMA checkpoint, picked by the real + fast selection, could behave like a WiSE-FT blend. soupLate cannot tell.
+- **WiSE-FT 0.5 keeps two thirds of the real gain and almost none of the cost.**
+  - Real: −0.18 [−0.26, −0.08] against step 0 on the test mice. The gain holds in every run (−0.15 to −0.24 on all eight mice). Against soupFT it gives back +0.09 [+0.01, +0.17].
+  - Fast: +0.3 [−4.1, +4.9] against step 0, and −4.4 [−7.8, −1.2] against soupFT.
+  - By class, on real windows: −0.21 at background and −0.15 at support (soupFT: −0.33 and −0.20).
+  - On fast windows it still costs +2.0 [−0.0, +4.0] at support, and is level at background (−1.4 [−9.0, +7.7]).
+  - Against selecting on real + fast (the steps above): real +0.12 [−0.05, +0.25], fast −2.25 [−4.20, 0.00]. It needs no selection, and it does not depend on which steps happen to be good.
+- **Along the line from step 0 to the soup (S3):**
+  - The real gain grows almost in proportion to the soup's share.
+  - The fast score stays at step 0's up to 0.5, then rises. So the knee is at 0.5 or a little above it. 0.75 was not scored.
+- **Trunk or heads alone (S3):**
+  - The fine-tuned heads on the pretrained trunk give half the real gain at no fast cost.
+  - The fine-tuned trunk with the pretrained heads costs 2.7 points on simulations.
+  - WiSE-FT 0.5 beats both.
 
 **Is fine-tuning worth it? Yes, as a short calibration on real data.**
 - It buys 0.2–0.3 points on real windows, consistently across runs and mice: 15–25% of the network's advantage over SiLo, at background pixels.
-- The 5–7 points it costs on simulations come from noisy checkpoints and from selecting on real windows only, so they are avoidable.
+- The 5–7 points it costs on simulations are avoidable:
+  - About 5 come from the weights' move away from step 0. Interpolating halfway back to step 0 (WiSE-FT 0.5) removes them and keeps two thirds of the real gain.
+  - About 1 comes from checkpoint noise.
 - If the "lowcount" arm removes the low background baseline, rerun this comparison on it: fine-tuning may then add little.
 
-**Recommended fine-tuning for the next training batch:**
-- **Baseline arm:** the v9 fine-tuning recipe with the new selection: `--val_sessions 878030,794237,834788,804730 --val_windows 48 --select balanced --select_on real:1,fast:0.1`, plus `--val_fast` and `--keep_every 100`.
+**Recommended fine-tuning for the next training batch** (revised 2026-11-22 after the weight averages):
+- **Training:** the v9 fine-tuning recipe with the new selection, as before: `--val_sessions 878030,794237,834788,804730 --val_windows 48 --select balanced --select_on real:1,fast:0.1`, plus `--val_fast` and `--keep_every 100`.
   - With w = 0.1 the two sets move about equally between checkpoints. In S0–S3 any w from 0.03 up picked the same checkpoints.
-- **Arm to add: `--ema 0.998`** (a 500-step horizon), otherwise the same.
-  - Validation and best.pt then score the moving average, which removes most of the checkpoint noise and should keep the shared bad steps out.
-  - `--keep_every 100` keeps the raw weights too (`model_raw`), so other horizons and soups can be compared afterwards with `slap2-f0 average --key model_raw`, without retraining.
-  - Cost: one more fine-tuning run, about 1700 steps (roughly an hour on the L40S).
-- **Not recommended yet:**
-  - `--l2sp`: drift is not the main cost. `--l2sp 30` would roughly halve the random drift (a 330-step pull at lr 1e-4) at the price of a bias toward the start.
-  - A lower learning rate or a higher `--sim_frac`: they shrink the noise only in proportion and slow the background correction, and no runs tested them.
-  - Fewer steps: the gain is in by step 500, but the noise does not shrink with fewer steps.
+- **Deliver WiSE-FT 0.5 instead of best.pt.** Two averaging commands, no training (FT is the fine-tuning run's folder):
+  - Average the kept steps from 800 on into a soup: `slap2-f0 average soup.pt "FT/steps/step_000[89]*.pt" "FT/steps/step_001*.pt"`.
+  - Average the soup half and half with step 0, the `--init` checkpoint: `slap2-f0 average wise50.pt FT/steps/step_000000.pt=0.5 soup.pt=0.5`.
+  - As a check before shipping, score it against best.pt on the validation mice (real and fast).
+- **Not run in the next batch (a prioritization, not a negative result):**
+  - The `--ema 0.998` arm. Its outcome is untested. soupLate shows only that a uniform soup over its horizon does not help, and the EMA differs (above). It costs a fine-tuning run, while WiSE-FT 0.5 gives the trade-off from the kept steps, tested and without training. Run it if WiSE-FT disappoints in the next batch.
+  - `--l2sp`. It would hold back the drift during training, untested and at the cost of a run. WiSE-FT undoes it afterwards, tested and free.
+- **Still not recommended:**
+  - A lower learning rate, a higher `--sim_frac` or fewer steps. Like WiSE-FT, they shorten the move, but they leave single noisy checkpoints, which the soup averages out. The gain is in by step 500.
+- **Optional:** score WiSE-FT 0.75, and 0.25 on S0–S2, on the same windows, to place the knee. This is one evaluation on the GPU machine, with no training.
 
-**Code (branch finetune-regularize):**
+**Code (PR #2):**
 - `train --ema DECAY`: validation, best.pt, last.pt and the kept steps hold an exponential moving average of the weights, started at the initial weights. The raw weights are saved as `model_raw`.
 - `train --l2sp L` (needs `--init`): after each step, the weights move back toward the initial ones by lr × L of the distance. This is decoupled L2-SP, like AdamW's weight decay but toward the start.
 - `slap2-f0 average OUT CKPT[=W] ...`: the weighted average of checkpoints, from paths, globs and weights, for soups of kept steps and WiSE-FT interpolation (`pre.pt=0.5 ft.pt=0.5`). The network has no normalization buffers, so the averaged weights are a complete model.
-- `tools/finetune_tradeoff.py`: the tables above. With `--averages`, it gives paired summaries of model variants scored on the same windows.
+- `tools/finetune_tradeoff.py RESULTS_DIR`: the tables above. Add `--averages WINDOWS_CSV` (a per-window table of models named `<run>@<variant>`) to score them against the same run's fine-tuning steps on shared windows (the weight-averaging tables). `--averages WINDOWS_CSV` alone gives paired summaries of any models scored on the same windows.
 - Tests: `test_ema_and_l2sp` and `test_average_checkpoints`.
+
+## Next batch (S4): arms, and the deep arm as depth without reach (2026-11-22)
+
+**The deep arm (the user's intent):** more nonlinear processing of the same window in space and time, not a larger window or reach.
+- **Layers after the combination matter most.** The branches, the window statistics and the same-frame context meet in two pointwise fusion layers. If they need to be combined in sophisticated ways, that takes more layers there.
+- **More processing may also let per-trial statistics count for more.** One example is how a target pixel covaries with its neighbours in the window.
+- **The earlier plan did not match this.** Repeating every branch's dilation list (`gpu_bench extra_blocks`) doubles the temporal reach (254 → 508 frames per side, window 718 → about 1,226 frames) and adds nothing after the fusion.
+
+**Design (`ModelConfig.fuse_blocks`, `branch_mlp`; `--fuse_blocks`, `--branch_mlp`):**
+- **Pointwise residual blocks**, x + α · W2(GELU(W1 x)), all 1×1×1, with W1 widening to 2× the channels.
+  - α starts at 0 (ReZero, like the existing blocks), so a checkpoint without these blocks warm-starts exactly.
+  - The arm therefore starts from v6r like the others.
+- **`fuse_blocks` N** adds N blocks after the two fusion layers.
+  - They must be pointwise: any spatial or temporal mixing after the fusion would let an output see its hidden frames through a neighbour's features.
+  - They run on the loss region only.
+- **`branch_mlp` K** adds K blocks after every dilated block of every branch (causal and half-plane): more nonlinear stages on the same receptive field.
+- **Tested:** the blind spot (slab and box) and the reach are unchanged, the warm start is exact, and region and full outputs agree.
+
+**Batch, all from v6r with the S4 recipe** (see "Selection, evaluation and stats for the next training" and the fine-tuning recommendation):
+
+| arm | difference |
+|---|---|
+| control | none |
+| second seed | `--seed 1`: the seed spread that the scaling rule needs |
+| low-count | `--photon_gain 1,4 --silent_trial 0.2` |
+| edge | `--edge_features` |
+| deep | `--fuse_blocks 4 --branch_mlp 1`: 10 pointwise layers after the combination instead of 2, and a nonlinear stage after each dilated block; same reach |
+
+- **Fine-tuning:** every arm keeps steps every 100 (`--keep_every 100`). The shipped model is WiSE-FT 0.5, made from the soup of fine-tuning steps 750–1700 with step 0 (`slap2-f0 average`), and the evaluation scores both.
+- **Evaluation** scores all arms' checkpoints on shared windows, with kinds real, sim, free, fast, freedim and fastdim. `tools/edge_windows.py` runs on every arm.
 
 ## Source detection with the network baseline: results (2026-11-22)
 

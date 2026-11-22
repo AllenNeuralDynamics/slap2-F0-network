@@ -552,3 +552,85 @@ def test_load_compatible_refuses_other_layout_of_equal_width():
     assert old.fuse[0].weight.shape == new.fuse[0].weight.shape
     with pytest.raises(SystemExit, match="motion"):
         load_compatible(new, old.state_dict(), old.cfg)
+
+
+def _activate_pointwise(model):
+    """Non-zero residual scales of the pointwise blocks (they start at 0)."""
+    from slap2_f0.model import PointwiseBlock
+
+    for m in model.modules():
+        if isinstance(m, PointwiseBlock):
+            m.alpha.data.fill_(0.5)
+            torch.nn.init.normal_(m.w2.weight, std=0.5)
+
+
+@pytest.mark.parametrize("which", [0, 1])  # mu, var
+@pytest.mark.parametrize("box", [False, True])
+def test_pointwise_depth_keeps_the_blind_spot(which, box):
+    """branch_mlp and fuse_blocks add depth without reach: the blind spot (slab
+    or box) is unchanged and the inputs used are the same as without them."""
+    torch.manual_seed(3)
+    kw = dict(gap=3, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 2, 1], window_reach=10,
+              full_res_blocks=1)
+    if box:
+        kw.update(box_radius=2, hp_width=6, hp_temporal_dilations=[1, 2, 1], hp_spatial_dilations=[1, 1, 2],
+                  hp_full_res_blocks=1, pool_scales=[3, 0])
+    deep_cfg = ModelConfig(**kw, branch_mlp=2, fuse_blocks=3)
+    assert deep_cfg.temporal_reach == ModelConfig(**kw).temporal_reach
+    model = SlabBlindSpotNet(deep_cfg).double()
+    (_activate_box if box else _activate)(model)
+    _activate_pointwise(model)
+    x = torch.randn(1, deep_cfg.n_inputs, 40, 23, 25, dtype=torch.float64)
+    x[:, 1] = (torch.rand(1, 40, 23, 25) > 0.1).double()
+    x[:, 0] = x[:, 0] * x[:, 1]
+    x[:, 2] = x[:, 2].abs() + 1
+    x.requires_grad_(True)
+    t0, r0, c0 = 20, 11, 12
+    model(x)[which][0, t0, r0, c0].backward()
+    g = x.grad[0, :2].abs().sum(0)
+    gap, rho = deep_cfg.gap, (2 if box else None)
+    if box:
+        assert torch.count_nonzero(g[t0 - gap: t0 + gap + 1, r0 - rho: r0 + rho + 1, c0 - rho: c0 + rho + 1]) == 0
+        assert g[t0, r0 + rho + 1, c0] > 0
+    else:
+        assert torch.count_nonzero(g[t0 - gap: t0 + gap + 1]) == 0
+    assert g[t0 - gap - 1, r0, c0] > 0 and g[t0 + gap + 1, r0, c0] > 0
+    reach = deep_cfg.gap + 1 + deep_cfg.temporal_reach  # nothing beyond the reach either
+    assert torch.count_nonzero(g[: max(0, t0 - reach)]) == 0 and torch.count_nonzero(g[t0 + reach + 1:]) == 0
+
+
+def test_pointwise_depth_warm_starts_exactly():
+    """A checkpoint without pointwise blocks in a model with them: the same
+    outputs at the start, every old weight copied and every new block counted."""
+    from slap2_f0.train import load_compatible
+
+    torch.manual_seed(5)
+    kw = dict(gap=2, width=6, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6, full_res_blocks=1,
+              box_radius=2, hp_width=4, hp_temporal_dilations=[1, 2], hp_spatial_dilations=[1, 1],
+              hp_full_res_blocks=1, pool_scales=[3, 0])
+    old = SlabBlindSpotNet(ModelConfig(**kw)).double()
+    _activate_box(old)
+    deep = SlabBlindSpotNet(ModelConfig(**kw, branch_mlp=1, fuse_blocks=2)).double()
+    load_compatible(deep, old.state_dict(), old.cfg)
+    own = deep.state_dict()
+    assert all(torch.equal(own[k], v) for k, v in old.state_dict().items())  # old keys unchanged
+    assert any(k.startswith("fuse_more.1.") for k in own) and any(".mlp.0.w1." in k for k in own)
+    x = torch.randn(1, 5, 20, 12, 12, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    a, b = old(x), deep(x)
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+
+
+def test_pointwise_depth_region_matches_full():
+    torch.manual_seed(6)
+    cfg = ModelConfig(gap=2, width=6, temporal_dilations=[1, 2, 4], spatial_dilations=[1, 1, 2], full_res_blocks=1,
+                      window_reach=8, branch_mlp=1, fuse_blocks=2)
+    model = SlabBlindSpotNet(cfg).double().eval()
+    _activate(model)
+    _activate_pointwise(model)
+    x = torch.randn(1, cfg.n_inputs, 30, 14, 15, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    region = (slice(10, 20), slice(3, 11), slice(4, 12))
+    full, part = model(x), model(x, region=region)
+    for f, p in zip(full, part):
+        assert torch.allclose(f[(slice(None),) + region], p)
