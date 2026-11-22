@@ -225,7 +225,7 @@ def test_box_model_warm_starts_from_slab():
     _activate(slab)
     box = SlabBlindSpotNet(ModelConfig(**kw, box_radius=2, hp_width=4, hp_temporal_dilations=[1, 2],
                                        hp_spatial_dilations=[1, 1], hp_full_res_blocks=1, pool_scales=[3, 0])).double()
-    msg = load_compatible(box, slab.state_dict())
+    msg = load_compatible(box, slab.state_dict(), slab.cfg)
     assert "fuse.0.weight" in msg
     _activate_box(box)  # half-plane branches active: their outputs still enter with zero weights
     # _activate_box re-drew the heads: give them the slab's again
@@ -273,7 +273,7 @@ def test_adapted_varfac_weights_keep_the_output():
     old = SlabBlindSpotNet(ModelConfig(**kw, varfac_norm="window")).eval()
     _activate_box(old)
     new = SlabBlindSpotNet(ModelConfig(**kw, varfac_norm="trial")).eval()
-    load_compatible(new, adapt_varfac_input(old.state_dict(), 4))
+    load_compatible(new, adapt_varfac_input(old.state_dict(), 4), old.cfg)
     T, H, W = 24, 12, 12
     movie = torch.full((1, T, H, W), float("nan"))
     movie[:, :, 3:9, 4:10] = 5 + torch.rand(1, T, 6, 6)  # 36 of 144 pixels imaged
@@ -304,7 +304,7 @@ def test_shared_halfplane_trunk_starts_per_direction_trunks():
     _activate_box(old)
     new = SlabBlindSpotNet(ModelConfig(**kw)).double().eval()
     assert new.hp is None and len(new.hp_views) == 4
-    load_compatible(new, old.state_dict())
+    load_compatible(new, old.state_dict(), old.cfg)
     x = torch.randn(1, 5, 20, 12, 14, dtype=torch.float64)
     x[:, 2] = x[:, 2].abs() + 1
     with torch.no_grad():
@@ -352,7 +352,7 @@ def test_motion_features_warm_start_and_read_a_shift():
     old = SlabBlindSpotNet(ModelConfig(**kw)).double()
     _activate_box(old)
     new = SlabBlindSpotNet(ModelConfig(**kw, motion_features=True)).double()
-    load_compatible(new, old.state_dict())
+    load_compatible(new, old.state_dict(), old.cfg)
     x = torch.randn(1, 5, 20, 12, 12, dtype=torch.float64)
     x[:, 2] = x[:, 2].abs() + 1
     a, b = old(x), new(x)
@@ -476,7 +476,7 @@ def test_edge_features_warm_start_and_region():
     old = SlabBlindSpotNet(ModelConfig(**kw)).double()
     _activate_box(old)
     new = SlabBlindSpotNet(ModelConfig(**kw, edge_features=True)).double().eval()
-    msg = load_compatible(new, old.state_dict())
+    msg = load_compatible(new, old.state_dict(), old.cfg)
     assert "fuse.0.weight" in msg and "new" in msg
     x = torch.randn(1, 5, 24, 12, 12, dtype=torch.float64)
     x[:, 1] = 1.0
@@ -513,8 +513,7 @@ def test_edge_features_warm_start_into_more_inputs(grow):
     """A checkpoint with edge features warm-starts a model with more fusion
     inputs exactly: the new ones (motion features, or the box's half-planes and
     pooled features) come before the edge features, so load_compatible matches
-    the columns by input part, given the checkpoint's config (and refuses
-    without it)."""
+    the columns by input part (``ModelConfig.fusion_inputs``)."""
     from slap2_f0.train import load_compatible
 
     torch.manual_seed(11)
@@ -528,8 +527,6 @@ def test_edge_features_warm_start_into_more_inputs(grow):
     torch.nn.init.normal_(old.fuse[0].weight, std=0.5)  # the edge columns count too
     torch.nn.init.normal_(old.head_edge.weight, std=0.5)
     new = SlabBlindSpotNet(ModelConfig(**dst)).double().eval()
-    with pytest.raises(SystemExit):
-        load_compatible(new, old.state_dict())
     msg = load_compatible(new, old.state_dict(), old.cfg)
     assert "fuse.0.weight" in msg
     x = torch.randn(1, 5, 24, 12, 12, dtype=torch.float64)
@@ -539,3 +536,19 @@ def test_edge_features_warm_start_into_more_inputs(grow):
     x[:, 2] = x[:, 2].abs() + 1
     a, b = old(x), new(x)
     assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+
+def test_load_compatible_refuses_other_layout_of_equal_width():
+    """A checkpoint whose fusion inputs differ from the model's is refused even
+    when the first fusion layer has the same width: 6 motion channels
+    (pool_scales [0]) are not the 6 edge channels."""
+    from slap2_f0.train import load_compatible
+
+    kw = dict(gap=2, width=6, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6, full_res_blocks=1,
+              box_radius=2, hp_width=4, hp_temporal_dilations=[1, 2], hp_spatial_dilations=[1, 1],
+              hp_full_res_blocks=1, pool_scales=[0])
+    old = SlabBlindSpotNet(ModelConfig(**kw, motion_features=True))
+    new = SlabBlindSpotNet(ModelConfig(**kw, edge_features=True))
+    assert old.fuse[0].weight.shape == new.fuse[0].weight.shape
+    with pytest.raises(SystemExit, match="motion"):
+        load_compatible(new, old.state_dict(), old.cfg)

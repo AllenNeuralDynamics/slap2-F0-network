@@ -506,21 +506,20 @@ def fusion_columns(src: ModelConfig, dst: ModelConfig) -> list[tuple[slice, slic
     return pairs
 
 
-def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | ModelConfig | None = None) -> str:
-    """Load a checkpoint into a model that may have more parts (e.g. a slab
-    model's weights into a box model): matching tensors are copied; a tensor
-    whose input-channel axis grew gets the old columns and zeros for the new
-    ones, so the model starts out computing what the old one did. For the
-    first fusion layer the columns are matched by input part
-    (``ModelConfig.fusion_inputs``) given the checkpoint's config
-    (``src_config``): a new part may sit before an old one (motion or box
-    features added to a model with edge features). Without it the old columns
-    are copied as a prefix, which is right only when the new parts come last
-    (refused for a checkpoint with edge features). Returns a summary."""
+def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | ModelConfig) -> str:
+    """Load a checkpoint (its weights ``state`` and config ``src_config``) into
+    a model that may have more parts (e.g. a slab model's weights into a box
+    model): matching tensors are copied; a tensor whose input-channel axis grew
+    gets the old columns and zeros for the new ones, so the model starts out
+    computing what the old one did. The first fusion layer's columns are
+    matched by input part (``ModelConfig.fusion_inputs``), whether it grew or
+    not: a new part may sit before an old one (motion or box features added to
+    a model with edge features), and a checkpoint part the model lacks is
+    refused even when the widths agree. Returns a summary."""
     own = model.state_dict()
     copied, grown, new = 0, [], []
     state = dict(state)
-    if src_config is not None and not isinstance(src_config, ModelConfig):
+    if not isinstance(src_config, ModelConfig):
         src_config = config_from_dict(src_config)
     if any(k.startswith("hp_views.") for k in own) and any(k.startswith("hp.") for k in state):
         for k in own:  # a shared half-plane trunk (hp.*) starts every per-direction trunk (hp_views.<k>.*)
@@ -533,22 +532,25 @@ def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | Mode
             new.append(k)
             continue
         w = state[k]
-        if w.shape == v.shape:
+        fits = w.dim() == v.dim() >= 2 and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:]
+        if k == "fuse.0.weight" and fits:  # by input part, also at equal width
+            pairs = fusion_columns(src_config, model.cfg)
+            if sum(s.stop - s.start for s, _ in pairs) != w.shape[1]:
+                raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not match its config")
+            nv = torch.zeros_like(v)
+            for s, d in pairs:
+                nv[:, d] = w[:, s]
+            own[k] = nv
+            if w.shape == v.shape:
+                copied += 1
+            else:
+                grown.append(k)
+        elif w.shape == v.shape:
             own[k] = w
             copied += 1
-        elif w.dim() == v.dim() and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:] and w.shape[1] < v.shape[1]:
+        elif fits and w.shape[1] < v.shape[1]:
             nv = torch.zeros_like(v)
-            if k == "fuse.0.weight" and src_config is not None:
-                pairs = fusion_columns(src_config, model.cfg)
-                if sum(s.stop - s.start for s, _ in pairs) != w.shape[1]:
-                    raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not match its config")
-                for s, d in pairs:
-                    nv[:, d] = w[:, s]
-            elif k == "fuse.0.weight" and "head_edge.weight" in state:
-                raise SystemExit("a checkpoint with edge features grows only with its config (load_compatible "
-                                 "src_config): new fusion inputs come before the edge features")
-            else:
-                nv[:, : w.shape[1]] = w
+            nv[:, : w.shape[1]] = w
             own[k] = nv
             grown.append(k)
         else:

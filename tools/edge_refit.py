@@ -29,9 +29,14 @@ refit, and the mid-window error against the truth (so that a gain at the edges
 is not paid for in the middle). Training windows draw seeds 95_000+ (96_000+
 for ``--extra_train``, all at trial edges), evaluation windows 90_000+ (as
 ``edge_windows.py``), so the two never share a draw.
+
+A cache (``--save_cache``) records what its trunk outputs depend on (a hash of
+the trunk's weights, the checkpoint's config and window, the simulation and
+the window sizes); ``--load_cache`` reuses it only when these match.
 """
 import argparse
 import copy
+import hashlib
 import json
 import sys
 import time
@@ -51,6 +56,19 @@ from slap2_f0.stats import load_stats  # noqa: E402
 from slap2_f0.train import eval_sim, load_compatible  # noqa: E402
 
 HEAD = ("fuse", "head_mu", "head_mix", "head_var", "head_edge", "log_floor")  # trained; the rest is frozen
+
+
+def cache_source(args, ck) -> dict:
+    """What cached trunk outputs depend on: the frozen weights (everything but HEAD, hashed), the
+    checkpoint's config and window, the simulation, the window sizes and the template trials."""
+    h = hashlib.sha256()
+    for k in sorted(ck["model"]):
+        if not k.startswith(HEAD):
+            h.update(k.encode())
+            h.update(ck["model"][k].detach().cpu().float().contiguous().numpy().tobytes())
+    return {"trunk_sha256": h.hexdigest(), "config": dict(ck["config"]), "window": dict(ck["window"]),
+            "kind": args.kind, "pz_legacy": bool(args.pz_legacy), "out_frames": args.out_frames,
+            "out_px": args.out_px, "trials": [str(t) for t in args.trials]}
 
 
 def build(ck, edge: bool, device):
@@ -176,11 +194,11 @@ def evaluate(model, evals, device):
             lvl = np.nanmean(truth[:, m])
             for c in ("end", "start"):
                 diff = 100 * np.nanmean((mus[c] - mus["mid"])[:, m], 1) / lvl
-                bias = 100 * np.nanmean((mus["mid"] - truth)[:, m], 1) / lvl
                 dist = frame_dist(c, nf, 0, 0)
                 b = [np.nanmean(diff[(dist >= lo) & (dist < hi)]) for lo, hi in BINS]
                 out.setdefault(f"{kc}|{c}", []).append(b)
-                out.setdefault(f"{kc}|mid_bias", []).append([np.nanmean(bias)])
+            bias = 100 * np.nanmean((mus["mid"] - truth)[:, m], 1) / lvl  # once per draw (its SE is over draws)
+            out.setdefault(f"{kc}|mid_bias", []).append([np.nanmean(bias)])
     res = {k: (np.nanmean(np.array(v), 0).tolist(), (np.nanstd(np.array(v), 0) / np.sqrt(len(v))).tolist())
            for k, v in out.items()}
     res["mse_vs_oracle"] = se_net / max(se_or, 1e-12)
@@ -283,7 +301,9 @@ def main():
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = torch default)")
     ap.add_argument("--arms", default="ctrl,edge")
     ap.add_argument("--save_cache", action="store_true", help="keep the trunk outputs in OUT_DIR/cache.pt (GBs)")
-    ap.add_argument("--load_cache", default="", help="start from this cache.pt (its training and evaluation windows)")
+    ap.add_argument("--load_cache", default="",
+                    help="start from this cache.pt (its training and evaluation windows; refused unless made with "
+                         "the same checkpoint trunk, simulation and window sizes)")
     ap.add_argument("--extra_train", type=int, default=0,
                     help="more training windows on top of a loaded cache, all at trial edges (seeds 96_000+)")
     ap.add_argument("--extra_eval", type=int, default=0, help="more evaluation draws on top of a loaded cache")
@@ -302,14 +322,22 @@ def main():
     tfs = [TrialFile(f) for f in args.trials]
     tps = [Template(tf, stats[str(f)]) for tf, f in zip(tfs, args.trials)]
     args.t_reach, args.s_reach = tR, sR
-    cache_fn = Path(args.load_cache) if args.load_cache else out / "cache.pt"
+    if (args.extra_train or args.extra_eval) and not args.load_cache:
+        raise SystemExit("--extra_train and --extra_eval extend a --load_cache")
+    source = cache_source(args, ck)
     trunk = None
-    if args.extra_train or args.extra_eval or not cache_fn.exists():
+    if args.extra_train or args.extra_eval or not args.load_cache:
         trunk = build(ck, True, device).eval()  # its parts hold the edge statistics too; ctrl ignores them
         if device.type == "cuda":
             trunk.half()
-    if cache_fn.exists():
-        train, evals = torch.load(cache_fn, weights_only=False)
+    if args.load_cache:  # only when asked, and only from the same trunk, simulation and window sizes
+        saved = torch.load(args.load_cache, weights_only=False)
+        had = saved.get("source", {}) if isinstance(saved, dict) else {}
+        bad = [k for k in source if had.get(k) != source[k]]
+        if bad:
+            raise SystemExit(f"{args.load_cache} was not made with this checkpoint and these settings "
+                             f"({', '.join(bad)} differ)")
+        train, evals = saved["train"], saved["evals"]
         print(f"cache: {len(train)} training and {len(evals)} evaluation windows", flush=True)
         if args.extra_train:
             train += training_windows(args, tps, tfs, stats, cfg, trunk, device, args.extra_train, 96_000, 1.0)
@@ -321,7 +349,7 @@ def main():
         train += training_windows(args, tps, tfs, stats, cfg, trunk, device, args.n_train, 95_000, args.edge_frac)
         evals += evaluation_windows(args, tps, tfs, stats, cfg, trunk, device, 0, args.n_eval)
         if args.save_cache:  # several GB
-            torch.save((train, evals), cache_fn)
+            torch.save({"source": source, "train": train, "evals": evals}, out / "cache.pt")
     del trunk
     results = {}
     for arm in args.arms.split(","):
