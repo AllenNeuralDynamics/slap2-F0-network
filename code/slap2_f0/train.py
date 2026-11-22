@@ -111,12 +111,13 @@ class StepProfiler:
     holds no validation or checkpoint. ``finish`` closes a window that training
     left open (it ended early or raised) and says so."""
 
-    def __init__(self, n: int, start: int = 20, device: str = "cuda"):
+    def __init__(self, n: int, start: int = 20, device: torch.device | str = "cuda"):
         if n < 0:
             raise ValueError(f"--profile_steps must be 0 (off) or positive, not {n}")
         self.n, self.start, self.prof, self.t = n, start, None, 0.0
+        self.device = torch.device(device)  # the training device: the one to wait for
         self.acts = [torch.profiler.ProfilerActivity.CPU] + (
-            [torch.profiler.ProfilerActivity.CUDA] if device == "cuda" else [])
+            [torch.profiler.ProfilerActivity.CUDA] if self.device.type == "cuda" else [])
 
     @staticmethod
     def quiet_start(n: int, everies, first: int = 20) -> int:
@@ -148,8 +149,8 @@ class StepProfiler:
             self._close(max(0, step - self.start), incomplete=True)
 
     def _close(self, steps: int, incomplete: bool = False) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
         wall = time.time() - self.t
         prof, self.prof = self.prof, None
         prof.__exit__(None, None, None)
@@ -953,7 +954,7 @@ def train(args) -> None:
     waits = LoaderWait()
     n_prof = getattr(args, "profile_steps", 0)
     prof = StepProfiler(n_prof, StepProfiler.quiet_start(n_prof, (args.val_every, args.save_every, args.keep_every)),
-                        device=device.type)
+                        device=device)
     try:
         for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
             waits.got()
