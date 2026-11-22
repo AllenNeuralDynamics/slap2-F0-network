@@ -1,4 +1,4 @@
-"""Command line: ``slap2-f0 inspect|train|evaluate|predict|predict-registered|view|probe|ceiling|simcheck|stats ...``."""
+"""Command line: ``slap2-f0 inspect|train|evaluate|predict|predict-registered|view|probe|bench|ceiling|simcheck|stats ...``."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import numpy as np
 
 from . import ceiling as ceiling_mod
+from . import gpu_bench as bench_mod
 from . import predict as predict_mod
 from . import registered as registered_mod
 from . import simulate as simulate_mod
@@ -60,6 +61,9 @@ def main(argv=None) -> None:
     pp = sub.add_parser("probe", help="peak GPU memory and time per step over a grid of model settings")
     train_mod.add_probe_arguments(pp)
     pp.set_defaults(func=train_mod.probe)
+    pb = sub.add_parser("bench", help="machine benchmark: a trained model's step, forward and data-loader rates")
+    bench_mod.add_arguments(pb)
+    pb.set_defaults(func=bench_mod.grid)
     pc = sub.add_parser("ceiling", help="reference baselines: how much there is for the network to learn")
     ceiling_mod.add_arguments(pc)
     pc.set_defaults(func=ceiling_mod.run)

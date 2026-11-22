@@ -27,6 +27,9 @@
 # probe: peak GPU memory and time per step over a grid of model settings
 #   (--train_args holds probe options, e.g. "--batches 2,4 --widths 32").
 #
+# bench: machine benchmark (`slap2-f0 bench`; --train_args holds its
+#   arguments: a checkpoint, optionally --data and --configs).
+#
 # train: train the blind-spot network on the exported trials found anywhere
 # under the attached data assets (results of export runs), on the GPU if
 # there is one.
@@ -151,6 +154,12 @@ elif [[ "$mode" == "probe" ]]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli probe --out "$RESULTS/probe" $train_args \
         2>&1 | tee "$RESULTS/logs/probe.log"
     exit "${PIPESTATUS[0]}"
+elif [[ "$mode" == "bench" ]]; then
+    nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
+    nproc | tee "$RESULTS/logs/nproc.txt"
+    # shellcheck disable=SC2086
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli bench --out "$RESULTS/bench" $train_args         2>&1 | tee "$RESULTS/logs/bench.log"
+    exit "${PIPESTATUS[0]}"
 elif [[ "$mode" == "disktest" ]]; then
     mkdir -p "$RESULTS/_disktest"
     n=0
@@ -203,7 +212,7 @@ elif [[ "$mode" == "register" ]]; then
     kill "$monitor" 2>/dev/null
     exit "$status"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe or disktest)"
+    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe, bench or disktest)"
     exit 2
 fi
 

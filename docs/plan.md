@@ -1722,7 +1722,7 @@ Each cell gives 48 / 192 windows per mouse:
 - **The GPU is the limit, not the data loaders.** Evaluation costs 0.46–0.49 s per window whether the window is real (read from disk) or simulated (about 1 s of CPU each, spread over 12 workers). An evaluation run (49,000 windows) takes 7.2 h.
 - **Most of the compute is context.** The network processes 718 frames × 94² px per window, and the loss covers 192 × 48², so 7% of the processed voxels are scored.
 
-**Profile** (`tools/gpu_bench.py CKPT key=value ...`: the trained model's own configuration on random inputs of its window; local RTX 4060 Ti, 8 GB):
+**Profile** (`python -m slap2_f0.gpu_bench CKPT key=value ...`, or the grid `slap2-f0 bench CKPT`: the trained model's own configuration on random inputs of its window; local RTX 4060 Ti, 8 GB):
 - **cuDNN picks a slow algorithm.** Half of a training step's GPU time (49%) was one cuDNN kernel, a direct algorithm for a convolution's backward pass, chosen by cuDNN's heuristics.
   - `torch.backends.cudnn.benchmark = True` lets cuDNN time the algorithms once per shape, and the window shape is fixed in training.
   - With it, a step is 2.1× faster: 1.88 → 0.88 s at 62² px, and 2.36 → 1.14 s at 70² px.
