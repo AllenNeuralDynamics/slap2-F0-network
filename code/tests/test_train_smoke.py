@@ -747,3 +747,20 @@ def test_loader_wait_accumulates_and_resets():
     w.idle()       # 20: validation ran from 8 to 20
     w.got()        # 21
     assert w.report() == (1.0, 14.0)  # 22: only the 1 s fetch is wait
+
+
+def test_step_profiler_prints_a_summary(capsys):
+    """--profile_steps: StepProfiler profiles steps start..start+n and prints
+    the wall time, a table and the compile counters once."""
+    import torch
+
+    from slap2_f0.train import StepProfiler
+
+    p = StepProfiler(2, start=1, device="cpu")
+    x = torch.randn(64, 64)
+    for step in range(1, 5):
+        p.step(step)
+        (x @ x).sum()
+    out = capsys.readouterr().out
+    assert out.count("profile of 2 steps") == 1 and "torch.compile counters" in out
+    assert StepProfiler(0).step(20) is None  # off: nothing happens

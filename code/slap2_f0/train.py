@@ -98,6 +98,48 @@ class LoaderWait:
         return out
 
 
+class StepProfiler:
+    """--profile_steps N: profile N optimizer steps after ``start`` warm-up
+    steps (torch.profiler, CPU and CUDA), then print the operations with the
+    most self time on the GPU and on the CPU, the GPU's busy share of the
+    wall time, and torch.compile's counters (frames compiled, graph breaks,
+    recompilations). For finding what limits a training step."""
+
+    def __init__(self, n: int, start: int = 20, device: str = "cuda"):
+        self.n, self.start, self.prof, self.t = n, start, None, 0.0
+        self.acts = [torch.profiler.ProfilerActivity.CPU] + (
+            [torch.profiler.ProfilerActivity.CUDA] if device == "cuda" else [])
+
+    def step(self, step: int) -> None:
+        if not self.n:
+            return
+        if step == self.start:
+            self.prof = torch.profiler.profile(activities=self.acts)
+            self.prof.__enter__()
+            self.t = time.time()
+        elif self.prof is not None and step == self.start + self.n:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            wall = time.time() - self.t
+            self.prof.__exit__(None, None, None)
+            ev = self.prof.key_averages()
+            gpu = sum(getattr(e, "self_device_time_total", 0) for e in ev) / 1e6
+            print(f"profile of {self.n} steps: {wall:.1f} s wall, GPU kernels {gpu:.1f} s "
+                  f"({100 * gpu / max(wall, 1e-9):.0f}% busy)", flush=True)
+            for key in ("self_cuda_time_total", "self_cpu_time_total"):
+                try:
+                    print(ev.table(sort_by=key, row_limit=20, max_name_column_width=70), flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"profile table by {key}: {e}", flush=True)
+            try:
+                from torch._dynamo.utils import counters
+                print("torch.compile counters: " + json.dumps({k: dict(v) for k, v in counters.items()},
+                                                               default=str)[:4000], flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"torch.compile counters: {e}", flush=True)
+            self.prof = None
+
+
 def quality_files(files: list[Path], args) -> list[Path]:
     """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
     kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
@@ -872,6 +914,7 @@ def train(args) -> None:
     # time spent waiting for the data loaders, per log interval: the rest is the
     # model (and validation); near the interval's length means data-bound
     waits = LoaderWait()
+    prof = StepProfiler(getattr(args, "profile_steps", 0), device=device.type)
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
         waits.got()
         b, mu, var = _forward(net, b, device, amp_dtype, region)
@@ -887,6 +930,7 @@ def train(args) -> None:
         scaler.update()
         opt.zero_grad(set_to_none=True)
         lr_step = sched.get_last_lr()[0]  # the rate this step used
+        prof.step(step)
         sched.step()
         with torch.no_grad():
             if anchor is not None:  # --l2sp: back toward the initial weights by lr x l2sp of the distance
@@ -1226,6 +1270,9 @@ def add_arguments(p) -> None:
                         "(and --event_margin frames around); > 1 makes a baseline that follows the activity cost more")
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=1, help="micro-batches of --batch windows per optimizer step")
+    p.add_argument("--profile_steps", type=int, default=0,
+                   help="profile this many optimizer steps after 20 warm-up steps and print the top GPU and CPU "
+                        "operations and torch.compile's counters (0: off)")
     p.add_argument("--max_open", type=int, default=32,
                    help="trials (with their simulation templates, about 8 MB each) each data-loader worker keeps "
                         "open, least recently used first out; 0 = no limit")
