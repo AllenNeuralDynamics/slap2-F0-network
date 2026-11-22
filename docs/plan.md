@@ -1856,3 +1856,123 @@ Each cell gives 48 / 192 windows per mouse:
   - Next runs attach it and pass `--sidecars /root/capsule/data/f0p1_sidecars`. The session folders sit at the asset's root.
   - Checked: its sidecars all have `mean_image_axes`. Two 804730 trials computed locally with today's code give identical stats, and trials without a sidecar of their own load from the overlay without recomputing.
   - The export-time sidecars of these sessions differ, as expected, because they read only the mean image's first row: they lack `mean_image_axes`, and gain, noise correlations, activity trace and valid-pixel counts differ (movie and residual moments are identical).
+
+## Edge bias: where it comes from, and an arm to train (2026-11-22)
+
+**Question.** Every checkpoint since v6 puts the baseline 2–5% too high at footprint-support pixels in a trial's last 16 frames (sections "Bias at trial edges", v8, v9). Twice the edge windows (v9) did not help. Why, and what should the next training batch change?
+
+**Method: truncated windows** (`tools/edge_windows.py`, new).
+- **Draws.** Each draw is a new virtual trial from the training simulator: fastpz with `--pz_legacy`, as v9 and S0–S3 trained, on the four viewer trials as templates. One window per draw, with its 128-frame loss region in the trial's middle.
+- **Three predictions per window:**
+  - whole;
+  - "end": every frame after the loss region removed (NaN, as past a trial's last frame);
+  - "start": every frame before it removed.
+- **Only the truncation differs:** same noise, activity and whole-trial maps. So end − whole and start − whole measure the edge effect alone, paired, with far less noise than a bias against the truth. This is `edge_pieces.py`'s cut, on many short simulated windows instead of a few whole trials.
+- **The forward pass is split in two:** `model.parts` (everything the fusion layers get) and `model.head` (fusion layers and heads). The outputs are unchanged. This gives two read-outs:
+  - the model's own split of the baseline: mu = base × exp(correction), with base = mean image + mix × (window mean − mean image);
+  - **path swaps:** the truncated window's baseline recomputed with one input of the fusion layers taken from the whole window. The inputs swapped are the trunk branch on the missing side (the future branch at an end, the past branch at a start), the window statistics, or the same-frame context (half-planes, pooled features). Edge − swapped is that path's share.
+
+**Result 1: the network itself puts the baseline too high at a trial's end, on the data it was trained on.** Edge − whole, in % of the true baseline, by frames from the edge (v9 fine-tuned: 16 draws; S0 fine-tuned step 1500: 8 draws; ± SE over draws):
+
+| | 0–4 | 4–8 | 8–16 | 16–32 | 32–64 | 64–128 |
+|---|---|---|---|---|---|---|
+| v9 ft, support, end | +3.7 ± 1.0 | +3.6 ± 1.1 | +3.2 ± 1.0 | +2.1 ± 0.7 | +1.5 ± 0.4 | +0.6 ± 0.1 |
+| v9 ft, support, start | +0.9 ± 0.4 | +1.0 ± 0.4 | +0.3 ± 0.3 | −0.3 ± 0.2 | +0.2 ± 0.1 | +0.2 ± 0.1 |
+| v9 ft, background, end | +2.2 ± 0.5 | +2.2 ± 0.5 | +2.3 ± 0.4 | +1.8 ± 0.3 | +1.3 ± 0.2 | +0.7 ± 0.1 |
+| v9 ft, background, start | +1.3 ± 0.3 | +1.5 ± 0.3 | +1.0 ± 0.2 | +0.5 ± 0.1 | +0.6 ± 0.1 | +0.4 ± 0.1 |
+| S0 ft, support, end | +3.4 ± 1.3 | +3.2 ± 1.7 | +2.7 ± 1.4 | +1.2 ± 0.7 | +0.8 ± 0.4 | +0.5 ± 0.2 |
+| S0 ft, support, start | +1.5 ± 0.5 | +2.2 ± 0.7 | +0.8 ± 0.3 | −0.2 ± 0.1 | +0.3 ± 0.1 | +0.3 ± 0.1 |
+| S0 ft, background, end | +1.5 ± 0.7 | +1.6 ± 0.7 | +1.8 ± 0.5 | +1.0 ± 0.3 | +0.7 ± 0.2 | +0.5 ± 0.1 |
+
+- **The same profile and size as `edge_pieces.py` found** on whole trials, simulated and real. For v9 fine-tuned, support, end of a piece: +4.3, +3.5, +2.1, +1.4, +0.5.
+- **These windows come from the training simulator, so this is not a simulator–data mismatch.**
+- **S0 (phase-1 data, trained before the real-edge cut of 10802bb) is no different from v9.**
+
+**Result 2: it enters through the correction head, driven by the empty future branch.** v9 fine-tuned, end:
+
+| | 0–4 | 4–8 | 8–16 | 16–32 | 32–64 | 64–128 |
+|---|---|---|---|---|---|---|
+| change of the log correction (× 100), support | +4.0 | +3.8 | +3.6 | +2.6 | +1.8 | +0.8 |
+| change of the base (window-mean path), support | −0.2 | −0.2 | −0.2 | −0.1 | −0.1 | 0.0 |
+| share of the future trunk branch, support | +2.9 ± 1.0 | +2.8 | +2.5 | +1.6 | +1.0 | +0.2 |
+| share of the window statistics, support | +0.5 ± 0.3 | +0.5 | +0.6 | +0.5 | +0.5 | +0.4 |
+| share of the same-frame context, support | +0.4 ± 0.1 | +0.4 | +0.2 | 0.0 | 0.0 | 0.0 |
+| share of the future trunk branch, background | +1.3 ± 0.5 | +1.2 | +1.3 | +1.1 | +0.6 | +0.1 |
+| share of the window statistics, background | +0.7 ± 0.1 | +0.7 | +0.8 | +0.8 | +0.7 | +0.5 |
+
+- **The base path is not the problem.** The mix (0.25 at support, 0.19 in background) does not change at edges, and the one-sided window mean is not biased. So the candidates aimed at it would not help: padding, the window statistics' normalisation, and replicate or reflective filling of the missing frames. Reflective filling would also break the blind spot, since mirrored frames sit within the gap of other output frames.
+- **Most of it comes from the future branch when its context is empty or partial:** 2.9 of 3.7 points at support, out to about 64 frames.
+- **Two smaller paths:**
+  - the one-sided window statistics add about 0.5 points at both ends, out to the window's 254 frames;
+  - the half-planes add 0.4 points, within their 31 frames.
+- **At a start, the missing past branch contributes nothing or a little negative.** What remains there (+1 point) is the statistics and the half-planes.
+- **Reading.** The fusion layers are pointwise and shallow (two layers), and seem to add up the evidence each side brings.
+  - Mid-trial, much of the activity evidence comes from the future branch: events seen after the output frame, which tell the correction how much of the mean image to subtract at a source pixel.
+  - With the future missing, that subtraction falls short, most at source pixels.
+  - Doing better needs an interaction: "if the future is empty, lean more on the past". The fusion can build that only weakly, from the empty branch's code through a GELU.
+
+**Result 3: refits of the fusion on a frozen trunk** (`tools/edge_refit.py`, new): the current architecture cannot learn the edges, and edge features let it learn part of them.
+- **Method.** The trunk of v9 fine-tuned (`model.parts`) is frozen and run once on simulated windows placed as in training: half of them at a trial's first or last frame (±64 frames). Its outputs are cached. Only the fusion layers and heads are then trained, from v9's weights, with training's loss.
+- **Three arms on the same cache:**
+  - ctrl: v9's architecture;
+  - edge: with `--edge_features` (below);
+  - gated: with `--edge_features`, but only the edge-gated head is trained (132 parameters), so a trial's middle cannot change.
+- **Evaluation:** the truncated windows above, from separate draws (48 draws, 16 px), and the whole windows' error against the truth.
+- **Two runs:** 128 cached windows for 1500 steps, and 384 (the same 128 plus 256 all at trial edges) for 3000 steps.
+
+| edge − whole, % of the truth, 0–4 / 4–8 / 8–16 frames | support, end | background, end | support, start | whole windows: MSE / oracle, support bias |
+|---|---|---|---|---|
+| v9 fine-tuned, no refit (48 draws) | +3.6 / +3.5 / +3.3 | +2.0 / +2.0 / +2.4 | +0.7 / +0.7 / +0.1 | 1.22, +2.4% |
+| 128 windows: ctrl | +2.2 / +2.5 / +2.3 | +1.4 / +1.6 / +2.0 | +1.0 / +1.2 / −0.1 | 1.27, +1.0% |
+| 128 windows: edge | +1.2 / +1.6 / +1.0 | +0.2 / +0.5 / +0.3 | −0.4 / −0.3 / −2.2 | 1.34, +2.4% |
+| 128 windows: gated | +1.4 / +1.3 / +1.4 | −1.1 / −1.1 / +0.7 | +3.5 / +3.7 / +2.0 | 1.24, +1.1% |
+| 384 windows: ctrl | +2.8 / +2.8 / +3.4 | +1.4 / +1.4 / +2.5 | −0.8 / −0.8 / −0.7 | 1.30, +4.8% |
+| 384 windows: edge | +2.3 / +2.4 / +2.6 | +1.0 / +1.1 / +1.5 | 0.0 / 0.0 / −0.5 | 1.33, +4.8% |
+| 384 windows: gated | +3.9 / +3.8 / +5.8 | +1.9 / +1.9 / +5.2 | +5.2 / +5.3 / +5.2 | 1.22, +2.5% |
+
+The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9 itself gives +2.8 / +2.7 / +2.3 at support and +2.0 / +2.0 / +2.1 in background at the end.
+
+- **The current fusion cannot move the edge effect.** Refitting it on windows half or more at trial edges leaves the effect where it was (ctrl, both runs).
+- **With edge features, the refit lowers the end effect.** Compared with ctrl on the same cache, it is lower by 0.4–1.3 points at support and 0.4–1.7 in background. That is with a frozen trunk and at most 384 windows.
+- **The refits also shift the whole baseline, which confounds the gated arm.**
+  - On uniformly placed training windows, weighted as the loss weighs them, v9 fine-tuned is 1.7% low in a trial's middle (the low activity-free bias of the v9 section). It is close to the truth at true trial edges: −0.1% after a start and +0.3% before an end, in the first 16 frames (about 30 windows per side, so ±1).
+  - The ctrl and edge refits raise the baseline everywhere (support +2.4 points in the 384-window run) and overfit a little (MSE 1.22 → 1.30–1.33).
+  - The gated head cannot touch a trial's middle. So it raises everything within 262 frames of an edge (the reach of its gates) instead, and at the truncated windows' support pixels, which were already high, the effect grows.
+- **So the gated head alone is not the test.** Nor can a frozen trunk and a few hundred windows show how far a full training run would get. What the refits do show: the current fusion has no way to change edges apart from the middle, and edge features give it one.
+- **The two biases interact.** In these simulations:
+  - background pixels are low mid-trial, and the edge effect brings them close to the truth;
+  - support pixels are slightly high mid-trial (+2.4% in these support-centred windows), and the edge effect takes them to about +6%.
+  - Training weighs both. Judge an edge arm at support and background separately, on the paired effect (which the network's overall bias does not affect) as well as against the truth.
+
+**The arm: edge features** (`--edge_features`, `ModelConfig.edge_features`; default off).
+- **Per-side statistics.** The fusion layers also get the window statistics for each side separately (6 channels, all from frames outside the gap):
+  - how much of the past and of the future window has data, on a log scale and within 16 frames of the gap;
+  - each side's mean relative to the mean image.
+- **Edge-gated corrections.** The baseline's and the noise's log corrections get g_past × e_past + g_future × e_future:
+  - g is the share of that side's window without data (0 in a trial's middle, 1 when that side is empty);
+  - e is a 1×1 head on the fused features.
+  - This is the interaction the fusion lacks.
+- **Exact warm start.** The new fusion columns and the head start at 0, so a checkpoint without them warm-starts exactly (`load_compatible`, tested).
+- **Blind spot.** Tested at a trial edge and mid-window, slab and box.
+- **Cost:** 6 fusion inputs and a 4-channel head, computed on the loss region only.
+
+**Recommendation for the next training batch: an arm with `--edge_features`, otherwise the same recipe.**
+- **Stages.** Run it in both stages: pretraining from v6r with `--edge_features` starts exactly as v6r, and fine-tuning continues from it. The cheaper fallback is fine-tuning only, which starts exactly as the pretraining pick.
+- **No other change.** `--edge_frac 0.5` stays (simulated windows only).
+- **Judge it against the same run without the flag:**
+  - `tools/edge_windows.py` on the new checkpoints (fastpz, with the run's low-count draw): end and start effect at support and background. The aim is under 1% at support in the last 16 frames.
+  - `edge_pieces.py` on the viewer trials (real), where the support end effect is +4.6% today.
+  - The held-out evaluation, which must not lose accuracy in a trial's middle.
+- **Not recommended:**
+  - more edge windows (v9: no effect);
+  - an edge-weighted loss (the same lever);
+  - padding or filling of the missing frames: the base path is not involved, and reflective filling breaks the blind spot;
+  - a fixed correction calibrated on simulations: the effect differs between checkpoints (v8 fine-tuned had half of it), pixel classes and ends.
+- **What edge features cannot remove.** One-sided context carries less information on which pixels are active. So part of the support-pixel effect may be the right answer given less information. If so, it should shrink with the arm but not vanish, and background should reach zero first.
+- **Until the arm is trained:** relative to the rest of the trial, the baseline in its first and last 0.2 s is 3–4% too high at source pixels and 2% too high in background, most of all at the end.
+
+**Tools.**
+- `tools/edge_windows.py OUT.npz --trials ... --ckpt name=path ... [--kind fastpz --pz_legacy]` measures any checkpoint's edge effect. It takes minutes on a free GPU (32 draws, 2 checkpoints). It saves partial results, `--summary` prints them, and `--need_gb` waits for free GPU memory.
+- `tools/edge_refit.py` runs the frozen-trunk refits.
+- **On this machine,** when the shared 8 GB GPU runs short, Windows pages GPU memory to the host and a forward pass takes minutes instead of 0.5 s. Both tools also run on the CPU (`--device cpu --threads N`).
+- **CPU refits** use their own small AdamW: torch.optim's step probes the CUDA stream, which hangs while the full GPU opens a context.
