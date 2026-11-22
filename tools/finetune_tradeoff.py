@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import spearmanr
 
+PREDS = ("net", "mean_image", "silo", "oracle")
 TEST = ("776270", "810196", "829704", "876767")
 VAL = ("878030", "794237", "834788", "804730")
 STEPS = (0, 250, 500, 750, 1000, 1250, 1500, 1700)
@@ -274,69 +275,98 @@ def load_named(path: Path):
 
 
 def weight_averages(S, path, runs, test, val, B=1000):
-    """6. weight averages of kept steps (`slap2-f0 average`), scored on the held-out evaluation's
-    windows, against the fine-tuning steps of the same run: per run, then the mean over runs with
-    95% intervals over mice and windows (paired)."""
+    """6. weight averages of kept steps (`slap2-f0 average`), scored by `evaluate --per_window`
+    (checkpoints named <run>@<variant>), against the fine-tuning steps of the same run: per run, then
+    the mean over runs with 95% intervals over mice and windows. Each readout uses the mice that every
+    model of every run has, and within each mouse the windows (by window index) that all of them share,
+    so variants scored on fewer windows or only the test mice are still compared like for like."""
     W = load_named(path)
     S.W.update(W)
-    variants = list(dict.fromkeys(k[1] for k in W))
+    have = {run: list(dict.fromkeys(k[1] for k in W if k[0] == f"{run}avg")) for run in runs}
     late = [STEPS.index(s) for s in LATE]
-    print(f"\n6. weight averages ({path}); readouts: real vs mean image on all held-out mice and on the test mice, "
-          "fast vs oracle on the test mice")
+    print(f"\n6. weight averages ({path}) against the fine-tuning steps; real vs the mean image, fast vs the oracle")
+
+    def keys(run, m, kind):
+        return [(f"{run}ft", s, m, kind) for s in STEPS] + [(f"{run}avg", v, m, kind) for v in have[run]]
+
+    def take(key, ids):  # error sums (class, windows) of the net and the references at these window indices
+        d = S.W[key]
+        pos = {int(x): i for i, x in enumerate(d["window"])}
+        j = np.array([pos[x] for x in ids])
+        return {p: np.stack([d[f"{c}_se8_{p}"][j] for c in ("sup", "bg")]) for p in PREDS}
+
     for run in runs:  # copies of kept steps must reproduce the held-out evaluation exactly
         for var, step in (("ft0", 0), ("ft1700", 1700)):
-            keys = [k for k in W if k[0] == f"{run}avg" and k[1] == var]
-            if keys:
-                dev = max(np.abs(W[k][c] - S.W[(f"{run}ft", step, k[2], k[3])][c]).max()
-                          / np.abs(S.W[(f"{run}ft", step, k[2], k[3])][c]).max()
-                          for k in keys for c in ("sup_se8_net", "bg_se8_net"))
-                print(f"  check {run}@{var} = {run}ft step {step}: largest relative difference {dev:.1e}")
-    reads = (("real", test + val, "mean_image"), ("real", test, "mean_image"), ("fast", test, "oracle"))
-    names = ("real all", "real test", "fast test")
+            dev = []
+            for k in [k for k in W if k[0] == f"{run}avg" and k[1] == var]:
+                o = (f"{run}ft", step, k[2], k[3])
+                if o in S.W:
+                    ids = sorted(set(W[k]["window"].astype(int)) & set(S.W[o]["window"].astype(int)))
+                    a, b = take(k, ids)["net"], take(o, ids)["net"]
+                    dev.append(np.abs(a - b).max() / np.abs(b).max())
+            if dev:
+                print(f"  check {run}@{var} = {run}ft step {step}: largest relative difference {max(dev):.1e}")
 
-    def table(run, w=None, mm=None, mm_t=None):
-        """scores (readouts, models): step 0, late mean, step 1700, then this run's variants"""
-        have = [v for v in variants if (f"{run}avg", v, test[0], "fast") in S.W]
-        out = []
-        for (kind, mice, ref), m in zip(reads, (mm, mm_t, mm_t)):
-            nm = len(S.mice(kind, mice))
-            ww = None if w is None else w[:nm]
-            mmm = None if m is None else m[:nm]
-            ft = pct(*S.sums(f"{run}ft", STEPS, kind, mice, ref), w=ww, mm=mmm)
-            av = pct(*S.sums(f"{run}avg", have, kind, mice, ref), w=ww, mm=mmm) if have else np.zeros(0)
-            out.append(np.concatenate([[ft[0], ft[late].mean(), ft[-1]], av]))
-        return np.array(out), ["step 0", "late mean", "step 1700"] + have
+    readouts = []
+    for name, kind, mice, ref in (("real all", "real", test + val, "mean_image"), ("real test", "real", test, "mean_image"),
+                                  ("fast test", "fast", test, "oracle")):
+        ms = [m for m in S.mice(kind, mice) if all(k in S.W for r in runs for k in keys(r, m, kind))]
+        if not ms:
+            print(f"  {name}: no mouse has every model; left out")
+            continue
+        ids = {m: sorted(set.intersection(*[set(S.W[k]["window"].astype(int)) for r in runs for k in keys(r, m, kind)]))
+               for m in ms}
+        data = {r: [[take(k, ids[m]) for k in keys(r, m, kind)] for m in ms] for r in runs}
+        print(f"  {name}: mice {', '.join(ms)}; {min(len(v) for v in ids.values())}+ shared windows per mouse")
+        readouts.append((name, ms, ids, data, ref))
 
-    tabs = {}
+    def scores(data, ref, w=None, mm=None):
+        """% change per model (fine-tuning steps, then variants), balanced over classes, mice weighted by mm"""
+        per_mouse = []
+        for i, models in enumerate(data):
+            ww = 1.0 if w is None else w[i]
+            per_mouse.append([((d["net"] * ww).sum(-1) / (d[ref] * ww).sum(-1)).mean() for d in models])
+        r = np.array(per_mouse)  # (mice, models)
+        mm = np.ones(len(r)) if mm is None else mm
+        return 100 * ((r * mm[:, None]).sum(0) / mm.sum() - 1)
+
+    def summary(s):  # step 0, late mean, step 1700, variants
+        return np.concatenate([[s[0], s[late].mean(), s[len(STEPS) - 1]], s[len(STEPS):]])
+
     for run in runs:
-        t, rows = table(run)
-        tabs[run] = rows
-        print(f"\n  {run}: " + " | ".join(f"{n:>9s}" for n in names))
+        rows = ["step 0", "late mean", "step 1700"] + have[run]
+        t = np.array([summary(scores(data[run], ref)) for _, _, _, data, ref in readouts])
+        print(f"\n  {run:16s}" + " | ".join(f"{name:>11s}" for name, *_ in readouts))
         for j, r in enumerate(rows):
-            print(f"  {r:16s} " + " | ".join(f"{t[i, j]:+9.2f}" for i in range(len(names))))
-    common = [r for r in tabs[runs[0]] if all(r in tabs[x] for x in runs)]
+            print(f"  {r:16s}" + " | ".join(f"{t[i, j]:+11.2f}" for i in range(len(readouts))))
+    common = ["step 0", "late mean", "step 1700"] + [v for v in have[runs[0]] if all(v in have[r] for r in runs)]
+
+    def mean_over_runs(rd, w=None, mm=None):
+        _, _, _, data, ref = rd
+        out = []
+        for r in runs:
+            s = summary(scores(data[r], ref, w, mm))
+            names = ["step 0", "late mean", "step 1700"] + have[r]
+            out.append(s[[names.index(c) for c in common]])
+        return np.mean(out, 0)
+
     rng = np.random.default_rng(0)
-    # mice and windows are the same in every run, so one draw serves all runs (mice: real all / test)
-    nm_all, nm_t = len(test + val), len(test)
-    nw = S.W[(f"{runs[0]}ft", 0, test[0], "fast")]["sup_se8_net"].shape[0]
-    pts = np.mean([table(r)[0][:, [tabs[r].index(c) for c in common]] for r in runs], 0)
-    boots = []
-    for _ in range(B):
-        w = np.stack([np.bincount(rng.integers(0, nw, nw), minlength=nw) for _ in range(nm_all)]).astype(float)
-        mm = np.bincount(rng.integers(0, nm_all, nm_all), minlength=nm_all).astype(float)
-        mt = np.bincount(rng.integers(0, nm_t, nm_t), minlength=nm_t).astype(float)
-        boots.append(np.mean([table(r, w, mm, mt)[0][:, [tabs[r].index(c) for c in common]] for r in runs], 0))
-    boots = np.array(boots)  # (B, readouts, models)
-    print(f"\n  mean of {', '.join(runs)}: score; difference to step 0 and to the late mean [95% over mice and windows]")
-    print("  " + " " * 16 + " | ".join(f"{n:^38s}" for n in names))
-    for j, c in enumerate(common):
-        cells = []
-        for i in range(len(names)):
-            d0 = boots[:, i, j] - boots[:, i, 0]
-            dl = boots[:, i, j] - boots[:, i, 1]
-            cells.append(f"{pts[i, j]:+6.2f} {pts[i, j] - pts[i, 0]:+5.2f} [{np.percentile(d0, 2.5):+5.2f},"
-                         f"{np.percentile(d0, 97.5):+5.2f}] {pts[i, j] - pts[i, 1]:+5.2f}")
-        print(f"  {c:16s}" + " | ".join(cells))
+    print(f"\n  mean of {', '.join(runs)}: score; difference to step 0 [95% over mice and windows]; difference to "
+          "the late mean")
+    for rd in readouts:
+        _, ms, ids, _, _ = rd
+        pt = mean_over_runs(rd)
+        boots = []
+        for _ in range(B):  # one draw of this readout's mice and windows, shared by every run and model
+            mm = np.bincount(rng.integers(0, len(ms), len(ms)), minlength=len(ms)).astype(float)
+            w = [np.bincount(rng.integers(0, len(ids[m]), len(ids[m])), minlength=len(ids[m])).astype(float) for m in ms]
+            boots.append(mean_over_runs(rd, w, mm))
+        boots = np.array(boots)
+        print(f"  {rd[0]}")
+        for j, c in enumerate(common):
+            d0 = boots[:, j] - boots[:, 0]
+            print(f"    {c:16s} {pt[j]:+7.2f}  {pt[j] - pt[0]:+6.2f} [{np.percentile(d0, 2.5):+6.2f}, "
+                  f"{np.percentile(d0, 97.5):+6.2f}]  {pt[j] - pt[1]:+6.2f}")
 
 
 def main():
