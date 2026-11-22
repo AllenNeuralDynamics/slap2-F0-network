@@ -643,3 +643,90 @@ def test_edge_features_finetune_from_checkpoint(tmp_path):
     main(["evaluate", str(tmp_path / "data"), "--ckpt", f"m={out / 'best.pt'}", "--out", str(ev), "--windows", "2",
           "--workers", "0", "--kinds", "sim", "--stats_from", str(pre / "stats")])
     assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 3
+
+
+SMALL = ["--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+         "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0"]
+
+
+def _three_sessions(tmp_path):
+    for k, label in enumerate(["sessA", "sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    return tmp_path / "data"
+
+
+def _load(p):
+    import torch
+    return torch.load(p, map_location="cpu", weights_only=False)
+
+
+def test_ema_and_l2sp(tmp_path):
+    """--ema saves the moving average as the model (raw weights as model_raw) and validates it;
+    --l2sp pulls the weights back toward --init (with lr x l2sp >= 1 they stay there)."""
+    import torch
+    data = _three_sessions(tmp_path)
+    out = tmp_path / "ema"
+    main(["train", str(data), "--out", str(out), "--data", "sim", "--steps", "3", "--batch", "2", "--keep_every", "1",
+          "--val_every", "1", "--val_windows", "2", "--ema", "0.5"] + SMALL)
+    kept = [_load(out / "steps" / f"step_{s:06d}.pt") for s in range(4)]
+    for k in kept[0]["model"]:
+        assert torch.equal(kept[0]["model"][k], kept[0]["model_raw"][k])  # the average starts at the initial weights
+    moved = False
+    for prev, cur in zip(kept, kept[1:]):
+        for k, v in cur["model"].items():
+            want = 0.5 * prev["model"][k] + 0.5 * cur["model_raw"][k]
+            assert torch.allclose(v, want, atol=1e-6), k
+            moved |= not torch.allclose(cur["model_raw"][k], prev["model_raw"][k])
+    assert moved  # the raw weights trained
+    rows = list(csv.DictReader(open(out / "metrics.csv")))
+    assert [r["step"] for r in rows] == ["0", "1", "2", "3"]
+    assert abs(float(rows[0]["sim_balanced"]) - 1.0) < 1e-5
+    best = _load(out / "best.pt")
+    assert "model_raw" in best and "model_raw" in _load(out / "last.pt")
+    # --l2sp needs --init; with lr x l2sp >= 1 every step lands back on the initial weights
+    for bad in (["--l2sp", "1"], ["--ema", "1"], ["--ema", "nan"], ["--l2sp", "-1", "--init", str(out / "last.pt")]):
+        with pytest.raises(SystemExit):  # no --init, or a value outside the regularizer's domain
+            main(["train", str(data), "--out", str(tmp_path / "bad"), "--steps", "1"] + bad + SMALL)
+    out2 = tmp_path / "l2sp"
+    main(["train", str(data), "--out", str(out2), "--data", "real", "--init", str(out / "last.pt"), "--steps", "2",
+          "--batch", "2", "--keep_every", "1", "--val_windows", "2", "--l2sp", "1e12",
+          "--stats_cache", str(out / "stats")] + SMALL)
+    init = _load(out / "last.pt")["model"]
+    for s in (1, 2):
+        for k, v in _load(out2 / "steps" / f"step_{s:06d}.pt")["model"].items():
+            assert torch.allclose(v, init[k], atol=1e-6), (s, k)
+
+
+def test_average_checkpoints(tmp_path):
+    """average: weighted means of kept steps (globs, path=weight), loadable by evaluate;
+    configurations must match."""
+    import torch
+    data = _three_sessions(tmp_path)
+    out = tmp_path / "run"
+    main(["train", str(data), "--out", str(out), "--data", "sim", "--steps", "2", "--batch", "2", "--keep_every", "1",
+          "--val_windows", "2"] + SMALL)
+    st = [_load(out / "steps" / f"step_{s:06d}.pt")["model"] for s in range(3)]
+    main(["average", str(tmp_path / "soup.pt"), str(out / "steps" / "step_*.pt")])
+    soup = _load(tmp_path / "soup.pt")
+    assert [a["step"] for a in soup["averaged"]] == [0, 1, 2]
+    for k, v in soup["model"].items():
+        assert torch.allclose(v, (st[0][k] + st[1][k] + st[2][k]) / 3, atol=1e-6)
+    main(["average", str(tmp_path / "wise.pt"), f"{out / 'steps' / 'step_000000.pt'}=1",
+          f"{out / 'steps' / 'step_000002.pt'}=3"])
+    for k, v in _load(tmp_path / "wise.pt")["model"].items():
+        assert torch.allclose(v, 0.25 * st[0][k] + 0.75 * st[2][k], atol=1e-6)
+    main(["average", str(tmp_path / "dirglob.pt"), str(tmp_path / "r?n" / "steps" / "step_00000[12].pt")])
+    assert [a["step"] for a in _load(tmp_path / "dirglob.pt")["averaged"]] == [1, 2]  # wildcards in folder names
+    for w in ("nan", "inf", "0"):
+        with pytest.raises(ValueError):  # weights must be finite with a positive sum
+            main(["average", str(tmp_path / "bad.pt"), f"{out / 'steps' / 'step_000000.pt'}={w}"])
+    main(["evaluate", str(data), "--out", str(tmp_path / "eval"), "--ckpt", f"wise={tmp_path / 'wise.pt'}",
+          "--kinds", "real", "--windows", "2", "--workers", "0"])
+    assert len(list(csv.DictReader(open(tmp_path / "eval" / "eval.csv")))) == 3  # one row per session
+    other = tmp_path / "other"
+    main(["train", str(data), "--out", str(other), "--data", "sim", "--steps", "1", "--batch", "2",
+          "--val_windows", "2", "--stats_cache", str(out / "stats"), "--width", "6"] + SMALL[2:])
+    with pytest.raises(SystemExit):  # another width
+        main(["average", str(tmp_path / "bad.pt"), str(out / "best.pt"), str(other / "best.pt")])
