@@ -157,6 +157,24 @@ class SimConfig:
     # 0.23 against 0.39, next row 0.12 against 0.23, 1 frame 0.43 against 0.60)
     # and too much skew (6.2 against 4.8). Kept to reproduce those runs
     pz_legacy: bool = False
+    # photon-count augmentation: per virtual trial, the template's gain (counts
+    # per photon) times a factor log-uniform in photon_gain (1, 1 = off). A factor
+    # k > 1 keeps the baseline and the activity in counts and divides the photons
+    # by k: photon noise variance k x gain x mean, photon events k x larger in
+    # counts at the same skew per photon (so the counts' skew grows by sqrt(k)),
+    # k x the counts per photon event of realistic low counts (more exact zeros).
+    # Normalized by the trial scale, this is the noise of a dimmer session. The
+    # excess's slow part (a baseline fluctuation in counts^2) stays; its fast part
+    # stays a factor on the photon noise. The window reports the gain it used, for
+    # the network's input and the loss weights. With photon_zeros the copula's
+    # kernels stay the template's (Template.pz_kernels at its own gain), so the
+    # counts' correlations come out a little weaker where k adds zeros.
+    # Why: below about 1 photon per frame at footprint support (776270, 876767,
+    # 878030; training mice 0.4-1.0) the S0-S3 networks set the baseline 5-10% low
+    # in activity-free simulations, in every pixel class, also on flat fields
+    # without any structure; at 4x the photons the bias falls to 0.5-2%
+    # (docs/plan.md, "Low photon counts: the baseline sits low").
+    photon_gain: tuple[float, float] = (1.0, 1.0)
     # residual motion (0 = none): per axis (rows, columns) an OU process with SD
     # uniform in motion_sd_px (pixels) and time constant log-uniform in
     # motion_tau_frames; the baseline and activity move, the scan does not
@@ -706,6 +724,9 @@ def draw(tp: Template, cfg: SimConfig, rng) -> dict:
                         np.full(2 * J, rng.uniform(*cfg.local_sd_px)), rng)
         r["local_fields"] = flds.astype(np.float32)
         r["local_proc"] = w.reshape(2, J, T).astype(np.float32)  # (2, J, T)
+    if cfg.photon_gain != (1.0, 1.0):  # drawn last, see above
+        lo, hi = (float(v) for v in cfg.photon_gain)
+        r["gain_k"] = float(np.exp(rng.uniform(np.log(lo), np.log(hi)))) if hi > lo else lo
     if cfg.photon_zeros and tp.zc is not None:
         r["photon_zeros"] = True
         r["pz_legacy"] = bool(cfg.pz_legacy)
@@ -793,11 +814,13 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     else:  # the region is the window
         truth, act = truth[:, wr, wc], act[:, wr, wc]
     S = np.where(valid[None], truth + act, 0).astype(np.float32)
+    gain = tp.gain * r.get("gain_k", 1.0)  # counts per photon (photon_gain: fewer photons for the same counts)
+    out["gain"] = np.float32(gain)
     # photon noise through the kernel; the signal itself is not blurred
     pt, ps_r, ps_c = len(tp.kt) // 2, len(tp.kr) // 2, len(tp.kc) // 2
     Se = np.pad(S, ((pt, pt), (ps_r, ps_r), (ps_c, ps_c)), mode="edge")
-    gp = tp.gain * tp.q / tp.ksum2  # event size; variance gp^2 * lam * ksum2 = gain * S
-    lam = np.maximum(Se, 0) * tp.ksum2 / (tp.gain * tp.q ** 2)
+    gp = gain * tp.q / tp.ksum2  # event size; variance gp^2 * lam * ksum2 = gain * S
+    lam = np.maximum(Se, 0) * tp.ksum2 / (gain * tp.q ** 2)
     noise = _filter((gp * (rng.poisson(lam) - lam)).astype(np.float32), tp.kt, tp.kr, tp.kc)
     fac = np.maximum(1 + tp.fast[rs:re, cs:ce] * r.get("excess", 0.0), 0.05)  # the excess's fast part
     movie = S + noise * np.sqrt(fac)[None]
@@ -827,11 +850,11 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
         kept = np.flatnonzero(~tf.discard) if (~tf.discard).any() else np.arange(T)
         sh = np.stack([_move(Mx, r, k, fill, loc)[wr, wc] for k in kept[np.linspace(0, len(kept) - 1, 128).astype(int)]])
         M, vmot = sh.mean(0), sh.var(0)
-    var_mean = tp.gain * np.maximum(M, 0) * fac * tp.Ft / tp.n_valid
+    var_mean = gain * np.maximum(M, 0) * fac * tp.Ft / tp.n_valid
     g = rng.standard_normal((re - rs + 2 * ps_r, ce - cs + 2 * ps_c)).astype(np.float32)[None]
     g = _filter(g, np.ones(1), tp.kr, tp.kc)[0] / np.sqrt((tp.kr ** 2).sum() * (tp.kc ** 2).sum())
     mi = M + np.sqrt(var_mean) * g
-    vm = (B ** 2 * dvar + svar + vact + vmot + tp.gain * np.maximum(M, 0) * fac) * \
+    vm = (B ** 2 * dvar + svar + vact + vmot + gain * np.maximum(M, 0) * fac) * \
         np.maximum(1 + np.sqrt(2 * tp.Ft / tp.n_valid) * rng.standard_normal(M.shape), 0.1)
     out["mean_image"][dr, dc] = np.where(valid, mi, np.nan)
     out["mean_act"][dr, dc] = np.where(valid, mact, np.nan)  # the virtual trial's mean activity
@@ -841,8 +864,8 @@ def window(tp: Template, r: dict, t0: int, nt: int, r0: int, nr: int, c0: int, n
     out["support"][dr, dc] = tf.support[rs:re, cs:ce] & valid
     if r.get("photon_zeros"):  # last, so the draws above are as without it
         ge = rng.standard_normal(Se.shape).astype(np.float32)
-        var = tp.gain * np.maximum(S, 0) * fac[None]
-        zc = np.broadcast_to(tp.zc[rs:re, cs:ce], S.shape)
+        var = gain * np.maximum(S, 0) * fac[None]
+        zc = np.broadcast_to(tp.zc[rs:re, cs:ce] * np.float32(r.get("gain_k", 1.0)), S.shape)
         if r.get("pz_legacy"):
             g = _filter(ge, tp.kt, tp.kr, tp.kc) / np.sqrt(tp.ksum2)
             mz = _photon_zeros(movie, S, var, zc, g)
@@ -900,6 +923,7 @@ def write_trial(tp: Template, out_fn, cfg: SimConfig | None = None, seed: int = 
         f.attrs["simulated"] = 1
         f.attrs["template"] = str(tf.path)
         f.attrs["sim_amp"] = r["amp"]
+        f.attrs["sim_gain"] = float(w.get("gain", tp.gain))  # counts per photon used (photon_gain)
         f.attrs["sim_config"] = str(asdict(cfg))
     return r
 

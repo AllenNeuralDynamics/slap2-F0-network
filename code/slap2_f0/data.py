@@ -29,7 +29,9 @@ baseline, and every valid pixel and frame has weight 1, or ``sim_event_weight``
 where the activity exceeds half the pixel's photon-noise SD (and
 ``event_margin`` frames around): a baseline that follows the activity (the
 v6 box models do, when many synapses respond to a stimulus together, which
-looks like a frame-wide brightness change) then costs more.
+looks like a frame-wide brightness change) then costs more. The item's gain
+is the virtual trial's (``SimConfig.photon_gain`` can raise it), so the
+network's gain input and the loss weights see the noise that was simulated.
 
 Activity-subtracted real windows (``subtract_frac``): with this
 probability a real window's input is movie - activity too, with the
@@ -168,15 +170,17 @@ class WindowDataset(Dataset):
             k = rng.integers(len(vr))
             r0, c0 = int(vr[k]) - c.out_px // 2 - c.s_reach, int(vc[k]) - c.out_px // 2 - c.s_reach
             t0 -= c.t_reach
+            gain = float(st["gain"])
             if use_sim:
                 tp = self._template(fn)
                 w = window(tp, draw(tp, self.sim, rng), t0, nt, r0, ns, c0, ns, rng)
                 movie, target, noisy = w["movie"], w["truth"], w["noisy"]
                 mean_image, var_map, varfac, mean_act = w["mean_image"], w["var_map"], w["varfac"], w["mean_act"]
                 labeled, support = w["labeled"], w["support"]
+                gain = float(w.get("gain", gain))  # the virtual trial's (SimConfig.photon_gain)
                 weight = np.isfinite(movie).astype(np.float32)
                 if c.sim_event_weight != 1:
-                    sd = np.sqrt(np.maximum(st["gain"] * np.nan_to_num(mean_image), 1e-6))
+                    sd = np.sqrt(np.maximum(gain * np.nan_to_num(mean_image), 1e-6))
                     ev = _dilate_time(w["activity"] > 0.5 * sd[None], c.event_margin)
                     weight *= np.where(ev, np.float32(c.sim_event_weight), np.float32(1.0))
             else:
@@ -226,7 +230,7 @@ class WindowDataset(Dataset):
             "var_map": torch.from_numpy(var_map.astype(np.float32)),
             "mean_act": torch.from_numpy(mean_act.astype(np.float32)),
             "scale": torch.tensor(s),
-            "gain": torch.tensor(np.float32(st["gain"])),
+            "gain": torch.tensor(np.float32(gain)),
             "target": torch.from_numpy(np.nan_to_num(target / s).astype(np.float32)),
             "noisy": torch.from_numpy(np.nan_to_num(noisy / s).astype(np.float32)),
             "weight": torch.from_numpy(weight * np.isfinite(target) * np.isfinite(noisy)),

@@ -334,3 +334,54 @@ def test_local_motion(tmp_path):
     for t in (0, 17, 49):
         ref = ndimage.map_coordinates(w["truth_static"][t], [rr - D[t, 0], cc - D[t, 1]], order=3, mode="nearest")
         assert np.allclose(w["truth"][t], ref, rtol=1e-4, atol=1e-4)
+
+
+def test_photon_gain(tmp_path):
+    """Photon-count augmentation: off by default (the draws are as before); a
+    factor k keeps the truth and the activity, scales the photon noise variance
+    and the reported gain by k, adds exact zeros to realistic low counts, and
+    reaches the network's gain input through WindowDataset."""
+    from slap2_f0.data import WindowConfig, WindowDataset
+    from slap2_f0.train import eval_sim, DIM_GAIN
+    fn = tmp_path / "trial_001.h5"
+    _template_file(fn, T=1200)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    a = draw(tp, SimConfig(), np.random.default_rng(4))
+    b = draw(tp, SimConfig(photon_gain=(1.0, 1.0)), np.random.default_rng(4))
+    assert "gain_k" not in a and "gain_k" not in b and a["shift"] == b["shift"]
+    assert np.array_equal(a["proc"], b["proc"]) and a.keys() == b.keys()
+    plain = window(tp, a, 0, 1200, 0, 30, 0, 34, np.random.default_rng(3))
+    assert plain["gain"] == np.float32(tp.gain)
+    r = draw(tp, SimConfig(photon_gain=(4.0, 4.0)), np.random.default_rng(4))
+    assert r["gain_k"] == 4.0 and r["shift"] == a["shift"]
+    w = window(tp, r, 0, 1200, 0, 30, 0, 34, np.random.default_rng(3))
+    inside = np.isfinite(w["movie"])
+    assert np.allclose(w["truth"][inside], plain["truth"][inside]) and np.array_equal(w["activity"], plain["activity"])
+    assert abs(w["gain"] / tp.gain - 4.0) < 1e-5
+    noise = (w["movie"] - w["activity"] - w["truth"])[inside]
+    truth = w["truth"][inside]
+    assert abs(noise.mean()) < 0.05 * truth.mean()
+    assert 0.85 < noise.var() / (4.0 * tp.gain * truth.mean()) < 1.15
+    # a range: log-uniform factors within it
+    ks = [draw(tp, SimConfig(photon_gain=(1.0, 4.0)), np.random.default_rng(i))["gain_k"] for i in range(200)]
+    assert min(ks) >= 1.0 and max(ks) <= 4.0 and 1.7 < float(np.median(ks)) < 2.3
+    # realistic low counts: more exact zeros at a quarter of the photons, still unbiased
+    pz0 = window(tp, draw(tp, SimConfig(photon_zeros=True), np.random.default_rng(2)), 0, 1200, 0, 30, 0, 34,
+                 np.random.default_rng(3))
+    pz4 = window(tp, draw(tp, SimConfig(photon_zeros=True, photon_gain=(4.0, 4.0)), np.random.default_rng(2)),
+                 0, 1200, 0, 30, 0, 34, np.random.default_rng(3))
+    z0, z4 = (pz0["movie"][inside] == 0).mean(), (pz4["movie"][inside] == 0).mean()
+    assert z4 > z0 + 0.1 and (pz4["movie"][inside] >= 0).all()
+    n4 = (pz4["movie"] - pz4["activity"] - pz4["truth"])[inside]
+    assert abs(n4.mean()) < 0.05 * truth.mean()
+    # the dataset passes the virtual trial's gain on (the network input and the loss weights use it)
+    cfg = WindowConfig(out_frames=16, out_px=8, t_reach=20, s_reach=4)
+    stats = {str(fn): st}
+    d1 = WindowDataset([fn], cfg, stats, length=2, seed=0, sim=SimConfig(), flip="none")[0]
+    d4 = WindowDataset([fn], cfg, stats, length=2, seed=0, sim=SimConfig(photon_gain=(4.0, 4.0)), flip="none")[0]
+    assert abs(float(d1["gain"]) - st["gain"]) < 1e-4 and abs(float(d4["gain"]) - 4 * st["gain"]) < 1e-3
+    assert np.allclose(d1["target"].numpy(), d4["target"].numpy())
+    # the "dim" evaluation kinds: same windows as their base kind, a third of the photons
+    assert eval_sim("freedim").photon_gain == (DIM_GAIN, DIM_GAIN) and eval_sim("freedim").silent_trial == 1.0
+    assert eval_sim("free").photon_gain == (1.0, 1.0) and eval_sim("fastpzdim").photon_zeros

@@ -270,7 +270,9 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
     w_unfitted > 0 or in a trial without sources, such as a GFP control). For
     real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
-    MSE is the baseline error itself. bias_* = mean(target - baseline).
+    MSE is the baseline error itself. bias_* = mean(target - baseline);
+    mean_target per class, so bias / mean_target is the bias as a share of the
+    baseline (activity-free simulations of dim sessions: 5-10% at every class).
     sup_leak_*: the slope of (baseline - target) on the activity at support
     pixels, 8-frame means: how much of the activity the baseline follows (0 =
     none; for real windows, whose target still holds the activity GIAnT did
@@ -332,6 +334,7 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
             if n == 0:
                 continue
             tot[cname + "n"] += n
+            tot[cname + "target"] += (cw * y).sum().item()  # for bias relative to the class's baseline
             cw8 = cw * w8
             tot[cname + "n8"] += cw8.sum().item()
             for pname, p in preds.items():
@@ -378,6 +381,9 @@ def evaluate_totals(tot: dict) -> dict[str, float]:
             cname = k.split("mse")[0] if "mse" in k else k.split("bias_")[0]
             denom = tot.get(cname + ("n8" if "mse8_" in k else "n"), 0.0)
             out[k] = v / max(denom, 1.0)
+    for cname in ("", "sup_", "bg_", "lab_"):  # mean target: bias_* / mean_target is the bias as a share of it
+        if tot.get(cname + "n", 0.0) > 0:
+            out[f"{cname}mean_target"] = tot[cname + "target"] / tot[cname + "n"]
     return out
 
 
@@ -547,9 +553,11 @@ MOTION_SIM = dict(motion_sd_px=(0.0, 0.2), motion_tau_frames=(0.5, 40.0), focus_
 
 def eval_sim(kind: str, photon_zeros: bool = False, pz_legacy: bool = False) -> SimConfig | None:
     """The simulation of an evaluation kind (real: None). A kind may end in
-    "pz" (realistic low counts) and/or "shuf" (shuffled activity timing, no
-    stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"; pz_legacy
-    draws the low counts as up to 2026-11-21 (SimConfig.pz_legacy)."""
+    "pz" (realistic low counts), "shuf" (shuffled activity timing, no
+    stimulus rhythm) and/or "dim" (a third of the photons: the template's gain
+    times 3, SimConfig.photon_gain), e.g. "fastpz", "fastpzshuf", "freedim";
+    photon_zeros adds "pz"; pz_legacy draws the low counts as up to 2026-11-21
+    (SimConfig.pz_legacy)."""
     base = _base_kind(kind)
     cfg = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
            "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3)),
@@ -558,7 +566,15 @@ def eval_sim(kind: str, photon_zeros: bool = False, pz_legacy: bool = False) -> 
         cfg.photon_zeros = photon_zeros or "pz" in kind[len(base):]
         cfg.pz_legacy = pz_legacy
         cfg.shuffle_prob = 1.0 if "shuf" in kind[len(base):] else 0.0
+        if "dim" in kind[len(base):]:
+            cfg.photon_gain = (DIM_GAIN, DIM_GAIN)
     return cfg
+
+
+# the "dim" evaluation kinds: the template's photons divided by this, which takes
+# the phase-1 mice with 1-2 photons per frame at footprint support to the 0.3-0.7
+# of 776270, 876767 and 878030 (docs/plan.md, "Low photon counts")
+DIM_GAIN = 3.0
 
 
 def _base_kind(kind: str) -> str:
@@ -576,13 +592,15 @@ EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "da
 def sim_config(args, free: bool = False) -> SimConfig:
     """Simulation settings from the arguments; free: no activity anywhere."""
     if free:
-        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy)
+        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy,
+                         photon_gain=tuple(float(v) for v in args.photon_gain.split(",")))
     lo, hi = (float(v) for v in args.silent_frac.split(","))
     dlo, dhi = (float(v) for v in args.dark_frac.split(","))
     pair = lambda s: tuple(float(v) for v in s.split(","))  # noqa: E731
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
                      fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi),
                      shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy,
+                     photon_gain=pair(args.photon_gain),
                      motion_sd_px=pair(args.motion_sd), motion_tau_frames=pair(args.motion_tau),
                      focus_sd_px2=pair(args.focus_sd), local_sd_px=pair(args.local_sd))
 
@@ -937,7 +955,9 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--out", default="results/eval")
     p.add_argument("--kinds", default="real,sim",
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
-                        "shared brightness changes), motion (fast plus residual motion, focus and local motion)")
+                        "shared brightness changes), motion (fast plus residual motion, focus and local motion); "
+                        "suffixes pz (realistic low counts), shuf (shuffled timing), dim (a third of the photons), "
+                        "e.g. freedim")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
     p.add_argument("--real_edge_s", type=float, default=None,
                    help="real windows: no loss within this many seconds of a trial edge (default: the checkpoint's, "
@@ -1166,6 +1186,9 @@ def add_arguments(p) -> None:
                         "had about half the measured correlations and too much skew (SimConfig.pz_legacy)")
     p.add_argument("--shuffle_prob", type=float, default=0.0,
                    help="share of simulated trials with shuffled activity timing (no stimulus rhythm)")
+    p.add_argument("--photon_gain", default="1,1",
+                   help="lo,hi: simulated windows multiply the template's gain (counts per photon) by a factor "
+                        "log-uniform in this range, the noise of a dimmer session (1,1 = off; SimConfig.photon_gain)")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)
     p.add_argument("--val_every", type=int, default=1000)
