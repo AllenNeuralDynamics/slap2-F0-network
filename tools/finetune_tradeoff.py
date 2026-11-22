@@ -51,10 +51,12 @@ def load(d: Path):
         num = next(rd)[4:]
         for row in rd:
             run, step = row[0].split("@")
-            acc.setdefault((run, int(step.split("_")[1]), mouse(row[2]), row[3]), []).append([float(x) for x in row[4:]])
+            acc.setdefault((run, int(step.split("_")[1]), mouse(row[2]), row[3]), []).append(
+                (row[2], [float(x) for x in row[4:]]))
     for k, v in acc.items():
-        a = np.array(v)
+        a = np.array([x for _, x in v])
         W[k] = {n: a[:, i] for i, n in enumerate(num)}
+        W[k]["wid"] = [(s, int(x[0])) for s, x in v]  # (session, window): window indices restart per session
     with open(d / "eval.csv") as fh:
         for r in csv.DictReader(fh):
             run, step = r["checkpoint"].split("@")
@@ -266,11 +268,13 @@ def load_named(path: Path):
         num = next(rd)[4:]
         for row in rd:
             run, var = row[0].split("@")
-            acc.setdefault((f"{run}avg", var, mouse(row[2]), row[3]), []).append([float(x) for x in row[4:]])
+            acc.setdefault((f"{run}avg", var, mouse(row[2]), row[3]), []).append((row[2], [float(x) for x in row[4:]]))
     W = {}
     for k, v in acc.items():
-        a = np.array(sorted(v, key=lambda r: r[0]))  # column 0 is the window index
+        v = sorted(v, key=lambda r: (r[0], r[1][0]))  # by session, then window index (column 0)
+        a = np.array([x for _, x in v])
         W[k] = {n: a[:, i] for i, n in enumerate(num)}
+        W[k]["wid"] = [(s, int(x[0])) for s, x in v]
     return W
 
 
@@ -278,7 +282,7 @@ def weight_averages(S, path, runs, test, val, B=1000):
     """6. weight averages of kept steps (`slap2-f0 average`), scored by `evaluate --per_window`
     (checkpoints named <run>@<variant>), against the fine-tuning steps of the same run: per run, then
     the mean over runs with 95% intervals over mice and windows. Each readout uses the mice that every
-    model of every run has, and within each mouse the windows (by window index) that all of them share,
+    model of every run has, and within each mouse the windows (by session and window index) that all share,
     so variants scored on fewer windows or only the test mice are still compared like for like."""
     W = load_named(path)
     S.W.update(W)
@@ -291,7 +295,7 @@ def weight_averages(S, path, runs, test, val, B=1000):
 
     def take(key, ids):  # error sums (class, windows) of the net and the references at these window indices
         d = S.W[key]
-        pos = {int(x): i for i, x in enumerate(d["window"])}
+        pos = {x: i for i, x in enumerate(d["wid"])}
         j = np.array([pos[x] for x in ids])
         return {p: np.stack([d[f"{c}_se8_{p}"][j] for c in ("sup", "bg")]) for p in PREDS}
 
@@ -301,7 +305,7 @@ def weight_averages(S, path, runs, test, val, B=1000):
             for k in [k for k in W if k[0] == f"{run}avg" and k[1] == var]:
                 o = (f"{run}ft", step, k[2], k[3])
                 if o in S.W:
-                    ids = sorted(set(W[k]["window"].astype(int)) & set(S.W[o]["window"].astype(int)))
+                    ids = sorted(set(W[k]["wid"]) & set(S.W[o]["wid"]))
                     a, b = take(k, ids)["net"], take(o, ids)["net"]
                     dev.append(np.abs(a - b).max() / np.abs(b).max())
             if dev:
@@ -314,7 +318,7 @@ def weight_averages(S, path, runs, test, val, B=1000):
         if not ms:
             print(f"  {name}: no mouse has every model; left out")
             continue
-        ids = {m: sorted(set.intersection(*[set(S.W[k]["window"].astype(int)) for r in runs for k in keys(r, m, kind)]))
+        ids = {m: sorted(set.intersection(*[set(S.W[k]["wid"]) for r in runs for k in keys(r, m, kind)]))
                for m in ms}
         data = {r: [[take(k, ids[m]) for k in keys(r, m, kind)] for m in ms] for r in runs}
         print(f"  {name}: mice {', '.join(ms)}; {min(len(v) for v in ids.values())}+ shared windows per mouse")
