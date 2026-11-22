@@ -747,3 +747,37 @@ def test_loader_wait_accumulates_and_resets():
     w.idle()       # 20: validation ran from 8 to 20
     w.got()        # 21
     assert w.report() == (1.0, 14.0)  # 22: only the 1 s fetch is wait
+
+
+def test_step_profiler_window_and_cleanup(capsys):
+    """--profile_steps: the window opens after step start (its validation done)
+    and closes after step start + n's optimizer step, before its validation;
+    a window left open is closed by finish() and marked incomplete; negative
+    counts are refused; quiet_start avoids validation and checkpoint steps."""
+    import torch
+
+    from slap2_f0.train import StepProfiler
+
+    x = torch.randn(64, 64)
+
+    def run(p, steps):
+        for step in range(1, steps + 1):
+            (x @ x).sum()  # the optimizer step's work
+            p.before_val(step)
+            p.after_step(step)
+        p.finish(steps)
+
+    run(StepProfiler(2, start=1, device="cpu"), 4)
+    out = capsys.readouterr().out
+    assert out.count("profile of 2 steps:") == 1 and "torch.compile counters" in out and "incomplete" not in out
+    run(StepProfiler(5, start=1, device="cpu"), 3)  # training ends inside the window
+    assert "profile of 2 steps (incomplete: 2 of 5 steps)" in capsys.readouterr().out
+    run(StepProfiler(0, device="cpu"), 25)  # off
+    assert capsys.readouterr().out == ""
+    with pytest.raises(ValueError):
+        StepProfiler(-1)
+    assert StepProfiler.quiet_start(2, (20, 0)) == 20  # steps 21-22 are free
+    assert StepProfiler.quiet_start(3, (22,)) == 22  # 21-23 would hold 22
+    assert StepProfiler.quiet_start(5, (1000, 500, 100)) == 20
+    with pytest.raises(ValueError):  # 2 steps always hold a multiple of 2
+        StepProfiler.quiet_start(2, (2, 0))
