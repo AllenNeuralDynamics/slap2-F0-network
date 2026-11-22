@@ -2263,7 +2263,7 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 **Weight averaging (scored 2026-11-22): averaging along fine-tuning does not help, but interpolating halfway back to step 0 does.**
 - **What was scored**, for each of S0–S3, built from the kept steps (step 0 is the `--init` checkpoint):
   - soupFT, the uniform average of fine-tuning steps 750–1700 (5 checkpoints);
-  - soupLate, steps 1250–1700, a stand-in for `--ema 0.998`;
+  - soupLate, a uniform soup of steps 1250–1700, which spans about the horizon of `--ema 0.998` but is not that EMA (see below);
   - WiSE-FT 0.5, which is 0.5 × step 0 + 0.5 × soupFT;
   - soupPT, the average of pretraining steps 2000–3000;
   - S3 only: WiSE-FT 0.25, soupFTall (steps 250–1700), and the trunk of one model with the output heads (`head_mu`, `head_mix`, `head_var`, `log_floor`) of the other.
@@ -2279,7 +2279,7 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 | late steps (mean) | −3.24 (−0.23 [−0.39, −0.05]) | +34.6 (+5.6 [−2.0, +13.5]) |
 | selected on real + fast (above) | −3.30 (−0.30 [−0.40, −0.11]) | +31.5 (+2.6 [−0.6, +6.1]) |
 | soupFT | −3.27 (−0.27 [−0.43, −0.09]) | +33.7 (+4.7 [−3.0, +12.6]) |
-| soupLate (≈ `--ema 0.998`) | −3.25 (−0.24 [−0.42, −0.05]) | +34.5 (+5.6 [−2.4, +13.8]) |
+| soupLate (steps 1250–1700) | −3.25 (−0.24 [−0.42, −0.05]) | +34.5 (+5.6 [−2.4, +13.8]) |
 | **WiSE-FT 0.5** | **−3.18 (−0.18 [−0.26, −0.08])** | **+29.3 (+0.3 [−4.1, +4.9])** |
 | soupPT | −2.98 (+0.02 [−0.00, +0.06]) | +28.5 (−0.5 [−1.5, +0.4]) |
 
@@ -2299,7 +2299,10 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
   - soupFT and soupLate score like the late mean on both readouts. So most of the simulation cost is not checkpoint noise.
   - The centre of the fine-tuning steps is itself about 5 points worse on fast windows than step 0 (+3.5 to +6.0 per run). Noise adds only about 1 point (late mean +34.6, against +33.7 for soupFT).
   - This revises the reading above, which put the cost on noise and selection luck. Pretraining is the opposite: its soup scores like step 0.
-- **EMA would not help.** soupLate, the stand-in for `--ema 0.998`, does no better than the late steps.
+- **Averaging the last ~500 steps does not help, but `--ema 0.998` is untested.**
+  - Measured: soupLate, a uniform soup over about the EMA's horizon, does no better than the late steps.
+  - Not measured: what `--ema 0.998` would do. The EMA starts at the initial weights and is updated at every step with exponential weights. It still holds 0.998^1700 ≈ 3% of the initial weights at step 1700, and about 50% at step 350.
+  - So an early EMA checkpoint, picked by the real + fast selection, could behave like a WiSE-FT blend. soupLate cannot tell.
 - **WiSE-FT 0.5 keeps two thirds of the real gain and almost none of the cost.**
   - Real: −0.18 [−0.26, −0.08] against step 0 on the test mice. The gain holds in every run (−0.15 to −0.24 on all eight mice). Against soupFT it gives back +0.09 [+0.01, +0.17].
   - Fast: +0.3 [−4.1, +4.9] against step 0, and −4.4 [−7.8, −1.2] against soupFT.
@@ -2328,8 +2331,8 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
   - Average the kept steps from 800 on into a soup: `slap2-f0 average soup.pt "FT/steps/step_000[89]*.pt" "FT/steps/step_001*.pt"`.
   - Average the soup half and half with step 0, the `--init` checkpoint: `slap2-f0 average wise50.pt FT/steps/step_000000.pt=0.5 soup.pt=0.5`.
   - As a check before shipping, score it against best.pt on the validation mice (real and fast).
-- **Dropped:**
-  - The `--ema 0.998` arm. Its stand-in, soupLate, does not recover the simulation accuracy.
+- **Not run in the next batch (a prioritization, not a negative result):**
+  - The `--ema 0.998` arm. Its outcome is untested. soupLate shows only that a uniform soup over its horizon does not help, and the EMA differs (above). It costs a fine-tuning run, while WiSE-FT 0.5 gives the trade-off from the kept steps, tested and without training. Run it if WiSE-FT disappoints in the next batch.
   - `--l2sp`. It would hold back the drift during training, untested and at the cost of a run. WiSE-FT undoes it afterwards, tested and free.
 - **Still not recommended:**
   - A lower learning rate, a higher `--sim_frac` or fewer steps. Like WiSE-FT, they shorten the move, but they leave single noisy checkpoints, which the soup averages out. The gain is in by step 500.
