@@ -1856,3 +1856,93 @@ Each cell gives 48 / 192 windows per mouse:
   - Next runs attach it and pass `--sidecars /root/capsule/data/f0p1_sidecars`. The session folders sit at the asset's root.
   - Checked: its sidecars all have `mean_image_axes`. Two 804730 trials computed locally with today's code give identical stats, and trials without a sidecar of their own load from the overlay without recomputing.
   - The export-time sidecars of these sessions differ, as expected, because they read only the mean image's first row: they lack `mean_image_axes`, and gain, noise correlations, activity trace and valid-pixel counts differ (movie and residual moments are identical).
+
+## Fine-tuning trade-off: real-data gain against simulation accuracy (2026-11-21)
+
+**Question.** In S0–S3, fine-tuning (v9 recipe: `--data mix --sim_frac 0.5 --lr 1e-4`, 1700 steps, `--event_mask 0.5`) gains 0.1–0.3 points on real windows and loses 5–7 points on fast simulations. Is fine-tuning worth it, and which recipe keeps both the simulation accuracy and the real-data gain?
+
+**Data:**
+- The held-out evaluation of S0–S3: every kept step, 192 windows per mouse and kind. `tools/finetune_tradeoff.py RESULTS_DIR` prints the numbers below.
+- Test mice: 776270, 810196, 829704, 876767. "All held-out mice" adds the four validation mice. Simulated kinds leave out 804730.
+- "Late" is the mean of the fine-tuning checkpoints at steps 750–1700. Scores are % changes of the 8-frame MSE, balanced over support and background, as in Experiment 1.
+
+**The real-data gain is small but consistent, and almost all of it is at background pixels:**
+
+| all 8 held-out mice | S0 | S1 | S2 | S3 |
+|---|---|---|---|---|
+| real vs mean image, step 0 → late | −2.55 → −2.73 | −2.54 → −2.75 | −2.77 → −3.09 | −2.85 → −3.16 |
+| gain, 95% interval over mice and windows | −0.18 [−0.42, +0.02] | −0.21 [−0.41, −0.05] | −0.32 [−0.40, −0.25] | −0.31 [−0.49, −0.12] |
+| real vs SiLo, step 0 → late | −1.14 → −1.31 | −1.12 → −1.32 | −1.36 → −1.68 | −1.45 → −1.75 |
+| share of the gap to the oracle closed, background | 0.11 → 0.28 | 0.14 → 0.28 | 0.19 → 0.34 | 0.16 → 0.35 |
+| the same at support | 0.60 → 0.60 | 0.59 → 0.61 | 0.63 → 0.68 | 0.66 → 0.69 |
+
+- **The gap to the oracle.** The oracle (the mean image minus the trial's mean activity) is the best constant baseline. On real windows it is 8.1% better than the mean image at support and 2.0% at background.
+- **Size.** Against SiLo, fine-tuning adds 15–25% to the network's advantage. The gain is significant over mice in three of the four runs, and the same against the oracle.
+- **Timing.** It is learned in the first 250–500 steps, while the learning rate is still warming up, and then stays flat.
+- **It corrects a level.**
+  - At step 0 the network's baseline is too low at background, on real windows (bias +0.007 to +0.020, target − net) and on fast simulations (+0.011 to +0.023) alike. Fine-tuning brings both to about 0.
+  - This looks like the low baseline that the labeled-bias session finds in activity-free simulations (interim): pretraining puts it in, so a simulator fix may make most of this gain unnecessary.
+  - It is not the output heads: `head_mu`'s bias moves by 0.0002. The whole trunk moves, 2.3% of the weights' norm (pretraining moves them about 9%).
+
+**The simulation cost is mostly checkpoint noise and lost selection luck, not drift:**
+
+| test mice, fast vs oracle | S0 | S1 | S2 | S3 |
+|---|---|---|---|---|
+| fine-tuning steps 0 / 250 / 500 / 750 / 1000 / 1250 / 1500 / 1700 | 33 / 33 / 35 / **43** / 32 / **44** / 38 / 35 | 32 / 32 / 36 / **39** / 34 / **42** / 35 / 37 | 26 / 31 / 26 / **36** / 30 / **35** / 27 / 30 | 24 / 37 / 35 / 31 / 28 / **39** / 27 / 31 |
+| late pretraining steps (1500–3000): mean, SD | 34.1, 1.9 | 30.9, 0.7 | 30.6, 7.7 | 31.7, 7.5 |
+| support leak, step 0 → late (simulated support; mean image 0.44) | 0.28 → 0.29 | 0.27 → 0.28 | 0.26 → 0.28 | 0.24 → 0.27 |
+
+- **Noise.** Fine-tuning checkpoints move 3–5 points (SD) between kept steps, as late pretraining checkpoints do.
+- **Bad steps are shared.** Steps 750 and 1250 are bad in S0–S2, and 1250 in S3.
+  - Training draws each window from (seed, index), so all runs see the same order of real and simulated windows and the same simulation draws.
+  - The runs' common deviation correlates with the share of real windows in the preceding 25–50 steps (r = +0.7, over 7 steps).
+- **Bad checkpoints are bad on both readouts.** Within runs, the test mice's real and fast scores rank-correlate +0.7 (S0, S2, S3; S1 0.0). The bad checkpoints also let more of the activity into the baseline (leak 0.29–0.31, against 0.24–0.28 at step 0).
+- **Step 0 had the selection's luck.**
+  - It is pretraining's pick among 13 checkpoints, chosen on the validation mice's fast windows. On the test mice it is 0–7 points better than the late pretraining mean (S3: 24.5 against 31.7).
+  - Fine-tuning selects on real windows, which barely rank fast windows, and so gives that luck back.
+- **The good fine-tuning checkpoints cost little.** Picking each run's best checkpoint on the test mice's own fast windows (step 0 included, so an upper bound) gives +28.6 against step 0's +29.0, and keeps part of the real gain (−3.16, against −3.01 at step 0 and −3.24 late).
+
+**Selecting on both readouts** (fine-tuning checkpoints with step 0, chosen by the validation mice's real score + w × their fast score, both balanced against the mean image; read on the test mice, mean of the four runs):
+
+| choice | steps (S0–S3) | real vs mean image | fast vs oracle |
+|---|---|---|---|
+| step 0 | 0, 0, 0, 0 | −3.01 | +29.0 |
+| late mean | | −3.24 | +34.6 |
+| real only (w = 0) | 250, 750, 1000, 1000 | −3.31 | +32.5 |
+| real + fast, any w from 0.03 up, and fast only | 250, 750, 500, 1000 | −3.30 | +31.5 |
+
+- Selection on both keeps the whole real gain and halves the simulation cost.
+- Real alone already does most of it, because real and fast co-vary within runs. Fast decides where real cannot (S2).
+- The weight hardly matters: every w from 0.03 to fast alone picks the same checkpoints.
+
+**Weight averaging:** not yet scored.
+- **Queued locally:** on 10 trials of each test mouse (48 fast and 96 real windows per mouse):
+  - S3's fine-tuning soup (steps 750–1700) and WiSE-FT interpolations from step 0 toward it (0.25, 0.5);
+  - the pretrained trunk with the fine-tuned heads, and the reverse;
+  - a soup of pretraining steps 2000–3000.
+- The local GPU is busy with other sessions' jobs, so the results will be added here when they finish.
+- They show whether averaging alone recovers the simulation accuracy. The EMA arm below tests that in training in any case.
+
+**Is fine-tuning worth it? Yes, as a short calibration on real data.**
+- It buys 0.2–0.3 points on real windows, consistently across runs and mice: 15–25% of the network's advantage over SiLo, at background pixels.
+- The 5–7 points it costs on simulations come from noisy checkpoints and from selecting on real windows only, so they are avoidable.
+- If a simulator fix removes the low background baseline, rerun this comparison: fine-tuning may then add little.
+
+**Recommended fine-tuning for the next training batch:**
+- **Baseline arm:** the v9 fine-tuning recipe with the new selection: `--val_sessions 878030,794237,834788,804730 --val_windows 48 --select balanced --select_on real:1,fast:0.1`, plus `--val_fast` and `--keep_every 100`.
+  - With w = 0.1 the two sets move about equally between checkpoints. In S0–S3 any w from 0.03 up picked the same checkpoints.
+- **Arm to add: `--ema 0.998`** (a 500-step horizon), otherwise the same.
+  - Validation and best.pt then score the moving average, which removes most of the checkpoint noise and should keep the shared bad steps out.
+  - `--keep_every 100` keeps the raw weights too (`model_raw`), so other horizons and soups can be compared afterwards with `slap2-f0 average --key model_raw`, without retraining.
+  - Cost: one more fine-tuning run, about 1700 steps (roughly an hour on the L40S).
+- **Not recommended yet:**
+  - `--l2sp`: drift is not the main cost. `--l2sp 30` would roughly halve the random drift (a 330-step pull at lr 1e-4) at the price of a bias toward the start.
+  - A lower learning rate or a higher `--sim_frac`: they shrink the noise only in proportion and slow the background correction, and no runs tested them.
+  - Fewer steps: the gain is in by step 500, but the noise does not shrink with fewer steps.
+
+**Code (branch finetune-regularize):**
+- `train --ema DECAY`: validation, best.pt, last.pt and the kept steps hold an exponential moving average of the weights, started at the initial weights. The raw weights are saved as `model_raw`.
+- `train --l2sp L` (needs `--init`): after each step, the weights move back toward the initial ones by lr × L of the distance. This is decoupled L2-SP, like AdamW's weight decay but toward the start.
+- `slap2-f0 average OUT CKPT[=W] ...`: the weighted average of checkpoints, from paths, globs and weights, for soups of kept steps and WiSE-FT interpolation (`pre.pt=0.5 ft.pt=0.5`). The network has no normalization buffers, so the averaged weights are a complete model.
+- `tools/finetune_tradeoff.py`: the tables above. With `--averages`, it gives paired summaries of model variants scored on the same windows.
+- Tests: `test_ema_and_l2sp` and `test_average_checkpoints`.
