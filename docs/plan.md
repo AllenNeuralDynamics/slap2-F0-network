@@ -1825,7 +1825,7 @@ Each cell gives 48 / 192 windows per mouse:
 - **Code (4d3f593; GPU capsule d33555d):** training and evaluation now autotune and compile by default. `fast_model` falls back to eager without Triton or on a compile error; `--no_compile` and `--no_cudnn_benchmark` turn them off.
 - **For the next training:**
   - add `--no_checkpoint` (19 GB of 48);
-  - add `--stats_from` for 803496 and 804730, whose stale one-channel stats otherwise cost 16–43 min per run.
+  - add `--sidecars /root/capsule/data/f0p1_sidecars` for 803496 and 804730, whose stale one-channel stats otherwise cost 16–43 min per run (see "Stats overlay" below; `--stats_from` was not suitable).
 - **Evaluation:** until windows are shared across checkpoints, the A10G is the better value. It is about as fast, because the L40S waits for data, and costs 40% less. Switching back is a one-line change to `.codeocean/resources.json`.
 - **Not yet confirmed:** compile has been measured in the benchmark, not in a full training run.
 
@@ -1852,3 +1852,7 @@ Each cell gives 48 / 192 windows per mouse:
 - `train` and `evaluate --sidecars DIR[,DIR]` look there after each trial's own sidecar. Like sidecars, the overlay must match the trial's file size.
 - This replaces recomputing the one-channel phase-1 sessions (803496, 804730) in every run, which took 16–43 min.
 - `--stats_from` was not suitable: its cache key includes the mount path and modification time, and it copies a whole earlier run's cache (about 25 GB for S3).
+- **The overlay for 803496 and 804730 exists:** data asset mount `f0p1_sidecars`, made by `run --mode stats` on the GPU capsule (189 trials in 66 min, 4.0 GB).
+  - Next runs attach it and pass `--sidecars /root/capsule/data/f0p1_sidecars`. The session folders sit at the asset's root.
+  - Checked: its sidecars all have `mean_image_axes`. Two 804730 trials computed locally with today's code give identical stats, and trials without a sidecar of their own load from the overlay without recomputing.
+  - The export-time sidecars of these sessions differ, as expected, because they read only the mean image's first row: they lack `mean_image_axes`, and gain, noise correlations, activity trace and valid-pixel counts differ (movie and residual moments are identical).
