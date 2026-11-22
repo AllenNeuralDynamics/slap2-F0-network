@@ -241,6 +241,93 @@ def test_gamma_quantile():
     assert np.max(np.abs(q[ok] / ref[ok] - 1)) < 0.005
     big = gamma_quantile(np.array([5000.0]), np.array([1.0]))  # Wilson-Hilferty above the table
     assert abs(big[0] / special.gammaincinv(5000.0, special.ndtr(1.0)) - 1) < 1e-3
+    kk, xx = np.array([0.3, 2.0, 5000.0]), np.array([-1.0, 0.5, 1.0])
+    assert np.allclose(gamma_quantile(kk, xx, log=True), np.log(gamma_quantile(kk, xx)))
+
+
+def _gg_params(mp, vp, s):
+    """k and theta of theta * G^s, G ~ Gamma(k), with mean mp and variance vp (scipy, for checks)."""
+    from scipy import optimize, special
+    cv2 = lambda k: np.exp(special.gammaln(k) + special.gammaln(k + 2 * s) - 2 * special.gammaln(k + s)) - 1  # noqa: E731
+    k = optimize.brentq(lambda k: cv2(k) - vp / mp ** 2, 1e-3, 1e6)
+    return k, mp / np.exp(special.gammaln(k + s) - special.gammaln(k))
+
+
+def test_photon_counts_generalized_gamma():
+    """photon_zeros' counts: zeros with probability exp(-mu / c), above 0 a
+    generalized gamma theta * G^s (scipy's gengamma with c = 1/s; s = 1 gamma)
+    with the positive part's mean and variance, so the counts keep their mean
+    and variance for any s while larger s gives more skew."""
+    from scipy import special
+    from scipy import stats as sst
+    from slap2_f0.simulate import _photon_counts
+    g = np.random.default_rng(0).standard_normal(1_000_000)
+    for mu, var, zc in ((1.9, 23.5, 2.7), (5.0, 60.0, 4.0), (40.0, 480.0, 4.0)):
+        z = np.exp(-mu / zc)
+        mp = mu / (1 - z)
+        vp = (var + mu ** 2) / (1 - z) - mp ** 2
+        u = z + (1 - z) * np.array([0.05, 0.25, 0.5, 0.9, 0.99, 0.999])
+        skews = []
+        for s in (1.0, 1.4, 2.0):
+            k, theta = _gg_params(mp, vp, s)
+            q = _photon_counts(np.full(6, mu), np.full(6, var), np.full(6, zc), special.ndtri(u), s)
+            ref = sst.gengamma.ppf((u - z) / (1 - z), k, 1 / s, scale=theta)
+            assert np.max(np.abs(q / ref - 1)) < 0.01, (mu, s, q, ref)
+            x = _photon_counts(np.full(g.shape, mu), np.full(g.shape, var), np.full(g.shape, zc), g, s)
+            assert abs((x == 0).mean() - z) < 0.003
+            assert abs(x.mean() / mu - 1) < 0.01 and abs(x.var() / var - 1) < 0.03, (mu, s, x.mean(), x.var())
+            skews.append(float(((x - x.mean()) ** 3).mean() / x.var() ** 1.5))
+        assert skews[0] < skews[1] < skews[2]
+
+
+def _gg_template(fn, s=1.4, T=2000, R=30, C=34, seed=0):
+    """Independent voxels, 0 with probability exp(-mean / 2.7), else a
+    generalized gamma with power s (scipy), variance 12 x the mean: the shape
+    of real dim pixels' counts, without correlations."""
+    from scipy import stats as sst
+    rng = np.random.default_rng(seed)
+    base = 0.8 + 2.2 * rng.random((R, C))
+    movie = np.zeros((T, R, C), np.float32)
+    for i in range(R):
+        for j in range(C):
+            mu, var = base[i, j], 12.0 * base[i, j]
+            z = np.exp(-mu / 2.7)
+            mp = mu / (1 - z)
+            k, theta = _gg_params(mp, (var + mu ** 2) / (1 - z) - mp ** 2, s)
+            pos = sst.gengamma.rvs(k, 1 / s, scale=theta, size=T, random_state=rng)
+            movie[:, i, j] = np.where(rng.random(T) < z, 0.0, pos)
+    lab = np.zeros((R, C), np.uint8)
+    lab[5:12, 5:12] = 1
+    with h5py.File(fn, "w") as f:
+        f["movie"] = movie[None]
+        f["activity"] = np.zeros((1, T, R, C), np.float32)
+        f["mean_image"] = movie.mean(0)[None]
+        f["varfac"] = np.ones((R, C), np.float32)
+        f["mask/valid"] = np.ones((R, C), np.uint8)
+        f["mask/labeled"] = lab
+        f["mask/footprint_support"] = lab
+        f["frame/discard"] = np.zeros(T, np.uint8)
+        f.attrs["label"] = "s"
+
+
+def test_photon_zeros_skew(tmp_path):
+    """Counts whose positive part has the default shape (as real dim pixels):
+    photon_zeros reproduces the template's skew, share of zeros and gain; with
+    a gamma positive part (pz_shape 1, as up to 2026-11-21) the skew is low."""
+    from slap2_f0.simulate import write_trial
+    fn = tmp_path / "trial_001.h5"
+    _gg_template(fn, s=SimConfig().pz_shape)
+    st = trial_stats(fn)
+    tp = Template(TrialFile(fn), st)
+    out = {}
+    for shape in (SimConfig().pz_shape, 1.0):
+        sf = tmp_path / f"sim_{shape}.h5"
+        write_trial(tp, sf, SimConfig(photon_zeros=True, pz_shape=shape, excess=0.0), seed=1, compress=False)
+        out[shape] = trial_stats(sf)
+    s = out[SimConfig().pz_shape]
+    assert abs(s["skew"] / st["skew"] - 1) < 0.05, (s["skew"], st["skew"])
+    assert out[1.0]["skew"] / st["skew"] < 0.95
+    assert abs(s["zero_frac"] - st["zero_frac"]) < 0.02 and abs(s["gain"] / st["gain"] - 1) < 0.05
 
 
 def _counts_template(fn, T=1500, R=40, C=44, seed=0):
