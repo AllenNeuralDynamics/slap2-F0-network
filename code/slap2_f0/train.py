@@ -595,6 +595,12 @@ def sim_config(args, free: bool = False) -> SimConfig:
 
 
 def train(args) -> None:
+    if not (math.isfinite(args.ema) and 0 <= args.ema < 1):
+        raise SystemExit(f"--ema must be a decay in [0, 1) (0: off), not {args.ema}")
+    if not (math.isfinite(args.l2sp) and args.l2sp >= 0):
+        raise SystemExit(f"--l2sp must be a strength >= 0 (0: off), not {args.l2sp}")
+    if args.l2sp and not args.init:
+        raise SystemExit("--l2sp pulls toward the --init checkpoint: give --init")
     torch.manual_seed(args.seed)
     files = list_trials(args.root)
     if args.exclude:
@@ -655,9 +661,7 @@ def train(args) -> None:
         print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
     n_params = sum(p.numel() for p in model.parameters())
     net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
-    if args.l2sp and not args.init:
-        raise SystemExit("--l2sp pulls toward the --init checkpoint: give --init")
-    anchor = [p.detach().clone() for p in model.parameters()] if args.l2sp else None
+    anchor =[p.detach().clone() for p in model.parameters()] if args.l2sp else None
     # --ema: the moving average (from the initial weights) is what validation scores and the checkpoints hold
     avg_model = copy.deepcopy(model).requires_grad_(False) if args.ema else None
     net_val = net if avg_model is None else fast_model(avg_model, device, args)

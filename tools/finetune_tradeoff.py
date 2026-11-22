@@ -25,6 +25,7 @@ weight averages of kept steps made with `slap2-f0 average`, with paired interval
 """
 import argparse
 import csv
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -204,13 +205,17 @@ def averages(path: Path, B=2000):
     """Model variants scored on the same windows: % change vs reference per kind, and paired
     differences against the first model, 95% intervals over windows (mice fixed)."""
     rows = list(csv.DictReader(open(path)))
+    for r in rows:  # evaluate's windows.csv names the model "checkpoint"
+        r["model"] = r.get("model") or r["checkpoint"]
     models = list(dict.fromkeys(r["model"] for r in rows))
     rng = np.random.default_rng(0)
     for kind, ref in (("fast", "oracle"), ("real", "mean_image"), ("real", "silo")):
-        keys = sorted({(r["session"], int(r["window"])) for r in rows if r["kind"] == kind})
-        full = {k for k in keys if sum(1 for r in rows if r["kind"] == kind and (r["session"], int(r["window"])) == k)
-                == len(models)}
-        keys = [k for k in keys if k in full]
+        n = defaultdict(int)  # rows per (window, model): keep the windows every model has exactly once
+        for r in rows:
+            if r["kind"] == kind:
+                n[(r["session"], int(r["window"])), r["model"]] += 1
+        keys = sorted({k for k, _ in n})
+        keys = [k for k in keys if all(n.get((k, m)) == 1 for m in models)]
         if not keys:
             continue
         sess = sorted({k[0] for k in keys})
@@ -251,6 +256,89 @@ def averages(path: Path, B=2000):
                   f"{point[0][j] - point[0][0]:+6.2f} [{np.percentile(d, 2.5):+.2f}, {np.percentile(d, 97.5):+.2f}]")
 
 
+def load_named(path: Path):
+    """evaluate --per_window rows of checkpoints named <run>@<variant> (e.g. S3@soupFT):
+    (<run>avg, variant, mouse, kind) -> arrays over windows (in window order)."""
+    acc = {}
+    with open(path) as fh:
+        rd = csv.reader(fh)
+        num = next(rd)[4:]
+        for row in rd:
+            run, var = row[0].split("@")
+            acc.setdefault((f"{run}avg", var, mouse(row[2]), row[3]), []).append([float(x) for x in row[4:]])
+    W = {}
+    for k, v in acc.items():
+        a = np.array(sorted(v, key=lambda r: r[0]))  # column 0 is the window index
+        W[k] = {n: a[:, i] for i, n in enumerate(num)}
+    return W
+
+
+def weight_averages(S, path, runs, test, val, B=1000):
+    """6. weight averages of kept steps (`slap2-f0 average`), scored on the held-out evaluation's
+    windows, against the fine-tuning steps of the same run: per run, then the mean over runs with
+    95% intervals over mice and windows (paired)."""
+    W = load_named(path)
+    S.W.update(W)
+    variants = list(dict.fromkeys(k[1] for k in W))
+    late = [STEPS.index(s) for s in LATE]
+    print(f"\n6. weight averages ({path}); readouts: real vs mean image on all held-out mice and on the test mice, "
+          "fast vs oracle on the test mice")
+    for run in runs:  # copies of kept steps must reproduce the held-out evaluation exactly
+        for var, step in (("ft0", 0), ("ft1700", 1700)):
+            keys = [k for k in W if k[0] == f"{run}avg" and k[1] == var]
+            if keys:
+                dev = max(np.abs(W[k][c] - S.W[(f"{run}ft", step, k[2], k[3])][c]).max()
+                          / np.abs(S.W[(f"{run}ft", step, k[2], k[3])][c]).max()
+                          for k in keys for c in ("sup_se8_net", "bg_se8_net"))
+                print(f"  check {run}@{var} = {run}ft step {step}: largest relative difference {dev:.1e}")
+    reads = (("real", test + val, "mean_image"), ("real", test, "mean_image"), ("fast", test, "oracle"))
+    names = ("real all", "real test", "fast test")
+
+    def table(run, w=None, mm=None, mm_t=None):
+        """scores (readouts, models): step 0, late mean, step 1700, then this run's variants"""
+        have = [v for v in variants if (f"{run}avg", v, test[0], "fast") in S.W]
+        out = []
+        for (kind, mice, ref), m in zip(reads, (mm, mm_t, mm_t)):
+            nm = len(S.mice(kind, mice))
+            ww = None if w is None else w[:nm]
+            mmm = None if m is None else m[:nm]
+            ft = pct(*S.sums(f"{run}ft", STEPS, kind, mice, ref), w=ww, mm=mmm)
+            av = pct(*S.sums(f"{run}avg", have, kind, mice, ref), w=ww, mm=mmm) if have else np.zeros(0)
+            out.append(np.concatenate([[ft[0], ft[late].mean(), ft[-1]], av]))
+        return np.array(out), ["step 0", "late mean", "step 1700"] + have
+
+    tabs = {}
+    for run in runs:
+        t, rows = table(run)
+        tabs[run] = rows
+        print(f"\n  {run}: " + " | ".join(f"{n:>9s}" for n in names))
+        for j, r in enumerate(rows):
+            print(f"  {r:16s} " + " | ".join(f"{t[i, j]:+9.2f}" for i in range(len(names))))
+    common = [r for r in tabs[runs[0]] if all(r in tabs[x] for x in runs)]
+    rng = np.random.default_rng(0)
+    # mice and windows are the same in every run, so one draw serves all runs (mice: real all / test)
+    nm_all, nm_t = len(test + val), len(test)
+    nw = S.W[(f"{runs[0]}ft", 0, test[0], "fast")]["sup_se8_net"].shape[0]
+    pts = np.mean([table(r)[0][:, [tabs[r].index(c) for c in common]] for r in runs], 0)
+    boots = []
+    for _ in range(B):
+        w = np.stack([np.bincount(rng.integers(0, nw, nw), minlength=nw) for _ in range(nm_all)]).astype(float)
+        mm = np.bincount(rng.integers(0, nm_all, nm_all), minlength=nm_all).astype(float)
+        mt = np.bincount(rng.integers(0, nm_t, nm_t), minlength=nm_t).astype(float)
+        boots.append(np.mean([table(r, w, mm, mt)[0][:, [tabs[r].index(c) for c in common]] for r in runs], 0))
+    boots = np.array(boots)  # (B, readouts, models)
+    print(f"\n  mean of {', '.join(runs)}: score; difference to step 0 and to the late mean [95% over mice and windows]")
+    print("  " + " " * 16 + " | ".join(f"{n:^38s}" for n in names))
+    for j, c in enumerate(common):
+        cells = []
+        for i in range(len(names)):
+            d0 = boots[:, i, j] - boots[:, i, 0]
+            dl = boots[:, i, j] - boots[:, i, 1]
+            cells.append(f"{pts[i, j]:+6.2f} {pts[i, j] - pts[i, 0]:+5.2f} [{np.percentile(d0, 2.5):+5.2f},"
+                         f"{np.percentile(d0, 97.5):+5.2f}] {pts[i, j] - pts[i, 1]:+5.2f}")
+        print(f"  {c:16s}" + " | ".join(cells))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("results", nargs="?")
@@ -260,7 +348,7 @@ def main():
     p.add_argument("--drop_sim", default="804730")
     p.add_argument("--averages", default="", help="per-window table of model variants (see the module docstring)")
     a = p.parse_args()
-    if a.averages:
+    if a.averages and not a.results:
         averages(Path(a.averages))
         return
     root = Path(a.results)
@@ -271,6 +359,9 @@ def main():
         E.update(e)
     S = Scores(W, E, a.drop_sim.split(",") if a.drop_sim else [])
     runs, test, val = a.runs.split(","), tuple(a.test.split(",")), tuple(a.val.split(","))
+    if a.averages:  # with RESULTS_DIR: the averages against the run's fine-tuning steps only
+        weight_averages(S, Path(a.averages), runs, test, val)
+        return
     trajectories(S, runs, test)
     pretraining(S, runs, test)
     real_gain(S, runs, test + val)

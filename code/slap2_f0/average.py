@@ -14,6 +14,8 @@ configuration; the window settings are the first checkpoint's.
 
 from __future__ import annotations
 
+import glob
+import math
 from pathlib import Path
 
 import torch
@@ -27,9 +29,10 @@ def average_states(states: list[dict], weights: list[float]) -> dict:
     keys = list(states[0])
     if any(list(s) != keys for s in states[1:]):
         raise ValueError("state dicts hold different tensors")
-    tot = float(sum(weights))
-    if tot <= 0:
-        raise ValueError("weights must sum to a positive number")
+    weights = [float(w) for w in weights]
+    tot = sum(weights)
+    if not all(math.isfinite(w) for w in weights) or not (math.isfinite(tot) and tot > 0):
+        raise ValueError(f"weights must be finite and sum to a positive number, not {weights}")
     out = {}
     for k in keys:
         acc = sum(w / tot * s[k].double() for w, s in zip(weights, states))
@@ -49,7 +52,7 @@ def parse_specs(specs: list[str]) -> list[tuple[str, float]]:
             except ValueError:
                 pass
         if any(c in path for c in "*?["):
-            matches = sorted(Path(path).parent.glob(Path(path).name))
+            matches = sorted(glob.glob(path))  # wildcards in folder names too (runs/S*/steps/step_*.pt)
             if not matches:
                 raise SystemExit(f"no checkpoints match {path}")
             out += [(str(m), w) for m in matches]

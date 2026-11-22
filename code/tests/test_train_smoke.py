@@ -658,8 +658,9 @@ def test_ema_and_l2sp(tmp_path):
     best = _load(out / "best.pt")
     assert "model_raw" in best and "model_raw" in _load(out / "last.pt")
     # --l2sp needs --init; with lr x l2sp >= 1 every step lands back on the initial weights
-    with pytest.raises(SystemExit):
-        main(["train", str(data), "--out", str(tmp_path / "bad"), "--steps", "1", "--l2sp", "1"] + SMALL)
+    for bad in (["--l2sp", "1"], ["--ema", "1"], ["--ema", "nan"], ["--l2sp", "-1", "--init", str(out / "last.pt")]):
+        with pytest.raises(SystemExit):  # no --init, or a value outside the regularizer's domain
+            main(["train", str(data), "--out", str(tmp_path / "bad"), "--steps", "1"] + bad + SMALL)
     out2 = tmp_path / "l2sp"
     main(["train", str(data), "--out", str(out2), "--data", "real", "--init", str(out / "last.pt"), "--steps", "2",
           "--batch", "2", "--keep_every", "1", "--val_windows", "2", "--l2sp", "1e12",
@@ -688,6 +689,11 @@ def test_average_checkpoints(tmp_path):
           f"{out / 'steps' / 'step_000002.pt'}=3"])
     for k, v in _load(tmp_path / "wise.pt")["model"].items():
         assert torch.allclose(v, 0.25 * st[0][k] + 0.75 * st[2][k], atol=1e-6)
+    main(["average", str(tmp_path / "dirglob.pt"), str(tmp_path / "r?n" / "steps" / "step_00000[12].pt")])
+    assert [a["step"] for a in _load(tmp_path / "dirglob.pt")["averaged"]] == [1, 2]  # wildcards in folder names
+    for w in ("nan", "inf", "0"):
+        with pytest.raises(ValueError):  # weights must be finite with a positive sum
+            main(["average", str(tmp_path / "bad.pt"), f"{out / 'steps' / 'step_000000.pt'}={w}"])
     main(["evaluate", str(data), "--out", str(tmp_path / "eval"), "--ckpt", f"wise={tmp_path / 'wise.pt'}",
           "--kinds", "real", "--windows", "2", "--workers", "0"])
     assert len(list(csv.DictReader(open(tmp_path / "eval" / "eval.csv")))) == 3  # one row per session
