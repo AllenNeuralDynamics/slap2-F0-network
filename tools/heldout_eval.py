@@ -1,6 +1,6 @@
 """Experiments 1 and 2 from `slap2-f0 evaluate --per_window` results (docs/plan.md).
 
-usage: python heldout_eval.py exp1|exp2 RESULTS_DIR [--pick S0ft=1500,S1ft=1700,...]
+usage: python heldout_eval.py exp1|exp2|bias RESULTS_DIR [--pick S0ft=1500,S1ft=1700,...]
                               [--val 878030,...] [--test 776270,...] [--drop_sim 804730]
 
 RESULTS_DIR holds one folder per evaluation run, each with eval.csv and
@@ -22,6 +22,13 @@ mouse, averaged over every subset of mice and, for 48 windows, over the four
 disjoint 48-window blocks (block 0 = the windows training's validation used,
 with the training seed); rank agreement; and how many mice keep the sign of
 the runs' differences.
+
+bias: per mouse, pixel class and simulated kind (free, sim, fast, ... and their
+"dim" variants), the bias (target - net, scaled units) of the picked checkpoints,
+as a share of the class's mean target where eval.csv has it (mean_target, from
+2026-11-21), and the 8-frame MSE relative to the mean image's. Needs only eval.csv. In activity-free
+simulations of dim sessions (< 1 photon per frame at footprint support) the
+S0-S3 networks sit 5-10% low in every class (docs/plan.md, "Low photon counts").
 
 --drop_sim leaves mice out of the simulated kinds' scores (804730: one window
 per kind breaks every checkpoint, see docs/plan.md).
@@ -302,9 +309,47 @@ def exp2(rows, E, mice, test, val, drop_sim):
             print(f"    {p[0]}-{p[1]}: " + "; ".join(out))
 
 
+def load_rows(root: Path):
+    """eval.csv rows of every run folder (windows.csv not needed)."""
+    rows = []
+    for d in sorted(p for p in root.iterdir() if (p / "eval.csv").exists()):
+        with open(d / "eval.csv") as fh:
+            rows += [{k: fnum(v) for k, v in r.items()} for r in csv.DictReader(fh)]
+    return rows
+
+
+def bias_report(rows, mice, pick):
+    """Picked checkpoints' bias per mouse, class and simulated kind (see the module docstring)."""
+    kinds = sorted({r["kind"] for r in rows if r["kind"] != "real"})
+    for kind in kinds:
+        print(f"\n{kind}: bias, % of the baseline, 8-frame MSE / mean image's (mean over runs {', '.join(pick)})")
+        print("  mouse   " + "  ".join(f"{c:>22s}" for c in ("support", "background", "labeled outside")))
+        for m in mice:
+            cells = []
+            for c in ("sup", "bg", "lab"):
+                b, rel, rat = [], [], []
+                for r in rows:
+                    if r["kind"] != kind or mouse(r["session"]) != m:
+                        continue
+                    run, step = ckpt_parts(r["checkpoint"])
+                    if pick.get(run) != step or not isinstance(r.get(f"{c}_bias_net"), float):
+                        continue
+                    level = r.get(f"{c}_mean_target")  # absent in eval.csv from before 2026-11-21
+                    b.append(r[f"{c}_bias_net"])
+                    if isinstance(level, float) and level > 0:
+                        rel.append(100 * r[f"{c}_bias_net"] / level)
+                    rat.append(r[f"{c}_mse8_net"] / r[f"{c}_mse8_mean_image"])
+                if not b:
+                    cells.append(f"{'':>22s}")
+                    continue
+                rs = f"{np.mean(rel):+5.1f}%" if rel else "   -  "
+                cells.append(f"{np.mean(b):+6.3f} {rs} {np.mean(rat):5.2f}")
+            print(f"  {m}  " + "  ".join(cells))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("what", choices=["exp1", "exp2"])
+    p.add_argument("what", choices=["exp1", "exp2", "bias"])
     p.add_argument("root", type=Path)
     p.add_argument("--pick", default="S0ft=1500,S1ft=1700,S2ft=1700,S3ft=1700",
                    help="run=step of the fine-tuning checkpoint each run's training picked")
@@ -314,10 +359,14 @@ def main():
     a = p.parse_args()
     val, test = tuple(a.val.split(",")), tuple(a.test.split(","))
     mice = val + test
+    pick = {k: int(v) for k, v in (x.split("=") for x in a.pick.split(","))}
+    if a.what == "bias":
+        bias_report(load_rows(a.root), mice, pick)
+        return
     rows, W = load(a.root)
     E = build(W, mice)
     if a.what == "exp1":
-        exp1(rows, E, mice, test, val, {k: int(v) for k, v in (x.split("=") for x in a.pick.split(","))})
+        exp1(rows, E, mice, test, val, pick)
     else:
         exp2(rows, E, mice, test, val, tuple(x for x in a.drop_sim.split(",") if x))
 

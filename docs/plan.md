@@ -1954,3 +1954,118 @@ Each cell gives 48 / 192 windows per mouse:
   - Next runs attach it and pass `--sidecars /root/capsule/data/f0p1_sidecars`. The session folders sit at the asset's root.
   - Checked: its sidecars all have `mean_image_axes`. Two 804730 trials computed locally with today's code give identical stats, and trials without a sidecar of their own load from the overlay without recomputing.
   - The export-time sidecars of these sessions differ, as expected, because they read only the mean image's first row: they lack `mean_image_axes`, and gain, noise correlations, activity trace and valid-pixel counts differ (movie and residual moments are identical).
+
+## Low photon counts: the baseline sits low (2026-11-21)
+
+**The finding (held-out evaluation, Experiment 1).** In activity-free simulations (`free`) of 776270, 876767 and 878030, the S0–S3 networks set the baseline too low at labeled pixels outside the footprint support:
+- bias +0.15 to +0.28 (target − net, scaled units);
+- 8-frame MSE 1.1–2.1× the mean image's (the mean image is the true mean there), and 8–9× at S0 fine-tuning step 500.
+
+In the other five held-out mice the MSE is 0.4–0.9× the mean image's and the bias about 0.
+
+**Data used:**
+- one trial per path of each of the 17 phase-1 sessions (`tools/lowcount_charac.py`; stats through `load_stats`, so the stale one-channel sidecars of 803496 and 804730 are recomputed);
+- the evaluation CSVs;
+- network probes run locally on the RTX 4060 Ti (`tools/lowcount_probe.py`).
+
+**It is not about labeled pixels: it is low photon counts.** Picked checkpoints of S0–S3 (mean of the four), activity-free windows, bias as a share of each class's baseline:
+
+| mouse | photons per frame: support / background / labeled outside | zero frames at support | trial skew | bias: support / background / labeled outside | the same, in SD of an 8-frame mean | real background: net's bias minus the mean image's |
+|---|---|---|---|---|---|---|
+| **776270** | 0.53 / 0.28 / 1.76 | 10% | 3.6–3.7 | +10.0 / +3.6 / +5.6% | +0.13 / +0.03 / +0.13 | +0.028 |
+| **876767** | 0.47 / 0.17 / 0.92 | 12% | 4.3–5.0 | +9.5 / +4.0 / +7.4% | +0.12 / +0.03 / +0.13 | +0.032 |
+| **878030** | 0.24 / 0.17 / 0.87 | 36% | 4.2–5.0 | +10.7 / +5.7 / +4.6% | +0.09 / +0.04 / +0.07 | +0.062 |
+| 794237 | 1.92 / 0.99 / 4.90 | 0% | 2.0–2.1 | +1.6 / +1.3 / +0.7% | +0.04 / +0.02 / +0.03 | +0.012 |
+| 804730 | 1.74 / 1.34 / 3.23 | 0% | 1.6–2.0 | +1.3 / +0.9 / +1.8% | +0.04 / +0.02 / +0.06 | +0.017 |
+| 810196 | 1.64 / 0.98 / 2.51 | 1% | 1.9–2.6 | +2.4 / +1.5 / +3.2% | +0.05 / +0.03 / +0.09 | +0.014 |
+| 829704 | 1.07 / 0.52 / 2.18 | 1% | 2.6–3.0 | +1.8 / +0.4 / +0.9% | +0.03 / +0.01 / +0.03 | +0.007 |
+| 834788 | 1.01 / 0.56 / 4.80 | 3% | 2.7–2.8 | +2.7 / +1.4 / +0.7% | +0.05 / +0.02 / +0.03 | +0.013 |
+
+- **The three mice are the dimmest.** They have under 0.6 photons per frame at footprint support, 10–36% zero frames there, and trial skew 3.6–5.0.
+  - Every other held-out mouse has at least 1.0 photons per frame at support, and skew of at most 3.0.
+  - S0's training mice: 885233 0.41–0.49, 780125 0.65–0.72, 803121 0.89–1.04. S2/S3 add 867430 (0.21–0.55) and five mice at 0.5–2.4.
+- **Every class is low, by 4–11% of its baseline.**
+  - Labeled pixels outside the support are the brightest structures, at 2–5× the trial scale (support 1.0–1.4×).
+  - So the same relative bias is largest there in scaled units, and the mean image is most accurate there. That is why the labeled class stood out.
+- **Real windows show it too.** On real background of 878030, which has no activity, the network sits 0.06 (about 7%) below the mean image, against 0.01–0.02 in the bright mice.
+- **In noise units it is small:**
+  - at support and labeled pixels, 0.07–0.13 SD of an 8-frame mean (bright mice 0.03–0.09);
+  - at background, at most 0.04 SD everywhere.
+  - So it matters more for ΔF/F (a baseline 5–10% low) than for SiLo's Z-scores, where it is roughly uniform in space.
+
+**Probes on activity-free simulations** (`tools/lowcount_probe.py`; windows of 64 frames × 24² px, so outputs are exact; the same windows for every checkpoint and variant). Bias as a share of the baseline, support / background / labeled outside:
+
+| 878030, 48 windows | S0 fine-tuned (step 1500) | S0 pretrained (its pick = fine-tuning step 0) | v6r pretrained (S0's start) |
+|---|---|---|---|
+| as evaluated (`free`) | +8.1 / +5.9 / +3.9% | +10.6 / +10.1 / +5.4% | +4.6 / +3.1 / +1.8% |
+| realistic low counts (legacy draw, as S0–S3 trained) | +5.6 / +2.5 / +3.1% | +7.4 / +5.4 / +4.2% | +2.7 / +0.8 / +1.1% |
+| 4× the photons (gain / 4, same skew per photon) | +1.9 / +0.8 / +0.4% | +2.8 / +2.1 / +1.0% | +0.5 / +0.2 / −0.5% |
+| flat field at the trial scale, no excess, variance factor 1 (32 windows) | +5.6 / +4.8 / +6.3% | | +3.4 / +2.7 / +4.0% |
+
+876767 is the same (`free`): +5.7 / +5.1 / +6.3% for S0 fine-tuned and +3.2 / +3.2 / +3.6% for v6r.
+
+- **Photons set it.** At 4× the photons it falls to 0.4–2%.
+- **No structure is needed.** A flat field, with no dendrites, no excess and no variance-factor input, is as low as the real geometry. The network does not key on the labeled morphology.
+- **The flat field's bias follows the photon count, in a training mouse too** (S0 fine-tuned, 32 windows; photons per frame at the trial scale in parentheses):
+  - 878030 (0.2): +4.8 to +6.3%;
+  - 776270 (0.45): +2.0 to +2.6%;
+  - 885233, a training mouse (0.4): +1.5 to +2.5%;
+  - 829704 (1.0): −0.6 to +0.2%.
+- **The evaluation kinds overstate it a little.** `free`, `sim` and `fast` have no realistic low counts, which S0–S3 trained with. With them the bias is 10–60% smaller, but it stays.
+- **It came with S0's pretraining.**
+  - v6r (no low counts, the old export) has about half of it.
+  - On the fast evaluation windows, the labeled-pixel bias in 776270 went from 0.01 (step 0) to 0.22 after 250 pretraining steps.
+  - On the training mice's own simulated windows (`tr_lab_bias_net` in training's metrics) it rose from −0.005 at step 0 to +0.09…+0.25 (S0). In S3 it swings from −0.09 to +0.42 between checkpoints.
+
+**Why.**
+- **The network subtracts activity it cannot see.**
+  - Every simulated training trial has activity at its footprints.
+  - Below about 1 photon per frame an event is no larger than a single photon event, so neither the visible frames nor the variance maps tell whether a pixel is active.
+  - The network then subtracts the activity it expects for pixels of that brightness, even on a flat field. Above about 1 photon per frame it can see that there is none.
+- **Training barely penalizes it.**
+  - The mean loss weighs each voxel by 1 / photon-noise variance, so a relative bias δ costs δ² × photons per frame.
+  - At 0.2 photons a 5% bias costs as much as a 1.6% bias at 2 photons.
+  - That also explains why the bias wanders from checkpoint to checkpoint.
+- **878030 lies below the training range.** Its background and support (0.17–0.24 photons) are dimmer than anything S0's training mice provide, and its bias is the largest.
+
+**Code (branch `labeled-bias`):**
+- **Photon-count augmentation** (`SimConfig.photon_gain`, `train --photon_gain lo,hi`; off by default, drawn last so earlier configurations draw exactly as before):
+  - Per virtual trial, the template's gain (counts per photon) is multiplied by a factor drawn log-uniform in the range. Baseline and activity in counts stay; photon noise variance, the photon event size and the counts per zero-count event grow by k.
+  - Normalized by the trial scale, this is the noise of a dimmer session, from any template.
+  - The window reports its gain, which goes to the network's gain input and the loss weights.
+  - With `photon_zeros` the copula's kernels stay the template's, so correlations come out slightly weaker where k adds zeros.
+- **"dim" evaluation kinds** (`evaluate --kinds freedim,fastdim,...`): the base kind's windows with a third of the photons. The bright held-out mice (1–2.5 photons per frame at support) then get a low-count readout at 0.3–0.8, the range of the three dim mice.
+- **`mean_target` per class in `evaluate`'s output**, so the bias can be read as a share of the baseline. `tools/heldout_eval.py bias RESULTS_DIR` prints the picked checkpoints' bias per mouse, class and simulated kind (eval.csv only).
+- **Tests:** a new `test_photon_gain` covers:
+  - off by default, with unchanged draws;
+  - noise variance k × gain × mean;
+  - more exact zeros with low counts;
+  - the dataset passing the gain on;
+  - the dim kinds using the base kind's windows.
+- The full suite passes: 77 tests before the rebase, 79 on top of 5ab43a9 (main's selection and evaluation changes).
+
+**Local fine-tuning test.**
+- **Setup:** S0's pretraining pick, fine-tuned 200 steps with S0's fine-tuning recipe; loss region 64 × 24²; one trial per path of S0's three training mice.
+- **Control arm:** activity-free windows of 878030 / 876767 / 829704, 32 each:
+
+  | | before (S0's pretraining pick) | after 200 steps (control) |
+  |---|---|---|
+  | `free`, support / background / labeled outside | +10.4 / +9.8 / +4.4%; +7.0 / +8.8 / +7.9%; +1.7 / +1.4 / +1.6% | +8.4 / +5.9 / +3.2%; +6.5 / +4.9 / +7.4%; +1.4 / −0.7 / +1.4% |
+  | real background: net below the mean image | 12.3%; 10.0%; 2.7% | 8.2%; 5.8%; 0.4% |
+
+  - Fine-tuning on real windows lowers it, mostly at background, but leaves the dim mice 3–8% low.
+- **The two candidate arms did not finish.** Silent trials (`--silent_trial 0.3`) and photon gain (`--photon_gain 1,4`) stalled on the shared machine: all 32 cores and the 8 GB GPU were taken by other sessions' jobs, and steps took 8–20 s. So they are untested.
+
+**Recommendation for the next batch: one arm against the planned control.**
+- **The arm, "lowcount":** the planned recipe plus `--photon_gain 1,4 --silent_trial 0.2`, in both pretraining and fine-tuning. These affect only the simulated windows.
+  - `--silent_trial 0.2` makes a fifth of the simulated trials activity-free. "Every pixel of this brightness carries activity" then stops being true in training, and where the network cannot see events it should subtract less.
+    - This is the part aimed at the in-distribution bias (885233: +2% at 0.4 photons).
+    - Expected cost: less subtraction at active pixels in dim sessions. Simulated support bias would go more negative, and the real support score shows the net effect.
+    - v5a's silent regions "added nothing" on bright sessions and the GFP control, where events are visible. The test here is the dim mice.
+  - `--photon_gain 1,4` takes every template down to as little as a quarter of its photons. The training mice (0.4–2 photons per frame at support) then cover 0.1–2, which includes 878030's 0.2.
+- **Evaluate with** `--kinds real,sim,free,fast,freedim,fastdim` and read `tools/heldout_eval.py bias`. Decide in this order:
+  1. Real balanced vs the mean image: no loss beyond about 0.1 point.
+  2. `free` and `freedim` bias by class: in the dim mice, and in the dim versions of the bright mice.
+  3. Real background bias of 878030 and 876767 against the mean image.
+- **If only one change fits:** `--silent_trial 0.2`. The bias exists inside the training range, and phase 2's new 2026 RCaMP3 mice (878029, 885234, 885235) probably add dim templates on their own.
+- **Selection:** the labeled-pixel term is already gone (`balanced_free` is not to be used; see the previous section). It followed this bias, not real accuracy.
