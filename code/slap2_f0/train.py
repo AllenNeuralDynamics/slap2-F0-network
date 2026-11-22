@@ -44,6 +44,7 @@ stats/ (cached whole-trial statistics).
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import math
 import shutil
@@ -251,7 +252,8 @@ def silo_baseline(movie: torch.Tensor, scale: torch.Tensor, region, smooth: int 
 
 
 @torch.no_grad()
-def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | None = None) -> dict[str, float]:
+def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | None = None,
+             tot: dict | None = None, finish: bool = True) -> dict[str, float]:
     """Mean loss, noise calibration and baseline errors on fixed windows.
 
     Baselines compared against the target (the true baseline for simulated
@@ -281,10 +283,14 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
     per_window, if a list, gets one dict per window with its 8-frame squared-
     error sums and weights at support and background pixels (sup_n8,
     sup_se8_<baseline>, bg_n8, bg_se8_<baseline> for net, mean_image, silo
-    and oracle), so scores can be bootstrapped over windows."""
+    and oracle), so scores can be bootstrapped over windows.
+
+    loader may be any iterable of batches. With tot (a defaultdict(float)) and
+    finish=False the sums accumulate into tot and tot is returned, so windows
+    can be scored in chunks; evaluate_totals(tot) turns them into the scores."""
     model.eval()
     sel = (slice(None),) + region
-    tot = defaultdict(float)
+    tot = defaultdict(float) if tot is None else tot
     for b in loader:
         b, m, v, aux = _forward(model, b, device, amp_dtype, region, aux=True)
         y, yn, w = b["target"][sel], b["noisy"][sel], b["weight"][sel]
@@ -351,6 +357,11 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
         tot["r8_den"] += (w8 * v).sum().item()
         tot["mix"] += (w * aux["mix"]).sum().item()
     model.train()
+    return evaluate_totals(tot) if finish else tot
+
+
+def evaluate_totals(tot: dict) -> dict[str, float]:
+    """Scores from evaluate's accumulated sums."""
     n = max(tot["n"], 1.0)
     out = {"loss": tot["loss"] / n, "var_loss": tot["var_loss"] / n}
     zm = tot["z"] / n
@@ -393,6 +404,34 @@ def selection_score(row: dict, prefix: str, how: str) -> float:
             return float(np.mean(r))
     r = ratio("")
     return r if math.isfinite(r) else math.inf
+
+
+def parse_select_on(spec: str) -> dict[str, float]:
+    """--select_on "real" or "real,fast" or "real:1,fast:0.5": validation sets
+    and their weights in the checkpoint score."""
+    out = {}
+    for part in spec.split(","):
+        name, _, w = part.strip().partition(":")
+        if name:
+            out[name] = float(w) if w else 1.0
+    return out
+
+
+def combined_selection(row: dict, per_group: dict, kinds: dict, how: str) -> float:
+    """Checkpoint score (lower is better): the weighted mean over the selection
+    sets of each set's score. For balanced, a set's score is the mean over
+    validation mice of each mouse's balanced ratio (one pooled group: the
+    pooled ratio, as before); for the other scores, selection_score on the
+    group-averaged row."""
+    tot = wsum = 0.0
+    for name, w in kinds.items():
+        if how == "balanced" and per_group.get(name):
+            vals = [v for v in per_group[name].values() if math.isfinite(v)]
+            v = float(np.mean(vals)) if vals else math.inf
+        else:
+            v = selection_score(row, name, how)
+        tot, wsum = tot + w * v, wsum + w
+    return tot / wsum if wsum > 0 else math.inf
 
 
 def _model_config(args) -> ModelConfig:
@@ -587,7 +626,7 @@ def train(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    stats = load_stats(files, stats_cache(args, out), workers=args.workers)
+    stats = load_stats(files, stats_cache(args, out), workers=args.workers, sidecar_dirs=args.sidecars)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; gain "
           + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)
     bad = _drop_files(files, stats)
@@ -627,22 +666,31 @@ def train(args) -> None:
                       sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
         batch_size=args.batch, persistent_workers=False, **kw)
     dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
-    evals = {}
+    # validation sets: one loader per validation mouse (session), --val_windows
+    # windows each, the first windows held-out evaluation draws for that
+    # session with the same seed (plan.md, "Experiments 1 and 2": the number of
+    # mice, not of windows, limits checkpoint selection); --val_pooled draws
+    # --val_windows from all validation files together (S0-S3 and earlier)
+    vgroups = {"all": val_files} if args.val_pooled or not val_files else session_groups(val_files)
+    sets = {}
     if val_files:
-        evals["real"] = mk(val_files, args.val_windows, 10_000 + args.seed, None)
-        evals["sim"] = mk(val_files, args.val_windows, 20_000 + args.seed, eval_sim("sim", args.photon_zeros, args.pz_legacy))
+        sets["real"] = (10_000, None)
+        sets["sim"] = (20_000, eval_sim("sim", args.photon_zeros, args.pz_legacy))
         if args.val_free:
-            evals["free"] = mk(val_files, args.val_windows, 40_000 + args.seed, sim_config(args, free=True))
+            sets["free"] = (40_000, sim_config(args, free=True))
         if args.val_fast:
-            evals["fast"] = mk(val_files, args.val_windows, 50_000 + args.seed, eval_sim("fast", args.photon_zeros, args.pz_legacy))
+            sets["fast"] = (50_000, eval_sim("fast", args.photon_zeros, args.pz_legacy))
         if args.val_motion:
-            evals["motion"] = mk(val_files, args.val_windows, 70_000 + args.seed, eval_sim("motion", args.photon_zeros, args.pz_legacy))
-    evals["tr"] = mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)  # did it learn anything at all?
+            sets["motion"] = (70_000, eval_sim("motion", args.photon_zeros, args.pz_legacy))
+    evals = {name: {g: mk(fl, args.val_windows, seed0 + args.seed, s) for g, fl in vgroups.items()}
+             for name, (seed0, s) in sets.items()}
+    evals["tr"] = {"all": mk(train_files, args.val_windows, 30_000 + args.seed, sim, frac)}  # did it learn anything at all?
     region = loss_region(wcfg)
-    sel_prefix = (args.select_on or ("real" if args.data == "mix" else args.data)) if val_files else "tr"
-    if sel_prefix not in evals:
-        raise SystemExit(f"--select_on {sel_prefix}: no such validation set ({', '.join(evals)})")
-    sel_key = f"{sel_prefix}_{args.select}"
+    sel_kinds = parse_select_on(args.select_on or ("real" if args.data == "mix" else args.data)) if val_files         else {"tr": 1.0}
+    missing = [k for k in sel_kinds if k not in evals]
+    if missing:
+        raise SystemExit(f"--select_on {','.join(missing)}: no such validation set ({', '.join(evals)})")
+    sel_key = "+".join(sel_kinds) + f"_{args.select}"
 
     (out / "config.json").write_text(json.dumps({
         "model": asdict(mcfg), "window": asdict(wcfg), "args": vars(args), "n_params": n_params,
@@ -672,10 +720,18 @@ def train(args) -> None:
     def validate(step):
         nonlocal fields, best
         row = {"step": step, "train_loss": ema if ema is not None else float("nan")}
-        for name, loader in evals.items():
-            for k, v in evaluate(net, loader, region, device, amp_dtype, args).items():
-                row[f"{name}_{k}"] = v
-        row[sel_key] = selection_score(row, sel_prefix, args.select)
+        per_group = {}  # set -> group -> that group's selection value
+        for name, loaders in evals.items():
+            res = {g: evaluate(net, ld, region, device, amp_dtype, args) for g, ld in loaders.items()}
+            for k in dict.fromkeys(k for r in res.values() for k in r):  # mean over groups, the old column names
+                vals = [r[k] for r in res.values() if k in r and math.isfinite(r[k])]
+                row[f"{name}_{k}"] = float(np.mean(vals)) if vals else math.nan
+            per_group[name] = {g: selection_score({f"x_{k}": v for k, v in r.items()}, "x", args.select)
+                               for g, r in res.items()}
+            if len(res) > 1:
+                for g, v in per_group[name].items():
+                    row[f"{name}@{g.split('_')[0]}_{args.select}"] = v
+        row[sel_key] = combined_selection(row, per_group, sel_kinds, args.select)
         row.update(lr=sched.get_last_lr()[0], elapsed_s=time.time() - t0)
         if fields is None:
             fields = list(row)
@@ -745,7 +801,7 @@ def evaluate_checkpoints(args) -> None:
     out.mkdir(parents=True, exist_ok=True)
     cache = stats_cache(args, out)
     t0 = time.time()
-    stats = load_stats(files, cache, workers=args.workers)
+    stats = load_stats(files, cache, workers=args.workers, sidecar_dirs=args.sidecars)
     print(f"trial stats for {len(files)} files in {time.time() - t0:.0f} s; sessions: "
           + ", ".join(f"{s} ({len(f)} trials)" for s, f in sorted(groups.items())), flush=True)
     bad = _drop_files(files, stats)
@@ -764,16 +820,62 @@ def evaluate_checkpoints(args) -> None:
             specs += [(f"{name}@{m.stem}", str(m)) for m in matches]
         else:
             specs.append((name, path))
+    # every checkpoint with the same window configuration is scored on the same
+    # windows, drawn once (the loaders were the limit once the forward pass is
+    # compiled: about 5 simulated windows/s on 16 vCPUs), in chunks of
+    # --share_chunk windows; checkpoints of one architecture share one
+    # (compiled) model and only their weights are loaded in turn
+    cks = []
     for name, path in specs:
         ck = torch.load(path, map_location=device, weights_only=False)
-        model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device)
-        model.load_state_dict(ck["model"])
-        model = fast_model(model, device, args)
         wcfg = WindowConfig(**ck["window"])  # checkpoints from before real_edge_s get its default (2 s)
         if args.real_edge_s is not None:
             wcfg = replace(wcfg, real_edge_s=args.real_edge_s)
-        region = loss_region(wcfg)
+        cks.append({"name": name, "path": path, "step": ck.get("step"), "config": ck["config"], "state": ck["model"],
+                    "wcfg": wcfg})
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
+    models = {}
+    for c in cks:
+        key = json.dumps(c["config"], sort_keys=True, default=str)
+        if key not in models:
+            models[key] = fast_model(SlabBlindSpotNet(config_from_dict(c["config"])).to(device), device, args)
+        c["model"] = models[key]
+    by_window = defaultdict(list)
+    for c in cks:
+        by_window[json.dumps(asdict(c["wcfg"]), sort_keys=True, default=str)].append(c)
+
+    def write_rows(c, sess, kind, r, pw, secs):
+        rows.append({"checkpoint": c["name"], "step": c["step"], "session": sess, "kind": kind,
+                     "trials": len(groups[sess]), "windows": args.windows, **r})
+        if pw:  # one row per window, for bootstrap intervals over windows and sessions
+            new = not (out / "windows.csv").exists()
+            with open(out / "windows.csv", "a", newline="") as fh:
+                wr = csv.DictWriter(fh, fieldnames=["checkpoint", "step", "session", "kind", "window"] + list(pw[0]))
+                if new:
+                    wr.writeheader()
+                for i, q in enumerate(pw):
+                    wr.writerow({"checkpoint": c["name"], "step": c["step"], "session": sess, "kind": kind,
+                                 "window": i, **q})
+        fields = list(dict.fromkeys(k for row in rows for k in row))
+        with open(out / "eval.csv", "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=fields, restval=float("nan"))
+            wr.writeheader()
+            wr.writerows(rows)
+
+        def rel(cl, pn):
+            a, b = r.get(f"{cl}mse8_{pn}", math.nan), r.get(f"{cl}mse8_mean_image", math.nan)
+            return f"{100 * (a / b - 1):+.1f}%" if b > 0 else "nan"
+
+        print(f"  {c['name']} {sess} {kind} ({secs:.0f} s for {len(by_window[wkey])} checkpoints): "
+              + "; ".join(f"{cl or 'all_'}[net {rel(cl, 'net')} silo {rel(cl, 'silo')} oracle {rel(cl, 'oracle')} "
+                          f"bias net {r.get(f'{cl}bias_net', math.nan):+.3f} "
+                          f"mean image {r.get(f'{cl}bias_mean_image', math.nan):+.3f}]"
+                          for cl in ("sup_", "bg_", ""))
+              + f"; z_var {r['z_var']:.3f} mix {r['mix']:.3f}", flush=True)
+
+    for wkey, group in by_window.items():
+        wcfg = group[0]["wcfg"]
+        region = loss_region(wcfg)
         for sess in sorted(groups):
             for kind in args.kinds.split(","):
                 sim = eval_sim(kind, pz_legacy=args.pz_legacy)
@@ -782,36 +884,19 @@ def evaluate_checkpoints(args) -> None:
                 loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                     pin_memory=device.type == "cuda")
                 t1 = time.time()
-                pw = [] if args.per_window else None
-                r = evaluate(model, loader, region, device, amp_dtype, args, per_window=pw)
-                rows.append({"checkpoint": name, "step": ck.get("step"), "session": sess, "kind": kind,
-                             "trials": len(groups[sess]), "windows": args.windows, **r})
-                if pw:  # one row per window, for bootstrap intervals over windows and sessions
-                    new = not (out / "windows.csv").exists()
-                    with open(out / "windows.csv", "a", newline="") as fh:
-                        wr = csv.DictWriter(fh, fieldnames=["checkpoint", "step", "session", "kind", "window"]
-                                            + list(pw[0]))
-                        if new:
-                            wr.writeheader()
-                        for i, q in enumerate(pw):
-                            wr.writerow({"checkpoint": name, "step": ck.get("step"), "session": sess, "kind": kind,
-                                         "window": i, **q})
-                fields = list(dict.fromkeys(k for row in rows for k in row))
-                with open(out / "eval.csv", "w", newline="") as fh:
-                    wr = csv.DictWriter(fh, fieldnames=fields, restval=float("nan"))
-                    wr.writeheader()
-                    wr.writerows(rows)
-
-                def rel(c, p):
-                    a, b = r.get(f"{c}mse8_{p}", math.nan), r.get(f"{c}mse8_mean_image", math.nan)
-                    return f"{100 * (a / b - 1):+.1f}%" if b > 0 else "nan"
-
-                print(f"  {sess} {kind} ({time.time() - t1:.0f} s): "
-                      + "; ".join(f"{c or 'all_'}[net {rel(c, 'net')} silo {rel(c, 'silo')} oracle {rel(c, 'oracle')} "
-                                  f"bias net {r.get(f'{c}bias_net', math.nan):+.3f} "
-                                  f"mean image {r.get(f'{c}bias_mean_image', math.nan):+.3f}]"
-                                  for c in ("sup_", "bg_", ""))
-                      + f"; z_var {r['z_var']:.3f} mix {r['mix']:.3f}", flush=True)
+                tots = {c["name"]: defaultdict(float) for c in group}
+                pws = {c["name"]: ([] if args.per_window else None) for c in group}
+                it = iter(loader)
+                while True:
+                    chunk = list(itertools.islice(it, max(1, args.share_chunk // args.batch)))
+                    if not chunk:
+                        break
+                    for c in group:
+                        getattr(c["model"], "_orig_mod", c["model"]).load_state_dict(c["state"])
+                        evaluate(c["model"], chunk, region, device, amp_dtype, args, per_window=pws[c["name"]],
+                                 tot=tots[c["name"]], finish=False)
+                for c in group:
+                    write_rows(c, sess, kind, evaluate_totals(tots[c["name"]]), pws[c["name"]], time.time() - t1)
     print(f"done in {time.time() - t0:.0f} s")
 
 
@@ -860,12 +945,17 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--pz_legacy", action="store_true",
                    help="pz kinds (fastpz, motionpz, ...): draw the low counts as up to 2026-11-21, to compare with "
                         "evaluations made before (SimConfig.pz_legacy)")
+    p.add_argument("--share_chunk", type=int, default=64,
+                   help="windows held in memory at once while every checkpoint is scored on them (about 100 MB each)")
     p.add_argument("--per_window", action="store_true",
                    help="also write windows.csv: each window's 8-frame squared errors at support and background "
                         "pixels (for bootstrap intervals over windows and sessions)")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
     p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. a training run's)")
+    p.add_argument("--sidecars", default="",
+                   help="comma-separated stats overlay folders (<session>/<path>/<trial>_stats_v5.npz, e.g. a data "
+                        "asset made by `slap2-f0 stats ROOT --out DIR`), searched after each trial's own sidecar")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--device", default="auto")
     p.add_argument("--no_amp", action="store_true")
@@ -1041,6 +1131,9 @@ def add_arguments(p) -> None:
     p.add_argument("--init", default="", help="start from this checkpoint (e.g. a simulation-pretrained best.pt)")
     p.add_argument("--stats_cache", default="", help="folder for cached trial stats (default: <out>/stats)")
     p.add_argument("--stats_from", default="", help="copy cached trial stats from here first (e.g. an earlier run's)")
+    p.add_argument("--sidecars", default="",
+                   help="comma-separated stats overlay folders (<session>/<path>/<trial>_stats_v5.npz, e.g. a data "
+                        "asset made by `slap2-f0 stats ROOT --out DIR`), searched after each trial's own sidecar")
     p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
     p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
     p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")
@@ -1049,8 +1142,13 @@ def add_arguments(p) -> None:
                    help="best.pt criterion on held-out windows: 8-frame MSE vs the mean image, averaged over "
                         "support and background (balanced; balanced_free adds labeled pixels of the activity-free "
                         "simulation, needs --val_free) or over all pixels (mse8), or the mean loss")
-    p.add_argument("--select_on", default="", help="validation set for best.pt (real, sim, free, fast, motion); "
-                                                  "default: the training data kind (real for mix)")
+    p.add_argument("--select_on", default="",
+                   help="validation set(s) for best.pt, with optional weights: real, sim, free, fast, motion, "
+                        "e.g. real,fast or real:1,fast:0.5 (the weighted mean of each set's score); default: the "
+                        "training data kind (real for --data mix)")
+    p.add_argument("--val_pooled", action="store_true",
+                   help="validation windows drawn from all validation sessions together (S0-S3 and earlier); "
+                        "default: --val_windows windows per validation session, scores averaged over sessions")
     p.add_argument("--no_flip", action="store_true", help="no random flips of training windows (= --flip none)")
     p.add_argument("--flip", default="rows", choices=["rows", "both", "none"],
                    help="random flips of training windows: up/down only (rows, the DMD's short axis; default), "

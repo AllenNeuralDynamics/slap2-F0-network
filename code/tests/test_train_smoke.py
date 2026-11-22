@@ -549,3 +549,69 @@ def test_named_sessions_caps_and_kept_steps(tmp_path):
     with pytest.raises(SystemExit):  # a session in both roles
         main(["train", str(tmp_path / "data"), "--out", str(tmp_path / "bad"), "--steps", "1",
               "--val_sessions", "sessA", "--train_sessions", "sessA"] + small)
+
+
+def test_selection_per_mouse_and_weighted(tmp_path):
+    """Validation scores each validation mouse on its own --val_windows windows
+    (the first windows held-out evaluation draws for that session); --select_on
+    with weights combines the sets; --val_pooled restores pooled windows."""
+    from slap2_f0.train import parse_select_on
+
+    assert parse_select_on("real") == {"real": 1.0}
+    assert parse_select_on("real:1, fast:0.5") == {"real": 1.0, "fast": 0.5}
+    for k, label in enumerate(["sessA", "sessA", "sessB", "sessC", "sessD"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    small = ["--steps", "2", "--batch", "1", "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1",
+             "--gap", "2", "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0",
+             "--val_every", "2", "--val_windows", "2", "--save_every", "2", "--data", "sim", "--val_fast",
+             "--val_sessions", "sessB,sessC", "--train_sessions", "sessA,sessD", "--select_on", "real:1,fast:2"]
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out)] + small)
+    last = list(csv.DictReader(open(out / "metrics.csv")))[-1]
+    per = {(k, s): float(last[f"{k}@{s}_balanced"]) for k in ("real", "fast") for s in ("sessB", "sessC")}
+    want = (np.mean([per["real", "sessB"], per["real", "sessC"]]) + 2 * np.mean([per["fast", "sessB"], per["fast", "sessC"]])) / 3
+    assert float(last["real+fast_balanced"]) == pytest.approx(want, rel=1e-6)
+    # each mouse's validation windows are evaluation's first windows of that session
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", f"last={out / 'last.pt'}", "--out", str(ev), "--windows", "2",
+          "--workers", "0", "--kinds", "real", "--stats_from", str(out / "stats")])
+    for r in csv.DictReader(open(ev / "eval.csv")):
+        if r["session"] in ("sessB", "sessC"):
+            bal = np.mean([float(r["sup_mse8_net"]) / float(r["sup_mse8_mean_image"]),
+                           float(r["bg_mse8_net"]) / float(r["bg_mse8_mean_image"])])
+            assert bal == pytest.approx(per["real", r["session"]], rel=1e-5)
+    out2 = tmp_path / "out2"
+    main(["train", str(tmp_path / "data"), "--out", str(out2), "--val_pooled", "--stats_cache", str(out / "stats")] + small)
+    cols = next(csv.reader(open(out2 / "metrics.csv")))
+    assert "real+fast_balanced" in cols and not any("@" in c for c in cols)
+
+
+def test_stats_overlay_folder(tmp_path, monkeypatch):
+    """`slap2-f0 stats ROOT --out DIR` writes sidecars into an overlay folder
+    (<session>/<path>/...) instead of next to the trials; load_stats finds them
+    there (sidecar_dirs, train/evaluate --sidecars) without recomputing, and
+    ignores them when the trial's size no longer matches."""
+    import slap2_f0.stats as st_mod
+
+    d = tmp_path / "data" / "mnt" / "sessA" / "Path2"
+    d.mkdir(parents=True)
+    fn = d / "trial_003.h5"
+    _trial(fn, "sessA", 0)
+    ov = tmp_path / "overlay"
+    main(["stats", str(tmp_path / "data"), "--out", str(ov), "--workers", "0"])
+    assert not st_mod.sidecar_path(fn).exists()
+    assert (ov / "sessA" / "Path2" / "trial_003_stats_v5.npz").exists()
+    ref = st_mod.load_stats([fn], None, workers=0, sidecar_dirs=str(ov))[str(fn)]
+
+    def boom(*a, **k):
+        raise AssertionError("recomputed")
+
+    monkeypatch.setattr(st_mod, "trial_stats", boom)
+    again = st_mod.load_stats([fn], None, workers=0, sidecar_dirs=[str(ov)])[str(fn)]
+    assert again["gain"] == ref["gain"] and np.array_equal(again["mean_movie"], ref["mean_movie"], equal_nan=True)
+    with h5py.File(fn, "a") as f:  # the trial changed: the overlay no longer applies
+        f.attrs["note"] = "x" * 10000
+    with pytest.raises(AssertionError, match="recomputed"):
+        st_mod.load_stats([fn], None, workers=0, sidecar_dirs=[str(ov)])

@@ -30,6 +30,12 @@
 # bench: machine benchmark (`slap2-f0 bench`; --train_args holds its
 #   arguments: a checkpoint, optionally --data and --configs).
 #
+# stats: trial stats of the exported trials under the attached data assets,
+#   written as a sidecar overlay folder in results/sidecars (<session>/<path>/
+#   <trial>_stats_v5.npz) for trials whose own sidecars are stale or missing;
+#   make a data asset from it and pass `--sidecars <mount>` to train/evaluate.
+#   --train_args may hold `--workers N` (default 8).
+#
 # train: train the blind-spot network on the exported trials found anywhere
 # under the attached data assets (results of export runs), on the GPU if
 # there is one.
@@ -160,6 +166,10 @@ elif [[ "$mode" == "bench" ]]; then
     # shellcheck disable=SC2086
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli bench --out "$RESULTS/bench" $train_args         2>&1 | tee "$RESULTS/logs/bench.log"
     exit "${PIPESTATUS[0]}"
+elif [[ "$mode" == "stats" ]]; then
+    # shellcheck disable=SC2086
+    PYTHONPATH="$CODE" python3 -u -m slap2_f0.cli stats "$DATA" --out "$RESULTS/sidecars" $train_args         2>&1 | tee "$RESULTS/logs/stats.log"
+    exit "${PIPESTATUS[0]}"
 elif [[ "$mode" == "disktest" ]]; then
     mkdir -p "$RESULTS/_disktest"
     n=0
@@ -212,7 +222,7 @@ elif [[ "$mode" == "register" ]]; then
     kill "$monitor" 2>/dev/null
     exit "$status"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe, bench or disktest)"
+    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe, bench, stats or disktest)"
     exit 2
 fi
 

@@ -252,16 +252,20 @@ def _cached(args) -> dict:
     """Stats of one file: from its sidecar (if made for this version and file
     size), else from the cache folder, else computed (and then cached, and
     written as a sidecar if asked)."""
-    fn, cache, write_sidecar = args
+    fn, cache, write_sidecar, overlays, out_dir = (tuple(args) + ((), None))[:5]
     fn = Path(fn)
     side = sidecar_path(fn)
     size = fn.stat().st_size
     one_channel = _one_channel_mean_image(fn)
-    if side.exists():
-        with np.load(side) as d:
-            ok = "file_size" in d.files and int(d["file_size"]) == size and (not one_channel or "mean_image_axes" in d.files)
-        if ok:
-            return _from_npz(side)
+    for cand in [side] + [overlay_path(fn, d) for d in overlays]:
+        if cand.exists():
+            with np.load(cand) as d:
+                ok = "file_size" in d.files and int(d["file_size"]) == size and (not one_channel or "mean_image_axes" in d.files)
+            if ok:
+                return _from_npz(cand)
+    if write_sidecar and out_dir is not None:
+        side = overlay_path(fn, out_dir)
+        side.parent.mkdir(parents=True, exist_ok=True)
     p = None
     if cache is not None:
         p = Path(cache) / f"{fn.stem}_{_key(fn)}.npz"
@@ -280,13 +284,27 @@ def _cached(args) -> dict:
     return s
 
 
+def overlay_path(fn: str | Path, root: str | Path) -> Path:
+    """Where a stats overlay folder holds a trial's sidecar: <root>/<session>/<path>/<sidecar>,
+    the layout of an export (so a folder of sidecars made elsewhere can stand in
+    for sidecars that cannot be written next to read-only trials)."""
+    fn = Path(fn)
+    return Path(root) / fn.parent.parent.name / fn.parent.name / sidecar_path(fn).name
+
+
 def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0, max_workers: int = 6,
-               write_sidecars: bool = False) -> dict[str, dict]:
+               write_sidecars: bool = False, sidecar_dirs=(), sidecar_out: str | Path | None = None) -> dict[str, dict]:
     """Stats for each file, keyed by str(path); computed in parallel, cached as
     .npz in cache_dir and/or (write_sidecars) next to each file, where they
-    are found first."""
+    are found first. sidecar_dirs: overlay folders (``overlay_path``) searched
+    after the sidecar, e.g. a data asset of recomputed sidecars for sessions
+    whose own are stale (803496, 804730); like sidecars they must match the
+    file size. sidecar_out: with write_sidecars, write new sidecars into that
+    overlay folder instead of next to the trials."""
     files = [str(f) for f in files]
-    jobs = [(f, None if cache_dir is None else str(cache_dir), write_sidecars) for f in files]
+    overlays = tuple(str(d) for d in (sidecar_dirs.split(",") if isinstance(sidecar_dirs, str) else sidecar_dirs) if d)
+    out = None if sidecar_out is None else str(sidecar_out)
+    jobs = [(f, None if cache_dir is None else str(cache_dir), write_sidecars, overlays, out) for f in files]
     if workers and len(files) > 1:
         # each worker holds a few float32 chunks of a trial (up to ~1 GB for large crops)
         with ProcessPoolExecutor(max_workers=min(workers, max_workers, len(files), os.cpu_count() or 1)) as ex:
@@ -305,6 +323,7 @@ def run(args) -> None:
 
     files = list_trials(args.root)
     t0 = time.time()
-    stats = load_stats(files, None, workers=args.workers, max_workers=args.workers, write_sidecars=True)
+    stats = load_stats(files, None, workers=args.workers, max_workers=args.workers, write_sidecars=True,
+                       sidecar_out=getattr(args, "out", None) or None)
     print(f"stats of {len(files)} trial files under {args.root} in {time.time() - t0:.0f} s; gain "
           + " ".join(f"{stats[str(f)]['gain']:.1f}" for f in files[:8]) + (" ..." if len(files) > 8 else ""), flush=True)

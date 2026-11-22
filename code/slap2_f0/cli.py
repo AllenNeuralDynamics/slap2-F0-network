@@ -70,6 +70,8 @@ def main(argv=None) -> None:
     pq = sub.add_parser("stats", help="compute trial stats and store them next to the trial files (end of an export)")
     pq.add_argument("root")
     pq.add_argument("--workers", type=int, default=8)
+    pq.add_argument("--out", default="", help="write new sidecars into this overlay folder (<session>/<path>/...) "
+                                            "instead of next to the trials (e.g. read-only data assets)")
     pq.set_defaults(func=stats_mod.run)
     ps = sub.add_parser("simcheck", help="simulate trials from templates and compare their noise statistics")
     simulate_mod.add_check_arguments(ps)

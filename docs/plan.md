@@ -1828,3 +1828,27 @@ Each cell gives 48 / 192 windows per mouse:
   - add `--stats_from` for 803496 and 804730, whose stale one-channel stats otherwise cost 16–43 min per run.
 - **Evaluation:** until windows are shared across checkpoints, the A10G is the better value. It is about as fast, because the L40S waits for data, and costs 40% less. Switching back is a one-line change to `.codeocean/resources.json`.
 - **Not yet confirmed:** compile has been measured in the benchmark, not in a full training run.
+
+## Selection, evaluation and stats for the next training (2026-11-21)
+
+**Checkpoint selection per validation mouse** (Experiment 2: the number of mice, not windows, limits selection):
+- **Per-mouse windows.** Every validation set (`real`, `sim`, `free`, `fast`, `motion`) now draws `--val_windows` windows from each validation session separately. These are the first windows held-out evaluation draws for that session with the same seed.
+- **`balanced`** is the mean over mice of each mouse's ratio, the mean of support and background (8-frame MSE against the mean image). The set columns of `metrics.csv` keep their names, as means over mice, and each mouse's score is logged as `<set>@<mouse>_balanced`.
+- **Several sets with weights:** `--select_on` takes them, for example `real,fast` or `real:1,fast:0.5`. The score is the weighted mean of the sets' scores, and the column is named `real+fast_balanced`.
+- **`--val_pooled`** restores pooled windows, as S0–S3 used.
+- **Recommended for the next runs:** `--val_sessions 878030,794237,834788,804730 --val_windows 48 --select balanced`. Pretraining selects on `fast` as before, and fine-tuning on `real,fast`.
+  - The weights wait for the fine-tuning analysis (session finetune-tradeoff). The fast score moves about 10× more between checkpoints than the real one, so equal weights let the simulations decide.
+  - Do not use `balanced_free`: it picked worse than chance.
+- **Cost:** 4 mice × 48 windows × 4 sets = 768 windows per validation.
+
+**Evaluation scores all checkpoints on shared windows** (`evaluate_checkpoints`):
+- Checkpoints with the same window configuration are scored on the same windows. Each session's windows are drawn once and scored by every checkpoint in turn, in chunks of `--share_chunk` windows (default 64, about 100 MB each).
+- Checkpoints of one architecture share one compiled model and load their weights in turn. Compiling each checkpoint separately would recompile, and after torch's limit of 8 recompilations it falls back to uncompiled code.
+- Compiled, the data loaders were the limit (about 5 simulated windows/s on 16 vCPUs). With 8 checkpoints the windows are now made once instead of 8 times.
+- Same numbers as before: on the four local 804730 trials with two checkpoints, all 316 metrics and 264 per-window values are identical.
+
+**Stats overlay for stale sidecars:**
+- `slap2-f0 stats ROOT --out DIR`, or `run --mode stats`, writes trial-stats sidecars into an overlay folder, `DIR/<session>/<path>/<trial>_stats_v5.npz`, instead of next to the (read-only) trials.
+- `train` and `evaluate --sidecars DIR[,DIR]` look there after each trial's own sidecar. Like sidecars, the overlay must match the trial's file size.
+- This replaces recomputing the one-channel phase-1 sessions (803496, 804730) in every run, which took 16–43 min.
+- `--stats_from` was not suitable: its cache key includes the mount path and modification time, and it copies a whole earlier run's cache (about 25 GB for S3).
