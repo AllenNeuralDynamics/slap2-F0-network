@@ -470,6 +470,8 @@ def _model_config(args) -> ModelConfig:
     mcfg.hp_shared = args.hp_shared
     mcfg.motion_features = getattr(args, "motion_features", False)
     mcfg.edge_features = getattr(args, "edge_features", False)
+    mcfg.branch_mlp = getattr(args, "branch_mlp", 0)
+    mcfg.fuse_blocks = getattr(args, "fuse_blocks", 0)
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -1273,6 +1275,12 @@ def add_arguments(p) -> None:
     p.add_argument("--motion_features", action="store_true",
                    help="box model: also the local displacement and blur seen in the surround, as the change they "
                         "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
+    p.add_argument("--fuse_blocks", type=int, default=0,
+                   help="pointwise residual blocks after the two fusion layers (ModelConfig.fuse_blocks): more "
+                        "processing after the branches are combined, same reach; starts out exactly as --init")
+    p.add_argument("--branch_mlp", type=int, default=0,
+                   help="pointwise residual blocks after every dilated block of every branch "
+                        "(ModelConfig.branch_mlp): more nonlinear processing of the same window, same reach")
     p.add_argument("--edge_features", action="store_true",
                    help="per-side window statistics into the fusion and edge-gated corrections of the baseline and "
                         "noise (ModelConfig.edge_features); starts out exactly as the --init checkpoint")
