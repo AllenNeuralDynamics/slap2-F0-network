@@ -18,6 +18,7 @@ Attributes on the root group hold QC and provenance (see the export function).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -137,10 +138,22 @@ def list_trials(root: str | Path) -> list[Path]:
     return out
 
 
-def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: float = 0.5) -> tuple[list[Path], list[str]]:
+def _path_id(attr, folder: str) -> int | str:
+    """An imaging path's number from the exporter's ``path`` attribute or,
+    without it, from the folder name (Path2 -> 2), so both name one path."""
+    if attr is not None:
+        try:
+            return int(float(attr))
+        except (TypeError, ValueError):
+            pass
+    m = re.fullmatch(r"(?i)path_?(\d+)", folder)
+    return int(m.group(1)) if m else folder
+
+
+def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: int = 4) -> tuple[list[Path], list[str]]:
     """Leave out trials whose activity calibration failed, and imaging paths
-    that keep too few of their session's trials. Returns the kept files, in
-    the order given, and one report line per trial or path left out.
+    left with too few trials. Returns the kept files, in the order given,
+    and one report line per trial or path left out.
 
     - Calibration: the exporter scales GIAnT's activity to the movie and
       records how well its peaks match (attribute ``peakR``). Below
@@ -149,11 +162,11 @@ def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: f
       pinned at their bounds, against 0.30 or more for the rest (median
       0.43). Their training target (movie - activity) is wrong wherever the
       activity is.
-    - Paths: a path keeps ``min_path_trials`` or more of its session's
-      trials (lowest to highest trial number over all paths of the
-      session) after the calibration cut, or is left out whole. Trials are
-      missing where GIAnT produced no frames for them.
-    Trials without the attributes are kept. 0 turns either rule off.
+    - Paths: a path with fewer than ``min_path_trials`` trials left after
+      the calibration cut is left out whole. This applies only to paths of
+      calibrated exports (some trial has ``peakR``); trials of older or
+      synthetic files without it are never left out.
+    0 turns either rule off.
     """
     info = []
     for f in files:
@@ -161,7 +174,7 @@ def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: f
             a = {k: _scalar(h.attrs[k]) for k in ("label", "path", "trial", "peakR") if k in h.attrs}
         digits = f.stem[len("trial_"):]
         trial = int(a["trial"]) if "trial" in a else (int(digits) if digits.isdigit() else 0)
-        info.append((f, str(a.get("label", f.parent.parent.name)), str(a.get("path", f.parent.name)), trial,
+        info.append((f, str(a.get("label", f.parent.parent.name)), _path_id(a.get("path"), f.parent.name), trial,
                      float(a["peakR"]) if "peakR" in a else float("nan")))
     report, failed = [], set()
     if min_peak_r > 0:
@@ -171,17 +184,16 @@ def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: f
                 report.append(f"{s} path {p} trial {t}: calibration failed (peak r {r:.2f} < {min_peak_r:g})")
     dropped_paths = set()
     if min_path_trials > 0:
-        span: dict[str, tuple[int, int]] = {}
-        kept: dict[tuple[str, str], int] = {}
-        for f, s, p, t, _ in info:
-            lo, hi = span.get(s, (t, t))
-            span[s] = (min(lo, t), max(hi, t))
+        kept: dict[tuple, int] = {}
+        calibrated: set[tuple] = set()
+        for f, s, p, _, r in info:
             kept[(s, p)] = kept.get((s, p), 0) + (f not in failed)
-        n_session = {s: hi - lo + 1 for s, (lo, hi) in span.items()}
-        for (s, p), k in sorted(kept.items()):
-            if n_session[s] > 0 and k < min_path_trials * n_session[s]:
-                dropped_paths.add((s, p))
-                report.append(f"{s} path {p}: left out whole, {k} of {n_session[s]} trials usable "
-                              f"(< {min_path_trials:g})")
+            if r == r:  # has peakR
+                calibrated.add((s, p))
+        for key in sorted(calibrated, key=str):
+            if kept[key] < min_path_trials:
+                dropped_paths.add(key)
+                report.append(f"{key[0]} path {key[1]}: left out whole, {kept[key]} usable trials "
+                              f"(< {min_path_trials})")
     out = [f for f, s, p, _, _ in info if f not in failed and (s, p) not in dropped_paths]
     return out, report

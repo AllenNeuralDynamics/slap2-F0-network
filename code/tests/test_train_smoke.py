@@ -519,9 +519,8 @@ def test_named_sessions_caps_and_kept_steps(tmp_path):
         d.mkdir(parents=True, exist_ok=True)
         _trial(d / f"trial_{k:03d}.h5", label, k)  # 160 frames = 2 s each
     out = tmp_path / "out"
-    # sessA's path 2 holds 1 of its 3 trials; keep it whole here (io.filter_trials is tested in test_quality)
     small = ["--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
-             "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--min_path_trials", "0"]
+             "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0"]
     main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "real", "--steps", "3", "--batch", "2",
           "--val_sessions", "sessB", "--train_sessions", "sessA", "--max_train_s", "1", "--keep_every", "2",
           "--val_every", "2", "--val_windows", "2"] + small)
@@ -534,7 +533,7 @@ def test_named_sessions_caps_and_kept_steps(tmp_path):
     assert steps == ["step_000000.pt", "step_000002.pt", "step_000003.pt"]
     main(["evaluate", str(tmp_path / "data"), "--out", str(tmp_path / "eval"), "--ckpt",
           f"run={out / 'steps' / 'step_*.pt'}", "--kinds", "real", "--windows", "2", "--workers", "0",
-          "--per_window", "--min_path_trials", "0"])
+          "--per_window"])
     rows = list(csv.DictReader(open(tmp_path / "eval" / "eval.csv")))
     win = list(csv.DictReader(open(tmp_path / "eval" / "windows.csv")))
     assert len(win) == 3 * 3 * 2  # checkpoints x sessions x windows

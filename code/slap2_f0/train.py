@@ -68,7 +68,7 @@ from .stats import load_stats
 
 def quality_files(files: list[Path], args) -> list[Path]:
     """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
-    kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 0.5))
+    kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
     if report:
         print(f"trial quality: left out {len(files) - len(kept)} of {len(files)} trials:\n  " + "\n  ".join(report),
               flush=True)
@@ -1001,9 +1001,9 @@ def add_quality_arguments(p) -> None:
     p.add_argument("--min_peak_r", type=float, default=0.3,
                    help="leave out trials whose activity calibration failed: the exporter's peak correlation "
                         "(attribute peakR) below this (0: keep all; io.filter_trials)")
-    p.add_argument("--min_path_trials", type=float, default=0.5,
-                   help="leave out an imaging path whole if fewer than this share of its session's trials are usable "
-                        "(0: keep all)")
+    p.add_argument("--min_path_trials", type=int, default=4,
+                   help="leave out an imaging path whole if fewer than this many of its trials are usable (calibrated "
+                        "exports only; 0: keep all)")
 
 
 def add_eval_arguments(p) -> None:
