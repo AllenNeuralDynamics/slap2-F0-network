@@ -73,6 +73,31 @@ from .simulate import SimConfig, excess_summary
 from .stats import load_stats
 
 
+class LoaderWait:
+    """Time the training loop spends waiting for the data loaders, per log
+    interval. ``idle()`` when the loop goes back for the next batch, ``got()``
+    when it has it; ``report()`` gives (wait, interval) since the last report
+    and starts a new interval. Work between ``got()`` and ``idle()``
+    (forward, backward, validation) counts towards the interval only."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.wait = 0.0
+        self.t_log = self.tick = clock()
+
+    def idle(self) -> None:
+        self.tick = self.clock()
+
+    def got(self) -> None:
+        self.wait += self.clock() - self.tick
+
+    def report(self) -> tuple[float, float]:
+        now = self.clock()
+        out = (self.wait, now - self.t_log)
+        self.wait, self.t_log = 0.0, now
+        return out
+
+
 def quality_files(files: list[Path], args) -> list[Path]:
     """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
     kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
@@ -750,7 +775,8 @@ def train(args) -> None:
     mk = lambda fl, n, seed, s, fr=1.0: DataLoader(  # noqa: E731
         WindowDataset(fl, wcfg_train if seed == args.seed else wcfg, stats, length=n, seed=seed, sim=s,
                       flip=("none" if args.no_flip else args.flip) if seed == args.seed else "none",
-                      sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0),
+                      sim_frac=fr, subtract_frac=args.subtract_frac if seed == args.seed else 0.0,
+                      max_open=getattr(args, "max_open", 32)),
         batch_size=args.batch, persistent_workers=False, **kw)
     dl = mk(train_files, args.steps * args.batch * args.accum, args.seed, sim, frac)
     # validation sets: one loader per validation mouse (session), --val_windows
@@ -843,11 +869,16 @@ def train(args) -> None:
     keep(0)
     step = 0
     opt.zero_grad(set_to_none=True)
+    # time spent waiting for the data loaders, per log interval: the rest is the
+    # model (and validation); near the interval's length means data-bound
+    waits = LoaderWait()
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
+        waits.got()
         b, mu, var = _forward(net, b, device, amp_dtype, region)
         loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
         scaler.scale(loss / args.accum).backward()
         if micro % args.accum:
+            waits.idle()
             continue
         step = micro // args.accum
         scaler.unscale_(opt)
@@ -865,8 +896,10 @@ def train(args) -> None:
         ema = mu_loss.item() if ema is None else 0.98 * ema + 0.02 * mu_loss.item()
         if step % args.log_every == 0 or step == 1:
             mem = f" gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if device.type == "cuda" else ""
+            wait, interval = waits.report()
             print(f"step {step} mu_loss {mu_loss.item():.4f} (avg {ema:.4f}) var_loss {var_loss.item():.4f} "
-                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}", flush=True)
+                  f"lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f} s{mem}; data wait {wait:.1f} of "
+                  f"{interval:.1f} s", flush=True)
         last_step = step == args.steps or (args.max_hours and time.time() - t0 > 3600 * args.max_hours)
         if step % args.val_every == 0 or last_step:
             validate(step)
@@ -876,6 +909,7 @@ def train(args) -> None:
             keep(step)
         if last_step:
             break
+        waits.idle()
     print(f"done after {step} steps, {time.time() - t0:.0f} s; best {sel_key} {best:.5g}")
 
 
@@ -1192,6 +1226,9 @@ def add_arguments(p) -> None:
                         "(and --event_margin frames around); > 1 makes a baseline that follows the activity cost more")
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=1, help="micro-batches of --batch windows per optimizer step")
+    p.add_argument("--max_open", type=int, default=32,
+                   help="trials (with their simulation templates, about 8 MB each) each data-loader worker keeps "
+                        "open, least recently used first out; 0 = no limit")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--max_hours", type=float, default=0.0, help="stop (and validate, save) after this long; 0 = no limit")
     p.add_argument("--lr", type=float, default=2e-4)
