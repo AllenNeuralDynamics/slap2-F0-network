@@ -1866,7 +1866,7 @@ Each cell gives 48 / 192 windows per mouse:
 In the other five held-out mice the MSE is 0.4–0.9× the mean image's and the bias about 0.
 
 **Data used:**
-- one trial per path of each of the 17 phase-1 sessions (`tools/lowcount_charac.py`);
+- one trial per path of each of the 17 phase-1 sessions (`tools/lowcount_charac.py`; stats through `load_stats`, so the stale one-channel sidecars of 803496 and 804730 are recomputed);
 - the evaluation CSVs;
 - network probes run locally on the RTX 4060 Ti (`tools/lowcount_probe.py`).
 
@@ -1878,14 +1878,14 @@ In the other five held-out mice the MSE is 0.4–0.9× the mean image's and the 
 | **876767** | 0.47 / 0.17 / 0.92 | 12% | 4.3–5.0 | +9.5 / +4.0 / +7.4% | +0.12 / +0.03 / +0.13 | +0.032 |
 | **878030** | 0.24 / 0.17 / 0.87 | 36% | 4.2–5.0 | +10.7 / +5.7 / +4.6% | +0.09 / +0.04 / +0.07 | +0.062 |
 | 794237 | 1.92 / 0.99 / 4.90 | 0% | 2.0–2.1 | +1.6 / +1.3 / +0.7% | +0.04 / +0.02 / +0.03 | +0.012 |
-| 804730 | 2.47 / 1.76 / 3.44 | 0% | 1.3–2.1 | +1.3 / +0.9 / +1.8% | +0.04 / +0.02 / +0.06 | +0.017 |
+| 804730 | 1.74 / 1.34 / 3.23 | 0% | 1.6–2.0 | +1.3 / +0.9 / +1.8% | +0.04 / +0.02 / +0.06 | +0.017 |
 | 810196 | 1.64 / 0.98 / 2.51 | 1% | 1.9–2.6 | +2.4 / +1.5 / +3.2% | +0.05 / +0.03 / +0.09 | +0.014 |
 | 829704 | 1.07 / 0.52 / 2.18 | 1% | 2.6–3.0 | +1.8 / +0.4 / +0.9% | +0.03 / +0.01 / +0.03 | +0.007 |
 | 834788 | 1.01 / 0.56 / 4.80 | 3% | 2.7–2.8 | +2.7 / +1.4 / +0.7% | +0.05 / +0.02 / +0.03 | +0.013 |
 
 - **The three mice are the dimmest.** They have under 0.6 photons per frame at footprint support, 10–36% zero frames there, and trial skew 3.6–5.0.
   - Every other held-out mouse has at least 1.0 photons per frame at support, and skew of at most 3.0.
-  - S0's training mice: 885233 0.41–0.49, 780125 0.65–0.72, 803121 0.89–1.04. S2/S3 add 867430 (0.21–0.55) and five mice at 0.5–4.
+  - S0's training mice: 885233 0.41–0.49, 780125 0.65–0.72, 803121 0.89–1.04. S2/S3 add 867430 (0.21–0.55) and five mice at 0.5–2.4.
 - **Every class is low, by 4–11% of its baseline.**
   - Labeled pixels outside the support are the brightest structures, at 2–5× the trial scale (support 1.0–1.4×).
   - So the same relative bias is largest there in scaled units, and the mean image is most accurate there. That is why the labeled class stood out.
