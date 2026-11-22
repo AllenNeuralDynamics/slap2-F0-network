@@ -51,7 +51,11 @@ At the output frame only, the fusion layers also get blind long-window
 statistics of the movie: its mean and variance over gap < |dt| <= gap +
 window_reach. They are computed inside the model (so the blind-spot test
 covers them) and are not fed to the branches, because a context frame's
-window would reach into the hidden frames.
+window would reach into the hidden frames. With ``edge_features`` they also
+get the statistics per side (how much of the past and of the future window
+has data, and each side's mean), and the baseline's and noise's corrections
+get terms gated by the share of each side that is missing: near a trial edge
+one side is empty (``ModelConfig.edge_features``).
 
 Outputs, in units of the trial scale (see ``io.TrialFile.scale``):
     mu      baseline = base * exp(correction), where base = mean image +
@@ -77,6 +81,7 @@ import torch.utils.checkpoint
 
 N_INPUTS = 5  # movie, valid flag, mean image, variance factor, log variance ratio
 N_FEATS = 6  # output-frame features for the fusion layers (SlabBlindSpotNet._features)
+N_EDGE = 6  # edge features (edge_features)
 
 
 @dataclass
@@ -108,6 +113,22 @@ class ModelConfig:
     # box model only: also the local displacement and blur seen in the surround
     # (``motion_features``), as the change they make at the pixel, per pool scale
     motion_features: bool = False
+    # edge features (``edge_features``): the blind window statistics per side
+    # (past, future) instead of pooled only: the share of each side with data,
+    # on a log scale and within edge_near frames of the gap, and each side's
+    # mean relative to the mean image; and edge-gated corrections: the
+    # baseline's and the noise's log corrections get g_past * e_past + g_future *
+    # e_future, where g is the share of that side's window without data (0 in a
+    # trial's middle) and e a head on the fused features (zero at the start, so
+    # a checkpoint without them warm-starts exactly). Near a trial edge (or a
+    # run of discarded frames) one side is empty; the pooled statistics say only
+    # how much of the window is missing, not which side or how near, and a
+    # fusion that adds up what each side saw sets the baseline 2-4% too high at
+    # source pixels when the future is missing (docs/plan.md, 2026-11-22)
+    edge_features: bool = False
+    # used as min(edge_near, window_reach): the near span then lies within the
+    # window statistics' span, which every tile's halo covers
+    edge_near: int = 16
     # variance-factor input: "trial" = log of the factor relative to its median
     # over the trial's imaged pixels (``io.TrialFile``), the same in every
     # window; "window" (checkpoints up to v6) = relative to the median over the
@@ -173,6 +194,19 @@ class ModelConfig:
     @property
     def n_motion(self) -> int:
         return 2 * len(self.pool_scales) + 4 if self.box and self.motion_features else 0
+
+    @property
+    def n_edge(self) -> int:
+        return N_EDGE if self.edge_features else 0
+
+    def fusion_inputs(self) -> list[tuple[str, int]]:
+        """The first fusion layer's input channels, in order: (name, count),
+        counts of 0 for parts the model does not have. ``train.load_compatible``
+        matches a checkpoint's fusion columns to a grown model by these names."""
+        box = self.box
+        return [("past", self.width), ("future", self.width), ("window", N_FEATS),
+                ("half_planes", 4 * self.hp_width if box else 0), ("pooled", self.n_pool),
+                ("motion", self.n_motion), ("edge", self.n_edge)]
 
 
 def _residual(x: torch.Tensor, alpha: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
@@ -458,6 +492,48 @@ def blind_window_stats(m: torch.Tensor, v: torch.Tensor, gap: int, reach: int):
     return mean, var, n
 
 
+def edge_features(m: torch.Tensor, v: torch.Tensor, mi: torch.Tensor, gap: int, reach: int, near: int,
+                  frames: tuple[int, int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """The blind window statistics per side, for ``ModelConfig.edge_features``.
+
+    m, v: (B, T, H, W) movie (0 where invalid) and validity; mi (B, H, W) the
+    mean image. Over the past (t - gap - reach <= t' < t - gap) and the future
+    (t + gap < t' <= t + gap + reach) frames: log1p(count) / log1p(reach) and
+    the count within ``near`` frames of the gap, / near (both 1 in a trial's
+    middle, 0 where that side is empty; near is capped at reach, so a frame
+    whose window statistics are complete has complete near counts too, at a
+    tile's edge as well), and log(side mean / mean image),
+    clamped to +-3 (0 where empty). Returns the features (B, 6, T', H, W) for
+    the output frames ``frames`` = (t0, t1) (default all), past and future of
+    each, and the gates (B, 2, T', H, W): the share of the past and of the
+    future side without data, 1 - count / reach (0 in a trial's middle, 1
+    where that side is empty). Frames within the gap are never used."""
+    T = m.shape[1]
+    near = min(near, reach)
+    m, v = m.float(), v.float()
+    # the near counts get a cumulative sum of their own: sharing one, the gradient of the hidden
+    # frames' validity would be a float rounding residue instead of exactly 0 (test_blindspot)
+    cm, cv, cn = (F.pad(x.cumsum(1), (0, 0, 0, 0, 1, 0)) for x in (m * v, v, v))
+    t = torch.arange(*(frames or (0, T)), device=m.device)
+
+    def span(c, a, b):  # sums over frames [a, b), clamped to the window
+        a, b = a.clamp(0, T), b.clamp(0, T)
+        return c[:, b] - c[:, a]
+
+    pa, pb, fa, fb = t - gap - reach, t - gap, t + gap + 1, t + gap + reach + 1
+    sp, np_, sf, nf = span(cm, pa, pb), span(cv, pa, pb), span(cm, fa, fb), span(cv, fa, fb)
+    kp, kf = span(cn, t - gap - near, t - gap), span(cn, t + gap + 1, t + gap + near + 1)
+    lmi = torch.log(mi.float().clamp_min(1e-3))[:, None]
+
+    def rel(s, n):  # log(side mean / mean image), 0 where the side is empty
+        r = torch.log((s / n.clamp_min(1)).clamp_min(1e-3)) - lmi
+        return torch.where(n > 0, r.clamp(-3, 3), torch.zeros_like(s))
+
+    lr = math.log1p(reach)
+    feats = [torch.log1p(np_) / lr, torch.log1p(nf) / lr, kp / near, kf / near, rel(sp, np_), rel(sf, nf)]
+    return torch.stack(feats, 1), torch.stack([1 - np_ / reach, 1 - nf / reach], 1)
+
+
 class SlabBlindSpotNet(nn.Module):
     """Past and future causal branches fused pointwise; see the module docstring."""
 
@@ -469,14 +545,17 @@ class SlabBlindSpotNet(nn.Module):
         self.future = CausalBranch(self.cfg)
         self.hp = HalfPlaneBranch(self.cfg) if self.cfg.box and self.cfg.hp_shared else None
         self.hp_views = nn.ModuleList([HalfPlaneBranch(self.cfg) for _ in range(4)])             if self.cfg.box and not self.cfg.hp_shared else None
-        n_in = 2 * w + N_FEATS + (4 * self.cfg.hp_width + self.cfg.n_pool + self.cfg.n_motion if self.cfg.box else 0)
+        n_in = sum(n for _, n in self.cfg.fusion_inputs())  # concatenated in this order in ``head``
         self.fuse = nn.Sequential(nn.Conv3d(n_in, 2 * w, 1), nn.GELU(), nn.Conv3d(2 * w, w, 1), nn.GELU())
         self.head_mu = nn.Conv3d(w, 1, 1)
         self.head_mix = nn.Conv3d(w, 1, 1)
         self.head_var = nn.Conv3d(w, 1, 1)
-        for head in (self.head_mu, self.head_mix, self.head_var):
-            nn.init.zeros_(head.weight)
-            nn.init.zeros_(head.bias)
+        # edge-gated corrections (edge_features): mu and var, for a missing past and a missing future
+        self.head_edge = nn.Conv3d(w, 4, 1) if self.cfg.edge_features else None
+        for head in (self.head_mu, self.head_mix, self.head_var, self.head_edge):
+            if head is not None:
+                nn.init.zeros_(head.weight)
+                nn.init.zeros_(head.bias)
         self.log_floor = nn.Parameter(torch.tensor(0.0))  # variance floor, counts^2
 
     def _features(self, x, wm, wv, n, gs):
@@ -515,6 +594,17 @@ class SlabBlindSpotNet(nn.Module):
         pointwise layers then run only there). Returns mu and var, each (B, T',
         H', W'), in units of the trial scale, and with aux=True a dict with the
         window mean, the base and the mix."""
+        return self.head(self.parts(x, scale, gain, region), aux)
+
+    def parts(self, x: torch.Tensor, scale: torch.Tensor | None = None, gain: torch.Tensor | None = None,
+              region: tuple[slice, slice, slice] | None = None) -> dict:
+        """Everything the pointwise fusion layers get, on the region: the past
+        and future branches (hp, hf), the window statistics (wm, wv, n), the
+        same-frame context (extra: half-planes, pooled and motion features),
+        the per-side statistics and edge gates (edge, gates; None without
+        ``edge_features``), the inputs at the output voxels (x), and the scale
+        and gain. ``head`` turns them into mu and var; split so that tools can
+        swap one path between two windows (tools/edge_windows.py)."""
         B = x.shape[0]
         s = torch.ones(B, device=x.device) if scale is None else scale.to(x.device).float()
         g = torch.full((B,), 10.0, device=x.device) if gain is None else gain.to(x.device).float()
@@ -538,25 +628,45 @@ class SlabBlindSpotNet(nn.Module):
             hh = self._half_planes(x[:, :, a:b])[:, :, t0 - a: t1 - a]
             pf = pooled_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales)
             extra = [hh, pf]
-            if self.cfg.motion_features:  # last, so a checkpoint without them warm-starts exactly (load_compatible)
+            if self.cfg.motion_features:  # order: ModelConfig.fusion_inputs
                 extra.append(motion_features(x, t0, t1, self.cfg.box_radius, self.cfg.pool_scales))
             if region is not None:
                 sp = (slice(None), slice(None), slice(None)) + tuple(region[1:])
                 extra = [e[sp] for e in extra]
             extra = [e.to(hh.dtype) for e in extra]
+        edge = gates = None
+        if self.cfg.edge_features:
+            sp = (slice(None),) * 3 + (() if region is None else tuple(region[1:]))  # pixels of the region only
+            xs = x[sp]
+            tr = None if region is None else region[0].indices(T)[:2]
+            edge, gates = edge_features(xs[:, 0], xs[:, 1], xs[:, 2, 0], self.cfg.gap, self.cfg.window_reach,
+                                        self.cfg.edge_near, tr)
         if region is not None:
             x = x[sel]
             wm, wv, n = (a[(slice(None),) + tuple(region)] for a in (wm, wv, n))
+        return {"hp": hp, "hf": hf, "wm": wm, "wv": wv, "n": n, "extra": extra, "edge": edge, "gates": gates,
+                "x": x, "s": s, "g": g}
+
+    def head(self, p: dict, aux: bool = False):
+        """mu and var (and with aux the window mean, base and mix) from ``parts``."""
+        hp, hf, wm, wv, n, extra, x, s, g = (p[k] for k in ("hp", "hf", "wm", "wv", "n", "extra", "x", "s", "g"))
         gs = (g / s).view(-1, 1, 1, 1)  # gain in scale units: var = gs * mu
         feats = self._features(x.float(), wm, wv, n, gs).to(hp.dtype)
-        h = self.fuse(torch.cat([hp, hf, feats] + [e.to(hp.dtype) for e in extra], 1))
+        edge = [] if p.get("edge") is None else [p["edge"]]
+        # in the order of ModelConfig.fusion_inputs (load_compatible matches columns by it)
+        h = self.fuse(torch.cat([hp, hf, feats] + [e.to(hp.dtype) for e in extra + edge], 1))
         mi = x[:, 2].float()
         wm = torch.where(n > 0, wm, mi)
         mix = torch.tanh(self.head_mix(h)[:, 0].float())
         base = (mi + mix * (wm - mi)).clamp_min(1e-4)
-        mu = base * torch.exp(soft_cap(self.head_mu(h)[:, 0].float(), self.cfg.max_log_correction))
+        c_mu, c_var = self.head_mu(h)[:, 0].float(), self.head_var(h)[:, 0].float()
+        if self.head_edge is not None:  # corrections for the share of each side's window without data
+            e, gt = self.head_edge(h).float(), p["gates"].float()
+            c_mu = c_mu + gt[:, 0] * e[:, 0] + gt[:, 1] * e[:, 1]
+            c_var = c_var + gt[:, 0] * e[:, 2] + gt[:, 1] * e[:, 3]
+        mu = base * torch.exp(soft_cap(c_mu, self.cfg.max_log_correction))
         var = (gs * mu + self.log_floor.exp() / s.view(-1, 1, 1, 1) ** 2) * \
-            torch.exp(soft_cap(self.head_var(h)[:, 0].float(), self.cfg.max_log_var))
+            torch.exp(soft_cap(c_var, self.cfg.max_log_var))
         if aux:
             return mu, var, {"window_mean": wm, "base": base, "mix": mix}
         return mu, var

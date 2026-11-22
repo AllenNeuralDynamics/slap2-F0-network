@@ -277,7 +277,9 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
     w_unfitted > 0 or in a trial without sources, such as a GFP control). For
     real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
-    MSE is the baseline error itself. bias_* = mean(target - baseline).
+    MSE is the baseline error itself. bias_* = mean(target - baseline);
+    mean_target per class, so bias / mean_target is the bias as a share of the
+    baseline (activity-free simulations of dim sessions: 5-10% at every class).
     sup_leak_*: the slope of (baseline - target) on the activity at support
     pixels, 8-frame means: how much of the activity the baseline follows (0 =
     none; for real windows, whose target still holds the activity GIAnT did
@@ -339,6 +341,7 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
             if n == 0:
                 continue
             tot[cname + "n"] += n
+            tot[cname + "target"] += (cw * y).sum().item()  # for bias relative to the class's baseline
             cw8 = cw * w8
             tot[cname + "n8"] += cw8.sum().item()
             for pname, p in preds.items():
@@ -385,6 +388,9 @@ def evaluate_totals(tot: dict) -> dict[str, float]:
             cname = k.split("mse")[0] if "mse" in k else k.split("bias_")[0]
             denom = tot.get(cname + ("n8" if "mse8_" in k else "n"), 0.0)
             out[k] = v / max(denom, 1.0)
+    for cname in ("", "sup_", "bg_", "lab_"):  # mean target: bias_* / mean_target is the bias as a share of it
+        if tot.get(cname + "n", 0.0) > 0:
+            out[f"{cname}mean_target"] = tot[cname + "target"] / tot[cname + "n"]
     return out
 
 
@@ -454,6 +460,7 @@ def _model_config(args) -> ModelConfig:
     mcfg.varfac_norm = args.varfac_norm
     mcfg.hp_shared = args.hp_shared
     mcfg.motion_features = getattr(args, "motion_features", False)
+    mcfg.edge_features = getattr(args, "edge_features", False)
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -490,16 +497,43 @@ def adapt_varfac_input(state: dict, width: int) -> dict:
     return state
 
 
-def load_compatible(model: torch.nn.Module, state: dict) -> str:
-    """Load a checkpoint into a model that may have more parts (e.g. a slab
-    model's weights into a box model): matching tensors are copied; a tensor
-    whose input-channel axis grew (the first fusion layer, whose inputs are
-    concatenated with the new ones last) gets the old columns and zeros for
-    the new ones, so the model starts out computing what the old one did.
-    Returns a summary."""
+def fusion_columns(src: ModelConfig, dst: ModelConfig) -> list[tuple[slice, slice]]:
+    """(source columns, target columns) of the first fusion layer for each input
+    part (``ModelConfig.fusion_inputs``) the source has; the target must have
+    each with the same size."""
+    def offsets(cfg):  # name -> (first column, count)
+        out, at = {}, 0
+        for name, n in cfg.fusion_inputs():
+            out[name], at = (at, n), at + n
+        return out
+
+    s, d = offsets(src), offsets(dst)
+    pairs = []
+    for name, (a, n) in s.items():
+        if not n:
+            continue
+        b, m = d[name]
+        if m != n:
+            raise SystemExit(f"checkpoint fusion input {name} ({n} channels) does not fit the model's ({m})")
+        pairs.append((slice(a, a + n), slice(b, b + n)))
+    return pairs
+
+
+def load_compatible(model: torch.nn.Module, state: dict, src_config: dict | ModelConfig) -> str:
+    """Load a checkpoint (its weights ``state`` and config ``src_config``) into
+    a model that may have more parts (e.g. a slab model's weights into a box
+    model): matching tensors are copied; a tensor whose input-channel axis grew
+    gets the old columns and zeros for the new ones, so the model starts out
+    computing what the old one did. The first fusion layer's columns are
+    matched by input part (``ModelConfig.fusion_inputs``), whether it grew or
+    not: a new part may sit before an old one (motion or box features added to
+    a model with edge features), and a checkpoint part the model lacks is
+    refused even when the widths agree. Returns a summary."""
     own = model.state_dict()
     copied, grown, new = 0, [], []
     state = dict(state)
+    if not isinstance(src_config, ModelConfig):
+        src_config = config_from_dict(src_config)
     if any(k.startswith("hp_views.") for k in own) and any(k.startswith("hp.") for k in state):
         for k in own:  # a shared half-plane trunk (hp.*) starts every per-direction trunk (hp_views.<k>.*)
             src = "hp." + k.split(".", 2)[2] if k.startswith("hp_views.") else None
@@ -511,10 +545,23 @@ def load_compatible(model: torch.nn.Module, state: dict) -> str:
             new.append(k)
             continue
         w = state[k]
-        if w.shape == v.shape:
+        fits = w.dim() == v.dim() >= 2 and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:]
+        if k == "fuse.0.weight" and fits:  # by input part, also at equal width
+            pairs = fusion_columns(src_config, model.cfg)
+            if sum(s.stop - s.start for s, _ in pairs) != w.shape[1]:
+                raise SystemExit(f"checkpoint tensor {k} {tuple(w.shape)} does not match its config")
+            nv = torch.zeros_like(v)
+            for s, d in pairs:
+                nv[:, d] = w[:, s]
+            own[k] = nv
+            if w.shape == v.shape:
+                copied += 1
+            else:
+                grown.append(k)
+        elif w.shape == v.shape:
             own[k] = w
             copied += 1
-        elif w.dim() == v.dim() and w.shape[0] == v.shape[0] and w.shape[2:] == v.shape[2:] and w.shape[1] < v.shape[1]:
+        elif fits and w.shape[1] < v.shape[1]:
             nv = torch.zeros_like(v)
             nv[:, : w.shape[1]] = w
             own[k] = nv
@@ -554,9 +601,11 @@ MOTION_SIM = dict(motion_sd_px=(0.0, 0.2), motion_tau_frames=(0.5, 40.0), focus_
 
 def eval_sim(kind: str, photon_zeros: bool = False, pz_legacy: bool = False) -> SimConfig | None:
     """The simulation of an evaluation kind (real: None). A kind may end in
-    "pz" (realistic low counts) and/or "shuf" (shuffled activity timing, no
-    stimulus rhythm), e.g. "fastpz", "fastpzshuf"; photon_zeros adds "pz"; pz_legacy
-    draws the low counts as up to 2026-11-21 (SimConfig.pz_legacy)."""
+    "pz" (realistic low counts), "shuf" (shuffled activity timing, no
+    stimulus rhythm) and/or "dim" (a third of the photons: the template's gain
+    times 3, SimConfig.photon_gain), e.g. "fastpz", "fastpzshuf", "freedim";
+    photon_zeros adds "pz"; pz_legacy draws the low counts as up to 2026-11-21
+    (SimConfig.pz_legacy)."""
     base = _base_kind(kind)
     cfg = {"sim": SimConfig(), "free": SimConfig(silent_trial=1.0), "fast": SimConfig(**FAST_SIM),
            "dark": SimConfig(**FAST_SIM, dark_frac=(0.3, 0.3)),
@@ -565,7 +614,15 @@ def eval_sim(kind: str, photon_zeros: bool = False, pz_legacy: bool = False) -> 
         cfg.photon_zeros = photon_zeros or "pz" in kind[len(base):]
         cfg.pz_legacy = pz_legacy
         cfg.shuffle_prob = 1.0 if "shuf" in kind[len(base):] else 0.0
+        if "dim" in kind[len(base):]:
+            cfg.photon_gain = (DIM_GAIN, DIM_GAIN)
     return cfg
+
+
+# the "dim" evaluation kinds: the template's photons divided by this, which takes
+# the phase-1 mice with 1-2 photons per frame at footprint support to the 0.3-0.7
+# of 776270, 876767 and 878030 (docs/plan.md, "Low photon counts")
+DIM_GAIN = 3.0
 
 
 def _base_kind(kind: str) -> str:
@@ -583,13 +640,15 @@ EVAL_SEEDS = {"real": 10_000, "sim": 20_000, "free": 40_000, "fast": 50_000, "da
 def sim_config(args, free: bool = False) -> SimConfig:
     """Simulation settings from the arguments; free: no activity anywhere."""
     if free:
-        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy)
+        return SimConfig(silent_trial=1.0, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy,
+                         photon_gain=tuple(float(v) for v in args.photon_gain.split(",")))
     lo, hi = (float(v) for v in args.silent_frac.split(","))
     dlo, dhi = (float(v) for v in args.dark_frac.split(","))
     pair = lambda s: tuple(float(v) for v in s.split(","))  # noqa: E731
     return SimConfig(silent_trial=args.silent_trial, silent_frac=(lo, hi), fast_global_sd=args.fast_global_sd,
                      fast_field_sd=args.fast_field_sd, n_fast_fields=args.n_fast_fields, dark_frac=(dlo, dhi),
                      shuffle_prob=args.shuffle_prob, photon_zeros=args.photon_zeros, pz_legacy=args.pz_legacy,
+                     photon_gain=pair(args.photon_gain),
                      motion_sd_px=pair(args.motion_sd), motion_tau_frames=pair(args.motion_tau),
                      focus_sd_px2=pair(args.focus_sd), local_sd_px=pair(args.local_sd))
 
@@ -658,7 +717,7 @@ def train(args) -> None:
         if config_from_dict(ck["config"]).varfac_norm == "window" and mcfg.varfac_norm == "trial":
             state = adapt_varfac_input(state, mcfg.width)
             print("variance-factor weights folded from the window-median input to the trial-median input")
-        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
+        print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state, ck['config'])}")
     n_params = sum(p.numel() for p in model.parameters())
     net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
     anchor =[p.detach().clone() for p in model.parameters()] if args.l2sp else None
@@ -965,7 +1024,9 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--out", default="results/eval")
     p.add_argument("--kinds", default="real,sim",
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
-                        "shared brightness changes), motion (fast plus residual motion, focus and local motion)")
+                        "shared brightness changes), motion (fast plus residual motion, focus and local motion); "
+                        "suffixes pz (realistic low counts), shuf (shuffled timing), dim (a third of the photons), "
+                        "e.g. freedim")
     p.add_argument("--windows", type=int, default=192, help="windows per session and data kind")
     p.add_argument("--real_edge_s", type=float, default=None,
                    help="real windows: no loss within this many seconds of a trial edge (default: the checkpoint's, "
@@ -1192,6 +1253,9 @@ def add_arguments(p) -> None:
     p.add_argument("--motion_features", action="store_true",
                    help="box model: also the local displacement and blur seen in the surround, as the change they "
                         "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
+    p.add_argument("--edge_features", action="store_true",
+                   help="per-side window statistics into the fusion and edge-gated corrections of the baseline and "
+                        "noise (ModelConfig.edge_features); starts out exactly as the --init checkpoint")
     p.add_argument("--hp_shared", action="store_true",
                    help="one half-plane trunk for all four directions (v6) instead of one per direction")
     p.add_argument("--photon_zeros", action="store_true",
@@ -1202,6 +1266,9 @@ def add_arguments(p) -> None:
                         "had about half the measured correlations and too much skew (SimConfig.pz_legacy)")
     p.add_argument("--shuffle_prob", type=float, default=0.0,
                    help="share of simulated trials with shuffled activity timing (no stimulus rhythm)")
+    p.add_argument("--photon_gain", default="1,1",
+                   help="lo,hi: simulated windows multiply the template's gain (counts per photon) by a factor "
+                        "log-uniform in this range, the noise of a dimmer session (1,1 = off; SimConfig.photon_gain)")
     p.add_argument("--val_fraction", type=float, default=0.2)
     p.add_argument("--val_windows", type=int, default=256)
     p.add_argument("--val_every", type=int, default=1000)

@@ -1565,6 +1565,80 @@ Checks:
 
 **No retraining for this.** The next training run with `--photon_zeros` gets the new noise, in training and in its validation simulations. Runs compared like for like with S0–S3 (seed repeats) should pass `--pz_legacy`. The fastpz and motionpz evaluation kinds also change, and `--pz_legacy` re-scores them as before.
 
+## Low-count simulator: skew, and artifacts where pixels leave the field (2026-11-21)
+
+**Skew: the values above zero were too light-tailed.** With `--photon_zeros` the simulated skew was 8–10% below the template's.
+
+- **Cause:** on real dim background pixels the values above zero (over their pixel's mean) follow a generalized gamma, θ·G^s with G ~ Gamma(k), at s = 1.25–1.5. Quantiles from 5% to 99.9% agree in all five viewer sessions and every zero-share bin. The gamma (s = 1) has a lighter tail and more values near zero: with the real moments it predicts a median pixel skew of 4.55, against 4.78 measured (878030).
+- **Not the cause:**
+  - the zero share: 1–2 points high in the simulation, which lowers the skew by under 1%;
+  - the skew factor q: `photon_zeros` does not use it;
+  - the copula: each voxel's marginal is exact. Correlated frames bias the measured skew down by about 5%, in real and simulated trials alike.
+
+**Fix:** `SimConfig.pz_shape` = 1.4 (1 = the gamma).
+
+- k comes from the positive part's CV through a table per s, θ from its mean. The gamma quantile table is raised to s.
+- Mean, variance and zero share stay exact.
+- `pz_kernels` derives the latent correlations from the new mapping.
+
+Whole simulated trials (`simcheck` statistics):
+
+| template | | skew | ρ next row | ρ next column | ρ 1 frame | ρ 2 frames | F64 | zeros | gain |
+|---|---|---|---|---|---|---|---|---|---|
+| 878030 | real | 4.80 | 0.233 | 0.386 | 0.602 | 0.245 | 2.67 | 0.424 | 12.36 |
+| | gamma | 4.41 | 0.230 | 0.384 | 0.601 | 0.243 | 2.48 | 0.443 | 12.35 |
+| | s = 1.4 | **4.79** | 0.231 | 0.385 | 0.601 | 0.242 | 2.49 | 0.443 | 12.20 |
+| 780125 | real | 3.41 | 0.269 | 0.358 | 0.680 | 0.331 | 3.35 | 0.159 | 7.97 |
+| | gamma | 3.09 | 0.270 | 0.359 | 0.686 | 0.330 | 3.50 | 0.168 | 7.94 |
+| | s = 1.4 | **3.46** | 0.270 | 0.360 | 0.685 | 0.330 | 3.57 | 0.168 | 7.93 |
+| 885233 | real | 3.60 | 0.243 | 0.377 | 0.667 | 0.315 | 3.06 | 0.220 | 9.79 |
+| | gamma | 3.26 | 0.244 | 0.378 | 0.672 | 0.316 | 2.89 | 0.236 | 9.78 |
+| | s = 1.4 | **3.62** | 0.244 | 0.379 | 0.672 | 0.317 | 2.96 | 0.236 | 9.71 |
+
+- **Unchanged:** the zero share stays 1–2 points high and F64 within 7%. The gain reads up to 1.3% lower with the heavier tail.
+- **Checks:** default, fast-brightness, motion and `pz_legacy` windows are bit-identical; `pz_shape=1` is bit-identical to the gamma draw.
+- **Tests:**
+  - the quantiles agree with scipy's `gengamma`;
+  - a template whose positive part has s = 1.4 is reproduced within 2% of its skew, while the gamma is 10–11% low, as on the real templates.
+- **No retraining for this:** as with 82860cb, the next `--photon_zeros` run gets it.
+
+**Fit artifacts where pixels leave the imaged field.** The artifact mask missed four pixels on 804730 path 2, trial 38 (column 959, rows 282–285, next to the cluster).
+
+- **Why:** they are missing from the movie in 25% of the frames, because the field's right edge shifts.
+  - In exactly those frames GIAnT's activity reaches 1,000–1,890 counts, against a movie maximum of 80–185. GIAnT's fit is unconstrained there: SILo fills samples that have no data.
+  - The activity decays over 4–5 frames once the movie returns: 228 counts on a movie of 20, so real targets of −200 with full weight.
+  - Statistics skip frames without movie, so no mean, RMS or variance rule sees these pixels: mean activity 0.8–1.5 counts, residual variance 1.2–1.35× the movie's.
+  - The simulator read the activity in every frame and put the spikes into its movie.
+- **Missing frames are common otherwise, and harmless.** 8–29% of valid pixels miss some frames, mostly at the edges. Their activity there stays below the movie's maximum: at most 0.8×, and 99% below 0.35×, in nine trials of six sessions.
+- **Activity far above the movie in frames that have movie** (the obvious per-frame rule) flags nothing beyond the existing mask in nine trials. The largest excess outside the mask is 5 SD: the decay above.
+
+**Fix** (`stats.unfit_pixels`; no version bump, so no sidecar is recomputed):
+
+- **With every sidecar:** after the mean rule and its 1-px dilation, the mask grows by up to 2 px through pixels that miss frames (`n_valid` below the trial's most complete pixel) and carry activity. Trials without a mean-rule artifact are unchanged.
+- **With new stats:**
+  - `trial_stats` also stores `movie_max` and `act_nan`, the largest activity in kept frames without movie.
+  - Activity in a missing frame above twice the movie's maximum is an artifact wherever it is.
+  - Older sidecars lack the two maps and are used as they are. A sidecar or overlay that has them comes first.
+
+Pixels in the mask ("new stats" = recomputed with the two maps):
+
+| trial | mask before | existing sidecars (growth) | new stats (growth + per-frame rule) |
+|---|---|---|---|
+| 804730 path 2, trial 27 | 105 | 127 | 136 |
+| 804730 path 2, trial 33 | 135 | 156 | 162 |
+| 804730 path 2, trial 38 | 106 | 125 | 125 |
+| 804730 path 2, trial 42 | 113 | 119 | 119 |
+| 780125, 803121, 847983, 878030, 885233 (one trial each) | 0 | 0 | 0 |
+
+- **The flagged pixels:** column 959, rows 281–287: the four and the weaker pixels around them, in trials 38 and 27 alike.
+- **No false positives:** on pixels that miss frames outside artifacts, activity in missing frames reaches at most 0.53× the movie's maximum in 803121, the trial with the most motion and 1,203 such pixels, against the threshold of 2.
+- **The cause** (SILo's filled samples) belongs to GIAnT; a fix there is in progress (GIAnT-MATLAB branch `fit-artifact`).
+
+**Decided (2026-11-22): existing data stays as it is.** The per-frame rule applies only to stats computed from now on. The growth rule already covers the 804730 case on the existing sidecars and on the `f0p1_sidecars` overlay, which has `n_valid` but not the two maps.
+
+- If a session needs the per-frame rule later, run `slap2-f0 stats ROOT --out DIR`. It recomputes into the overlay folder every trial whose sidecar or cached stats lack the two maps, and a rerun resumes from that folder. Before the Copilot review fix (8b7f588), `--out` reused such sidecars and wrote nothing.
+- A version bump would recompute all ~2,800 trials. A pass that computes only the two maps still reads the whole trial: half the cost of the full statistics (37 s against 74 s for an 878030 trial).
+
 ## Experiments 1 and 2: held-out evaluation results (2026-11-21)
 
 **Runs.** All six evaluation runs finished: 7.3 h per fine-tuning run, 6.1 h per pretraining run. Each scored every kept checkpoint of S0–S3 on 192 windows per held-out mouse and kind.
@@ -1708,6 +1782,30 @@ Each cell gives 48 / 192 windows per mouse:
 **Before the next training:**
 - Merge main into the GPU capsule. It needs 8bc88b6 (no simulated activity at GIAnT fit artifacts) and 82860cb (realistic low counts).
 - Change selection as Experiment 2 suggests: 3–4 validation mice at 48 windows each, no labeled-pixel term, simulated windows in fine-tuning selection.
+
+**Results (2026-11-22): 20 of 23 sessions exported, 3 rerunning.**
+- **Out of memory in SILo's localization (4 sessions):**
+  - 796630 and 801381 (2025-09-26) passed with `--n_workers 6`, and 828409_2025-11-20 with 2 (9.6 h).
+  - Cause: SILo sized its pool from each path's first trial, which is often partial. 828409_2025-11-20's was a few frames long, so SILo estimated 1.2 GB per trial against at least 20 GB used. GIAnT-MATLAB PR #51 sizes the pool for the largest trial.
+- **Out of memory in the exporter (3 sessions):** 787725_2025-02-26, 776266_2025-01-09 and 803121_2025-11-05.
+  - They were killed after GIAnT had finished both paths: memory stood at 140–170 GB when the exporter opened its 8-worker pool, and peaked at 180–200 GB of 246.
+  - Rerunning in full with `--export_workers 4`, since a run cannot resume from GIAnT's outputs. 787725 is a new mouse with no other session.
+- **QC against phase 1** (per-path medians of the exporter's calibration):
+
+  | | phase 1 (34 paths, 1,428 trials) | phase 2 (40 paths, 1,598 trials) |
+  |---|---|---|
+  | activity gain | 0.62 (0.50–0.86) | 0.66 (0.50–0.86) |
+  | peak slope | 1.09 (0.99–1.34) | 1.03 (0.69–1.35) |
+  | blur | 0 (0–0.75 px) | 0 (0–1.5 px) |
+  | event residual | 0.13 (−0.01 to 0.32) | 0.12 (0 to 0.32) |
+
+- **Trials where GIAnT's activity does not match the movie:** gain at its lower bound (0.50), blur at its upper bound (1.5 px), peak correlation 0.03–0.18, and event residuals down to −1.5 (activity above the events).
+  - 780125_2025-03-18 path 1, 18 of 30 trials (2–18, 20, 21; mostly the first ones), and phase 1's 867430_2026-06-16 path 2, 12 trials (30 onwards). S0–S3 trained on the latter.
+  - Their training targets (movie minus activity) are too low wherever activity is overestimated.
+  - Trials where only the gain hits its bound and the correlation stays normal (about 0.37: 803121_2025-10-29, 804733_2025-07-25 and 885234 path 2) look fine.
+  - `--exclude` works per session only, so it cannot leave out these trials alone.
+- **Short paths:** 801381_2025-09-26 path 2 (12 of 32 trials), 838410_2026-03-18 path 2 (14 of 49), 801381_2025-05-29 path 2 (30 of 49). The exporter recorded no errors; it skips trials for which GIAnT produced no frames.
+- **One-channel sessions:** 804733's exports keep the channel axis (mean image 1 × H × W, or 2 × H × W in its two-channel session). Their sidecars are therefore valid and are not recomputed.
 
 ## GPU machine: re-evaluation (2026-11-21)
 
@@ -1856,6 +1954,241 @@ Each cell gives 48 / 192 windows per mouse:
   - Next runs attach it and pass `--sidecars /root/capsule/data/f0p1_sidecars`. The session folders sit at the asset's root.
   - Checked: its sidecars all have `mean_image_axes`. Two 804730 trials computed locally with today's code give identical stats, and trials without a sidecar of their own load from the overlay without recomputing.
   - The export-time sidecars of these sessions differ, as expected, because they read only the mean image's first row: they lack `mean_image_axes`, and gain, noise correlations, activity trace and valid-pixel counts differ (movie and residual moments are identical).
+
+## Low photon counts: the baseline sits low (2026-11-21)
+
+**The finding (held-out evaluation, Experiment 1).** In activity-free simulations (`free`) of 776270, 876767 and 878030, the S0–S3 networks set the baseline too low at labeled pixels outside the footprint support:
+- bias +0.15 to +0.28 (target − net, scaled units);
+- 8-frame MSE 1.1–2.1× the mean image's (the mean image is the true mean there), and 8–9× at S0 fine-tuning step 500.
+
+In the other five held-out mice the MSE is 0.4–0.9× the mean image's and the bias about 0.
+
+**Data used:**
+- one trial per path of each of the 17 phase-1 sessions (`tools/lowcount_charac.py`; stats through `load_stats`, so the stale one-channel sidecars of 803496 and 804730 are recomputed);
+- the evaluation CSVs;
+- network probes run locally on the RTX 4060 Ti (`tools/lowcount_probe.py`).
+
+**It is not about labeled pixels: it is low photon counts.** Picked checkpoints of S0–S3 (mean of the four), activity-free windows, bias as a share of each class's baseline:
+
+| mouse | photons per frame: support / background / labeled outside | zero frames at support | trial skew | bias: support / background / labeled outside | the same, in SD of an 8-frame mean | real background: net's bias minus the mean image's |
+|---|---|---|---|---|---|---|
+| **776270** | 0.53 / 0.28 / 1.76 | 10% | 3.6–3.7 | +10.0 / +3.6 / +5.6% | +0.13 / +0.03 / +0.13 | +0.028 |
+| **876767** | 0.47 / 0.17 / 0.92 | 12% | 4.3–5.0 | +9.5 / +4.0 / +7.4% | +0.12 / +0.03 / +0.13 | +0.032 |
+| **878030** | 0.24 / 0.17 / 0.87 | 36% | 4.2–5.0 | +10.7 / +5.7 / +4.6% | +0.09 / +0.04 / +0.07 | +0.062 |
+| 794237 | 1.92 / 0.99 / 4.90 | 0% | 2.0–2.1 | +1.6 / +1.3 / +0.7% | +0.04 / +0.02 / +0.03 | +0.012 |
+| 804730 | 1.74 / 1.34 / 3.23 | 0% | 1.6–2.0 | +1.3 / +0.9 / +1.8% | +0.04 / +0.02 / +0.06 | +0.017 |
+| 810196 | 1.64 / 0.98 / 2.51 | 1% | 1.9–2.6 | +2.4 / +1.5 / +3.2% | +0.05 / +0.03 / +0.09 | +0.014 |
+| 829704 | 1.07 / 0.52 / 2.18 | 1% | 2.6–3.0 | +1.8 / +0.4 / +0.9% | +0.03 / +0.01 / +0.03 | +0.007 |
+| 834788 | 1.01 / 0.56 / 4.80 | 3% | 2.7–2.8 | +2.7 / +1.4 / +0.7% | +0.05 / +0.02 / +0.03 | +0.013 |
+
+- **The three mice are the dimmest.** They have under 0.6 photons per frame at footprint support, 10–36% zero frames there, and trial skew 3.6–5.0.
+  - Every other held-out mouse has at least 1.0 photons per frame at support, and skew of at most 3.0.
+  - S0's training mice: 885233 0.41–0.49, 780125 0.65–0.72, 803121 0.89–1.04. S2/S3 add 867430 (0.21–0.55) and five mice at 0.5–2.4.
+- **Every class is low, by 4–11% of its baseline.**
+  - Labeled pixels outside the support are the brightest structures, at 2–5× the trial scale (support 1.0–1.4×).
+  - So the same relative bias is largest there in scaled units, and the mean image is most accurate there. That is why the labeled class stood out.
+- **Real windows show it too.** On real background of 878030, which has no activity, the network sits 0.06 (about 7%) below the mean image, against 0.01–0.02 in the bright mice.
+- **In noise units it is small:**
+  - at support and labeled pixels, 0.07–0.13 SD of an 8-frame mean (bright mice 0.03–0.09);
+  - at background, at most 0.04 SD everywhere.
+  - So it matters more for ΔF/F (a baseline 5–10% low) than for SiLo's Z-scores, where it is roughly uniform in space.
+
+**Probes on activity-free simulations** (`tools/lowcount_probe.py`; windows of 64 frames × 24² px, so outputs are exact; the same windows for every checkpoint and variant). Bias as a share of the baseline, support / background / labeled outside:
+
+| 878030, 48 windows | S0 fine-tuned (step 1500) | S0 pretrained (its pick = fine-tuning step 0) | v6r pretrained (S0's start) |
+|---|---|---|---|
+| as evaluated (`free`) | +8.1 / +5.9 / +3.9% | +10.6 / +10.1 / +5.4% | +4.6 / +3.1 / +1.8% |
+| realistic low counts (legacy draw, as S0–S3 trained) | +5.6 / +2.5 / +3.1% | +7.4 / +5.4 / +4.2% | +2.7 / +0.8 / +1.1% |
+| 4× the photons (gain / 4, same skew per photon) | +1.9 / +0.8 / +0.4% | +2.8 / +2.1 / +1.0% | +0.5 / +0.2 / −0.5% |
+| flat field at the trial scale, no excess, variance factor 1 (32 windows) | +5.6 / +4.8 / +6.3% | | +3.4 / +2.7 / +4.0% |
+
+876767 is the same (`free`): +5.7 / +5.1 / +6.3% for S0 fine-tuned and +3.2 / +3.2 / +3.6% for v6r.
+
+- **Photons set it.** At 4× the photons it falls to 0.4–2%.
+- **No structure is needed.** A flat field, with no dendrites, no excess and no variance-factor input, is as low as the real geometry. The network does not key on the labeled morphology.
+- **The flat field's bias follows the photon count, in a training mouse too** (S0 fine-tuned, 32 windows; photons per frame at the trial scale in parentheses):
+  - 878030 (0.2): +4.8 to +6.3%;
+  - 776270 (0.45): +2.0 to +2.6%;
+  - 885233, a training mouse (0.4): +1.5 to +2.5%;
+  - 829704 (1.0): −0.6 to +0.2%.
+- **The evaluation kinds overstate it a little.** `free`, `sim` and `fast` have no realistic low counts, which S0–S3 trained with. With them the bias is 10–60% smaller, but it stays.
+- **It came with S0's pretraining.**
+  - v6r (no low counts, the old export) has about half of it.
+  - On the fast evaluation windows, the labeled-pixel bias in 776270 went from 0.01 (step 0) to 0.22 after 250 pretraining steps.
+  - On the training mice's own simulated windows (`tr_lab_bias_net` in training's metrics) it rose from −0.005 at step 0 to +0.09…+0.25 (S0). In S3 it swings from −0.09 to +0.42 between checkpoints.
+
+**Why.**
+- **The network subtracts activity it cannot see.**
+  - Every simulated training trial has activity at its footprints.
+  - Below about 1 photon per frame an event is no larger than a single photon event, so neither the visible frames nor the variance maps tell whether a pixel is active.
+  - The network then subtracts the activity it expects for pixels of that brightness, even on a flat field. Above about 1 photon per frame it can see that there is none.
+- **Training barely penalizes it.**
+  - The mean loss weighs each voxel by 1 / photon-noise variance, so a relative bias δ costs δ² × photons per frame.
+  - At 0.2 photons a 5% bias costs as much as a 1.6% bias at 2 photons.
+  - That also explains why the bias wanders from checkpoint to checkpoint.
+- **878030 lies below the training range.** Its background and support (0.17–0.24 photons) are dimmer than anything S0's training mice provide, and its bias is the largest.
+
+**Code (branch `labeled-bias`):**
+- **Photon-count augmentation** (`SimConfig.photon_gain`, `train --photon_gain lo,hi`; off by default, drawn last so earlier configurations draw exactly as before):
+  - Per virtual trial, the template's gain (counts per photon) is multiplied by a factor drawn log-uniform in the range. Baseline and activity in counts stay; photon noise variance, the photon event size and the counts per zero-count event grow by k.
+  - Normalized by the trial scale, this is the noise of a dimmer session, from any template.
+  - The window reports its gain, which goes to the network's gain input and the loss weights.
+  - With `photon_zeros` the copula's kernels stay the template's, so correlations come out slightly weaker where k adds zeros.
+- **"dim" evaluation kinds** (`evaluate --kinds freedim,fastdim,...`): the base kind's windows with a third of the photons. The bright held-out mice (1–2.5 photons per frame at support) then get a low-count readout at 0.3–0.8, the range of the three dim mice.
+- **`mean_target` per class in `evaluate`'s output**, so the bias can be read as a share of the baseline. `tools/heldout_eval.py bias RESULTS_DIR` prints the picked checkpoints' bias per mouse, class and simulated kind (eval.csv only).
+- **Tests:** a new `test_photon_gain` covers:
+  - off by default, with unchanged draws;
+  - noise variance k × gain × mean;
+  - more exact zeros with low counts;
+  - the dataset passing the gain on;
+  - the dim kinds using the base kind's windows.
+- The full suite passes: 77 tests before the rebase, 79 on top of 5ab43a9 (main's selection and evaluation changes).
+
+**Local fine-tuning test.**
+- **Setup:** S0's pretraining pick, fine-tuned 200 steps with S0's fine-tuning recipe; loss region 64 × 24²; one trial per path of S0's three training mice.
+- **Control arm:** activity-free windows of 878030 / 876767 / 829704, 32 each:
+
+  | | before (S0's pretraining pick) | after 200 steps (control) |
+  |---|---|---|
+  | `free`, support / background / labeled outside | +10.4 / +9.8 / +4.4%; +7.0 / +8.8 / +7.9%; +1.7 / +1.4 / +1.6% | +8.4 / +5.9 / +3.2%; +6.5 / +4.9 / +7.4%; +1.4 / −0.7 / +1.4% |
+  | real background: net below the mean image | 12.3%; 10.0%; 2.7% | 8.2%; 5.8%; 0.4% |
+
+  - Fine-tuning on real windows lowers it, mostly at background, but leaves the dim mice 3–8% low.
+- **The two candidate arms did not finish.** Silent trials (`--silent_trial 0.3`) and photon gain (`--photon_gain 1,4`) stalled on the shared machine: all 32 cores and the 8 GB GPU were taken by other sessions' jobs, and steps took 8–20 s. So they are untested.
+
+**Recommendation for the next batch: one arm against the planned control.**
+- **The arm, "lowcount":** the planned recipe plus `--photon_gain 1,4 --silent_trial 0.2`, in both pretraining and fine-tuning. These affect only the simulated windows.
+  - `--silent_trial 0.2` makes a fifth of the simulated trials activity-free. "Every pixel of this brightness carries activity" then stops being true in training, and where the network cannot see events it should subtract less.
+    - This is the part aimed at the in-distribution bias (885233: +2% at 0.4 photons).
+    - Expected cost: less subtraction at active pixels in dim sessions. Simulated support bias would go more negative, and the real support score shows the net effect.
+    - v5a's silent regions "added nothing" on bright sessions and the GFP control, where events are visible. The test here is the dim mice.
+  - `--photon_gain 1,4` takes every template down to as little as a quarter of its photons. The training mice (0.4–2 photons per frame at support) then cover 0.1–2, which includes 878030's 0.2.
+- **Evaluate with** `--kinds real,sim,free,fast,freedim,fastdim` and read `tools/heldout_eval.py bias`. Decide in this order:
+  1. Real balanced vs the mean image: no loss beyond about 0.1 point.
+  2. `free` and `freedim` bias by class: in the dim mice, and in the dim versions of the bright mice.
+  3. Real background bias of 878030 and 876767 against the mean image.
+- **If only one change fits:** `--silent_trial 0.2`. The bias exists inside the training range, and phase 2's new 2026 RCaMP3 mice (878029, 885234, 885235) probably add dim templates on their own.
+- **Selection:** the labeled-pixel term is already gone (`balanced_free` is not to be used; see the previous section). It followed this bias, not real accuracy.
+
+## Edge bias: where it comes from, and an arm to train (2026-11-22)
+
+**Question.** Every checkpoint since v6 puts the baseline 2–5% too high at footprint-support pixels in a trial's last 16 frames (sections "Bias at trial edges", v8, v9). Twice the edge windows (v9) did not help. Why, and what should the next training batch change?
+
+**Method: truncated windows** (`tools/edge_windows.py`, new).
+- **Draws.** Each draw is a new virtual trial from the training simulator: fastpz with `--pz_legacy`, as v9 and S0–S3 trained, on the four viewer trials as templates. One window per draw, with its 128-frame loss region in the trial's middle.
+- **Three predictions per window:**
+  - whole;
+  - "end": every frame after the loss region removed (NaN, as past a trial's last frame);
+  - "start": every frame before it removed.
+- **Only the truncation differs:** same noise, activity and whole-trial maps. So end − whole and start − whole measure the edge effect alone, paired, with far less noise than a bias against the truth. This is `edge_pieces.py`'s cut, on many short simulated windows instead of a few whole trials.
+- **The forward pass is split in two:** `model.parts` (everything the fusion layers get) and `model.head` (fusion layers and heads). The outputs are unchanged. This gives two read-outs:
+  - the model's own split of the baseline: mu = base × exp(correction), with base = mean image + mix × (window mean − mean image);
+  - **path swaps:** the truncated window's baseline recomputed with one input of the fusion layers taken from the whole window. The inputs swapped are the trunk branch on the missing side (the future branch at an end, the past branch at a start), the window statistics, or the same-frame context (half-planes, pooled features). Edge − swapped is that path's share.
+
+**Result 1: the network itself puts the baseline too high at a trial's end, on the data it was trained on.** Edge − whole, in % of the true baseline, by frames from the edge (v9 fine-tuned: 16 draws; S0 fine-tuned step 1500: 8 draws; ± SE over draws):
+
+| | 0–4 | 4–8 | 8–16 | 16–32 | 32–64 | 64–128 |
+|---|---|---|---|---|---|---|
+| v9 ft, support, end | +3.7 ± 1.0 | +3.6 ± 1.1 | +3.2 ± 1.0 | +2.1 ± 0.7 | +1.5 ± 0.4 | +0.6 ± 0.1 |
+| v9 ft, support, start | +0.9 ± 0.4 | +1.0 ± 0.4 | +0.3 ± 0.3 | −0.3 ± 0.2 | +0.2 ± 0.1 | +0.2 ± 0.1 |
+| v9 ft, background, end | +2.2 ± 0.5 | +2.2 ± 0.5 | +2.3 ± 0.4 | +1.8 ± 0.3 | +1.3 ± 0.2 | +0.7 ± 0.1 |
+| v9 ft, background, start | +1.3 ± 0.3 | +1.5 ± 0.3 | +1.0 ± 0.2 | +0.5 ± 0.1 | +0.6 ± 0.1 | +0.4 ± 0.1 |
+| S0 ft, support, end | +3.4 ± 1.3 | +3.2 ± 1.7 | +2.7 ± 1.4 | +1.2 ± 0.7 | +0.8 ± 0.4 | +0.5 ± 0.2 |
+| S0 ft, support, start | +1.5 ± 0.5 | +2.2 ± 0.7 | +0.8 ± 0.3 | −0.2 ± 0.1 | +0.3 ± 0.1 | +0.3 ± 0.1 |
+| S0 ft, background, end | +1.5 ± 0.7 | +1.6 ± 0.7 | +1.8 ± 0.5 | +1.0 ± 0.3 | +0.7 ± 0.2 | +0.5 ± 0.1 |
+
+- **The same profile and size as `edge_pieces.py` found** on whole trials, simulated and real. For v9 fine-tuned, support, end of a piece: +4.3, +3.5, +2.1, +1.4, +0.5.
+- **These windows come from the training simulator, so this is not a simulator–data mismatch.**
+- **S0 (phase-1 data, trained before the real-edge cut of 10802bb) is no different from v9.**
+
+**Result 2: it enters through the correction head, driven by the empty future branch.** v9 fine-tuned, end:
+
+| | 0–4 | 4–8 | 8–16 | 16–32 | 32–64 | 64–128 |
+|---|---|---|---|---|---|---|
+| change of the log correction (× 100), support | +4.0 | +3.8 | +3.6 | +2.6 | +1.8 | +0.8 |
+| change of the base (window-mean path), support | −0.2 | −0.2 | −0.2 | −0.1 | −0.1 | 0.0 |
+| share of the future trunk branch, support | +2.9 ± 1.0 | +2.8 | +2.5 | +1.6 | +1.0 | +0.2 |
+| share of the window statistics, support | +0.5 ± 0.3 | +0.5 | +0.6 | +0.5 | +0.5 | +0.4 |
+| share of the same-frame context, support | +0.4 ± 0.1 | +0.4 | +0.2 | 0.0 | 0.0 | 0.0 |
+| share of the future trunk branch, background | +1.3 ± 0.5 | +1.2 | +1.3 | +1.1 | +0.6 | +0.1 |
+| share of the window statistics, background | +0.7 ± 0.1 | +0.7 | +0.8 | +0.8 | +0.7 | +0.5 |
+
+- **The base path is not the problem.** The mix (0.25 at support, 0.19 in background) does not change at edges, and the one-sided window mean is not biased. So the candidates aimed at it would not help: padding, the window statistics' normalisation, and replicate or reflective filling of the missing frames. Reflective filling would also break the blind spot, since mirrored frames sit within the gap of other output frames.
+- **Most of it comes from the future branch when its context is empty or partial:** 2.9 of 3.7 points at support, out to about 64 frames.
+- **Two smaller paths:**
+  - the one-sided window statistics add about 0.5 points at both ends, out to the window's 254 frames;
+  - the half-planes add 0.4 points, within their 31 frames.
+- **At a start, the missing past branch contributes nothing or a little negative.** What remains there (+1 point) is the statistics and the half-planes.
+- **Reading.** The fusion layers are pointwise and shallow (two layers), and seem to add up the evidence each side brings.
+  - Mid-trial, much of the activity evidence comes from the future branch: events seen after the output frame, which tell the correction how much of the mean image to subtract at a source pixel.
+  - With the future missing, that subtraction falls short, most at source pixels.
+  - Doing better needs an interaction: "if the future is empty, lean more on the past". The fusion can build that only weakly, from the empty branch's code through a GELU.
+
+**Result 3: refits of the fusion on a frozen trunk** (`tools/edge_refit.py`, new): the current architecture cannot learn the edges, and edge features let it learn part of them.
+- **Method.** The trunk of v9 fine-tuned (`model.parts`) is frozen and run once on simulated windows placed as in training: half of them at a trial's first or last frame (±64 frames). Its outputs are cached. Only the fusion layers and heads are then trained, from v9's weights, with training's loss.
+- **Three arms on the same cache:**
+  - ctrl: v9's architecture;
+  - edge: with `--edge_features` (below);
+  - gated: with `--edge_features`, but only the edge-gated head is trained (132 parameters), so a trial's middle cannot change.
+- **Evaluation:** the truncated windows above, from separate draws (48 draws, 16 px), and the whole windows' error against the truth.
+- **Two runs:** 128 cached windows for 1500 steps, and 384 (the same 128 plus 256 all at trial edges) for 3000 steps.
+
+| edge − whole, % of the truth, 0–4 / 4–8 / 8–16 frames | support, end | background, end | support, start | whole windows: MSE / oracle, support bias |
+|---|---|---|---|---|
+| v9 fine-tuned, no refit (48 draws) | +3.6 / +3.5 / +3.3 | +2.0 / +2.0 / +2.4 | +0.7 / +0.7 / +0.1 | 1.22, +2.4% |
+| 128 windows: ctrl | +2.2 / +2.5 / +2.3 | +1.4 / +1.6 / +2.0 | +1.0 / +1.2 / −0.1 | 1.27, +1.0% |
+| 128 windows: edge | +1.2 / +1.6 / +1.0 | +0.2 / +0.5 / +0.3 | −0.4 / −0.3 / −2.2 | 1.34, +2.4% |
+| 128 windows: gated | +1.4 / +1.3 / +1.4 | −1.1 / −1.1 / +0.7 | +3.5 / +3.7 / +2.0 | 1.24, +1.1% |
+| 384 windows: ctrl | +2.8 / +2.8 / +3.4 | +1.4 / +1.4 / +2.5 | −0.8 / −0.8 / −0.7 | 1.30, +4.8% |
+| 384 windows: edge | +2.3 / +2.4 / +2.6 | +1.0 / +1.1 / +1.5 | 0.0 / 0.0 / −0.5 | 1.33, +4.8% |
+| 384 windows: gated | +3.9 / +3.8 / +5.8 | +1.9 / +1.9 / +5.2 | +5.2 / +5.3 / +5.2 | 1.22, +2.5% |
+
+The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9 itself gives +2.8 / +2.7 / +2.3 at support and +2.0 / +2.0 / +2.1 in background at the end.
+
+- **The current fusion cannot move the edge effect.** Refitting it on windows half or more at trial edges leaves the effect where it was (ctrl, both runs).
+- **With edge features, the refit lowers the end effect.** Compared with ctrl on the same cache, it is lower by 0.4–1.3 points at support and 0.4–1.7 in background. That is with a frozen trunk and at most 384 windows.
+- **The refits also shift the whole baseline, which confounds the gated arm.**
+  - On uniformly placed training windows, weighted as the loss weighs them, v9 fine-tuned is 1.7% low in a trial's middle (the low activity-free bias of the v9 section). It is close to the truth at true trial edges: −0.1% after a start and +0.3% before an end, in the first 16 frames (about 30 windows per side, so ±1).
+  - The ctrl and edge refits raise the baseline everywhere (support +2.4 points in the 384-window run) and overfit a little (MSE 1.22 → 1.30–1.33).
+  - The gated head cannot touch a trial's middle. So it raises everything within 262 frames of an edge (the reach of its gates) instead, and at the truncated windows' support pixels, which were already high, the effect grows.
+- **So the gated head alone is not the test.** Nor can a frozen trunk and a few hundred windows show how far a full training run would get. What the refits do show: the current fusion has no way to change edges apart from the middle, and edge features give it one.
+- **The two biases interact.** In these simulations:
+  - background pixels are low mid-trial, and the edge effect brings them close to the truth;
+  - support pixels are slightly high mid-trial (+2.4% in these support-centred windows), and the edge effect takes them to about +6%.
+  - Training weighs both. Judge an edge arm at support and background separately, on the paired effect (which the network's overall bias does not affect) as well as against the truth.
+
+**The arm: edge features** (`--edge_features`, `ModelConfig.edge_features`; default off).
+- **Per-side statistics.** The fusion layers also get the window statistics for each side separately (6 channels, all from frames outside the gap):
+  - how much of the past and of the future window has data, on a log scale and within 16 frames of the gap;
+  - each side's mean relative to the mean image.
+- **Edge-gated corrections.** The baseline's and the noise's log corrections get g_past × e_past + g_future × e_future:
+  - g is the share of that side's window without data (0 in a trial's middle, 1 when that side is empty);
+  - e is a 1×1 head on the fused features.
+  - This is the interaction the fusion lacks.
+- **Exact warm start.** The new fusion columns and the head start at 0, so a checkpoint without them warm-starts exactly (`load_compatible`, tested).
+- **Blind spot.** Tested at a trial edge and mid-window, slab and box.
+- **Cost:** 6 fusion inputs and a 4-channel head, computed on the loss region only.
+
+**Recommendation for the next training batch: an arm with `--edge_features`, otherwise the same recipe.**
+- **Stages.** Run it in both stages: pretraining from v6r with `--edge_features` starts exactly as v6r, and fine-tuning continues from it. The cheaper fallback is fine-tuning only, which starts exactly as the pretraining pick.
+- **No other change.** `--edge_frac 0.5` stays (simulated windows only).
+- **Judge it against the same run without the flag:**
+  - `tools/edge_windows.py` on the new checkpoints (fastpz, with the run's low-count draw): end and start effect at support and background. The aim is under 1% at support in the last 16 frames.
+  - `edge_pieces.py` on the viewer trials (real), where the support end effect is +4.6% today.
+  - The held-out evaluation, which must not lose accuracy in a trial's middle.
+- **Not recommended:**
+  - more edge windows (v9: no effect);
+  - an edge-weighted loss (the same lever);
+  - padding or filling of the missing frames: the base path is not involved, and reflective filling breaks the blind spot;
+  - a fixed correction calibrated on simulations: the effect differs between checkpoints (v8 fine-tuned had half of it), pixel classes and ends.
+- **What edge features cannot remove.** One-sided context carries less information on which pixels are active. So part of the support-pixel effect may be the right answer given less information. If so, it should shrink with the arm but not vanish, and background should reach zero first.
+- **Until the arm is trained:** relative to the rest of the trial, the baseline in its first and last 0.2 s is 3–4% too high at source pixels and 2% too high in background, most of all at the end.
+
+**Tools.**
+- `tools/edge_windows.py OUT.npz --trials ... --ckpt name=path ... [--kind fastpz --pz_legacy]` measures any checkpoint's edge effect. It takes minutes on a free GPU (32 draws, 2 checkpoints). It saves partial results, `--summary` prints them, and `--need_gb` waits for free GPU memory.
+- `tools/edge_refit.py` runs the frozen-trunk refits.
+- **On this machine,** when the shared 8 GB GPU runs short, Windows pages GPU memory to the host and a forward pass takes minutes instead of 0.5 s. Both tools also run on the CPU (`--device cpu --threads N`).
+- **CPU refits** use their own small AdamW: torch.optim's step probes the CUDA stream, which hangs while the full GPU opens a context.
 
 ## Fine-tuning trade-off: real-data gain against simulation accuracy (2026-11-21)
 
