@@ -113,3 +113,43 @@ def test_sidecars_with_optional_maps_come_first(tmp_path, monkeypatch):
     assert "act_nan" not in plain and plain["unfit"][6:11, 19].all() and not plain["unfit"][2, 19]
     both = S.load_stats([fn], None, workers=0, sidecar_dirs=[str(ov)])[str(fn)]
     assert "act_nan" in both and both["unfit"][2, 19]
+
+
+def test_overlay_out_adds_the_optional_maps(tmp_path, monkeypatch):
+    """`slap2-f0 stats --out`: a trial whose sidecar and cached stats lack the
+    optional maps is recomputed into the overlay folder (the sidecar is left
+    as it is); a rerun resumes from the overlay, and without --out the old
+    sidecar is still reused."""
+    import slap2_f0.stats as S
+
+    d = tmp_path / "data" / "sessA" / "Path2"
+    d.mkdir(parents=True)
+    fn = d / "trial_001.h5"
+    _edge_trial(fn)
+    full = S.trial_stats(fn)
+    old = {k: v for k, v in full.items() if k not in S.OPTIONAL}
+    size = fn.stat().st_size
+    side = S.sidecar_path(fn)
+    np.savez(side, file_size=size, **old)
+    before = side.read_bytes()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    np.savez(cache / f"{fn.stem}_{S._key(fn)}.npz", **old)
+    ov = tmp_path / "overlay"
+    calls = []
+    real = S.trial_stats
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(S, "trial_stats", counted)
+    st = S.load_stats([fn], cache, workers=0, write_sidecars=True, sidecar_out=ov)[str(fn)]
+    assert calls == [1] and "act_nan" in st and st["unfit"][2, 19]
+    with np.load(S.overlay_path(fn, ov)) as z:
+        assert all(k in z.files for k in S.OPTIONAL) and int(z["file_size"]) == size
+    assert side.read_bytes() == before
+    again = S.load_stats([fn], None, workers=0, write_sidecars=True, sidecar_out=ov)[str(fn)]
+    plain = S.load_stats([fn], None, workers=0, write_sidecars=True)[str(fn)]
+    assert calls == [1] and "act_nan" in again and "act_nan" not in plain
+    assert side.read_bytes() == before

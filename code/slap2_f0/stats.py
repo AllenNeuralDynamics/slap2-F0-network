@@ -291,14 +291,18 @@ def _cached(args) -> dict:
     """Stats of one file: from its sidecar (if made for this version and file
     size; a sidecar or overlay with the OPTIONAL maps before one without),
     else from the cache folder, else computed (and then cached, and written
-    as a sidecar if asked)."""
+    as a sidecar if asked). When writing into an overlay folder (out_dir),
+    the folder is searched too, so a rerun resumes, and stats without the
+    OPTIONAL maps are not reused: they are computed and written there."""
     fn, cache, write_sidecar, overlays, out_dir = (tuple(args) + ((), None))[:5]
     fn = Path(fn)
     side = sidecar_path(fn)
     size = fn.stat().st_size
     one_channel = _one_channel_mean_image(fn)
+    to_overlay = bool(write_sidecar) and out_dir is not None
     found = None
-    for cand in [side] + [overlay_path(fn, d) for d in overlays]:
+    cands = [side] + [overlay_path(fn, d) for d in overlays] + ([overlay_path(fn, out_dir)] if to_overlay else [])
+    for cand in cands:
         if cand.exists():
             with np.load(cand) as d:
                 ok = "file_size" in d.files and int(d["file_size"]) == size and (not one_channel or "mean_image_axes" in d.files)
@@ -307,9 +311,9 @@ def _cached(args) -> dict:
                 return _from_npz(cand)
             if ok and found is None:
                 found = cand
-    if found is not None:
+    if found is not None and not to_overlay:
         return _from_npz(found)
-    if write_sidecar and out_dir is not None:
+    if to_overlay:
         side = overlay_path(fn, out_dir)
         side.parent.mkdir(parents=True, exist_ok=True)
     p = None
@@ -317,7 +321,7 @@ def _cached(args) -> dict:
         p = Path(cache) / f"{fn.stem}_{_key(fn)}.npz"
         if p.exists():
             s = _from_npz(p)
-            if not one_channel or "mean_image_axes" in s:
+            if (not one_channel or "mean_image_axes" in s) and (not to_overlay or all(k in s for k in OPTIONAL)):
                 if write_sidecar:
                     np.savez(side, file_size=size, **s)
                 return s
@@ -346,7 +350,9 @@ def load_stats(files, cache_dir: str | Path | None = None, workers: int = 0, max
     after the sidecar, e.g. a data asset of recomputed sidecars for sessions
     whose own are stale (803496, 804730); like sidecars they must match the
     file size. sidecar_out: with write_sidecars, write new sidecars into that
-    overlay folder instead of next to the trials."""
+    overlay folder instead of next to the trials; trials whose stats lack the
+    OPTIONAL maps (made before they existed) are recomputed into it, which is
+    how existing sessions get the per-frame artifact rule."""
     files = [str(f) for f in files]
     overlays = tuple(str(d) for d in (sidecar_dirs.split(",") if isinstance(sidecar_dirs, str) else sidecar_dirs) if d)
     out = None if sidecar_out is None else str(sidecar_out)
