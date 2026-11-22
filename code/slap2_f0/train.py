@@ -182,12 +182,34 @@ def _forward(model, b, device, amp_dtype, region, aux=False):
     """Model outputs on the loss region only (mu, var: (B, frames, rows, cols))."""
     b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
     x = make_inputs(b["movie"], b["mean_image"], b["varfac"], b["scale"], b["var_map"], b["gain"],
-                    varfac_norm=model.cfg.varfac_norm)
+                    varfac_norm=getattr(model, "_orig_mod", model).cfg.varfac_norm)
     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
         out = model(x, b["scale"], b["gain"], region, aux=aux)
     if aux:
         return b, out[0].float(), out[1].float(), out[2]
     return b, out[0].float(), out[1].float()
+
+
+def fast_model(model: torch.nn.Module, device: torch.device, args) -> torch.nn.Module:
+    """The model to call for forward passes on the GPU: cuDNN autotuning (the
+    window shape is fixed, so algorithms are timed once per shape; on the L40S
+    its default choice made a training step 1.6x slower) and torch.compile
+    (1.7x faster training steps and forward passes on the A10G and the L40S;
+    docs/plan.md, "GPU machine"). Saving, the optimizer and the config use the
+    plain model. Without Triton (e.g. on Windows), or with --no_compile, the
+    plain model; compile errors fall back to it."""
+    if device.type != "cuda":
+        return model
+    torch.backends.cudnn.benchmark = not getattr(args, "no_cudnn_benchmark", False)
+    if getattr(args, "no_compile", False):
+        return model
+    import importlib.util
+    if importlib.util.find_spec("triton") is None:
+        print("torch.compile skipped: Triton is not installed", flush=True)
+        return model
+    import torch._dynamo as dynamo
+    dynamo.config.suppress_errors = True  # fall back to eager on a compile error
+    return torch.compile(model)
 
 
 def movmean_t(x: torch.Tensor, w: torch.Tensor, k: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
@@ -275,7 +297,8 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
         oracle = torch.nan_to_num(((b["mean_image"] - b["mean_act"]) / s)[(slice(None),) + region[1:]])
         oracle = oracle.unsqueeze(1).expand_as(y)
         wv = (b["weight"] > 0).float()
-        ob, _, ob_n = blind_window_stats(b["noisy"] * wv, wv, model.cfg.gap, model.cfg.window_reach)
+        cfg = getattr(model, "_orig_mod", model).cfg
+        ob, _, ob_n = blind_window_stats(b["noisy"] * wv, wv, cfg.gap, cfg.window_reach)
         ob = torch.where(ob_n[sel] > 0, ob[sel], oracle)
         preds = {"net": m, "mean_image": torch.nan_to_num(mi), "window": aux["window_mean"],
                  "silo": torch.nan_to_num(silo), "oracle": oracle, "oracle_blind": ob}
@@ -585,6 +608,7 @@ def train(args) -> None:
             print("variance-factor weights folded from the window-median input to the trial-median input")
         print(f"initialized from {args.init} (step {ck.get('step')}): {load_compatible(model, state)}")
     n_params = sum(p.numel() for p in model.parameters())
+    net = fast_model(model, device, args)  # forward passes; model for saving and the optimizer
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     warm = min(1000, max(1, args.steps // 5))
@@ -649,7 +673,7 @@ def train(args) -> None:
         nonlocal fields, best
         row = {"step": step, "train_loss": ema if ema is not None else float("nan")}
         for name, loader in evals.items():
-            for k, v in evaluate(model, loader, region, device, amp_dtype, args).items():
+            for k, v in evaluate(net, loader, region, device, amp_dtype, args).items():
                 row[f"{name}_{k}"] = v
         row[sel_key] = selection_score(row, sel_prefix, args.select)
         row.update(lr=sched.get_last_lr()[0], elapsed_s=time.time() - t0)
@@ -672,7 +696,7 @@ def train(args) -> None:
     step = 0
     opt.zero_grad(set_to_none=True)
     for micro, b in enumerate(dl, 1):  # accum micro-batches per optimizer step
-        b, mu, var = _forward(model, b, device, amp_dtype, region)
+        b, mu, var = _forward(net, b, device, amp_dtype, region)
         loss, mu_loss, var_loss = _losses(args, b, mu, var, region)
         scaler.scale(loss / args.accum).backward()
         if micro % args.accum:
@@ -744,6 +768,7 @@ def evaluate_checkpoints(args) -> None:
         ck = torch.load(path, map_location=device, weights_only=False)
         model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device)
         model.load_state_dict(ck["model"])
+        model = fast_model(model, device, args)
         wcfg = WindowConfig(**ck["window"])  # checkpoints from before real_edge_s get its default (2 s)
         if args.real_edge_s is not None:
             wcfg = replace(wcfg, real_edge_s=args.real_edge_s)
@@ -844,6 +869,8 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--device", default="auto")
     p.add_argument("--no_amp", action="store_true")
+    p.add_argument("--no_compile", action="store_true", help="no torch.compile (default: compiled when Triton is installed)")
+    p.add_argument("--no_cudnn_benchmark", action="store_true", help="cuDNN's default algorithms instead of autotuning")
     p.add_argument("--seed", type=int, default=0, help="the training seed reproduces its validation windows")
 
 
@@ -1047,6 +1074,8 @@ def add_arguments(p) -> None:
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--device", default="auto")
     p.add_argument("--no_amp", action="store_true", help="disable mixed precision on the GPU")
+    p.add_argument("--no_compile", action="store_true", help="no torch.compile (default: compiled when Triton is installed)")
+    p.add_argument("--no_cudnn_benchmark", action="store_true", help="cuDNN's default algorithms instead of autotuning")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--save_every", type=int, default=1000)
