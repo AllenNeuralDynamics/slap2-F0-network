@@ -2214,7 +2214,7 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 - **Timing.** It is learned in the first 250–500 steps, while the learning rate is still warming up, and then stays flat.
 - **It corrects a level.**
   - At step 0 the network's baseline is too low at background, on real windows (bias +0.007 to +0.020, target − net) and on fast simulations (+0.011 to +0.023) alike. Fine-tuning brings both to about 0.
-  - This looks like the low baseline that the labeled-bias session finds in activity-free simulations (interim): pretraining puts it in, so a simulator fix may make most of this gain unnecessary.
+  - This looks like the low baseline at low photon counts ("Low photon counts: the baseline sits low", above): pretraining puts it in. If the "lowcount" arm (`--photon_gain 1,4 --silent_trial 0.2`) removes it, most of this gain may become unnecessary.
   - It is not the output heads: `head_mu`'s bias moves by 0.0002. The whole trunk moves, 2.3% of the weights' norm (pretraining moves them about 9%).
 
 **The simulation cost is mostly checkpoint noise and lost selection luck, not drift:**
@@ -2259,7 +2259,7 @@ The 128-window rows were evaluated on the first 24 of the 48 draws. On those, v9
 **Is fine-tuning worth it? Yes, as a short calibration on real data.**
 - It buys 0.2–0.3 points on real windows, consistently across runs and mice: 15–25% of the network's advantage over SiLo, at background pixels.
 - The 5–7 points it costs on simulations come from noisy checkpoints and from selecting on real windows only, so they are avoidable.
-- If a simulator fix removes the low background baseline, rerun this comparison: fine-tuning may then add little.
+- If the "lowcount" arm removes the low background baseline, rerun this comparison on it: fine-tuning may then add little.
 
 **Recommended fine-tuning for the next training batch:**
 - **Baseline arm:** the v9 fine-tuning recipe with the new selection: `--val_sessions 878030,794237,834788,804730 --val_windows 48 --select balanced --select_on real:1,fast:0.1`, plus `--val_fast` and `--keep_every 100`.
