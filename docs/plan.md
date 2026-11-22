@@ -1778,3 +1778,53 @@ Each cell gives 48 / 192 windows per mouse:
    - g6e.4xlarge only if 8 vCPUs turn out to starve the GPU.
    - Not the L4. g5.12xlarge only if evaluation wall time matters.
 3. **Confirm before switching.** One short benchmark job each on g5.4xlarge and g6e.2xlarge: the real model; autotuning; `torch.compile`; checkpointing on and off; batch 1–4; deeper and wider; larger loss regions. That is about 30 min and $2 in all.
+
+**Benchmark results and decision (same day; these supersede the estimates above):**
+- `run --mode bench` measured S0's fine-tuned model at its window (718 frames × 94² px, loss on 192 × 48²), and data loaders on 878030.
+- One run on g5.4xlarge (A10G) and two on g6e.4xlarge (L40S); the two L40S runs agree within 0.5%.
+- g6e.2xlarge is refused at AIND ("forbidden instance type"); g6e.4xlarge (16 vCPU, 128 GB, $3.00/h) is allowed.
+
+| per window | A10G | L40S |
+|---|---|---|
+| training step, today's settings | 1.36 s | 1.37 s |
+| + cuDNN autotuning | 1.32 s | 0.83 s |
+| + `torch.compile` | 0.82 s | 0.49 s |
+| + no activation checkpointing | 0.73 s (18.7 GB) | 0.44 s (19.2 GB) |
+| forward pass (evaluation) | 0.37 s | 0.23 s |
+| forward pass, compiled | 0.20 s | 0.12 s |
+| 2× depth, compiled | 1.25 s | 0.73 s |
+| 1.5× width / 2× width (autotuned) | 2.30 / 2.92 s | 1.47 / 1.83 s |
+| 2× depth and 1.5× width | out of memory | 2.20 s (22.5 GB) |
+| loss region 448 frames × 96² px | out of memory | 3.47 s (42.8 GB) |
+| data loaders, 16 vCPU, 12 workers (simulated / real) | real 5.9 with 7 workers | 5.1 / 6.8 windows/s |
+
+- **Autotuning:** it matters on the L40S (1.6×) and hardly on the A10G (3%). Without it, the L40S is no faster than the A10G. The 4060 Ti behaved like the L40S.
+- **Compile:** `torch.compile` speeds up training steps 1.7× and forward passes 1.8×, on both machines.
+- **Machine:** the L40S is 1.7× the A10G at equal settings, at 1.85× the price.
+- **Batch size** does not help: time per window stays the same.
+- **Memory:** 24 GB does not fit the uncompiled model without checkpointing, larger loss regions, or 2× depth with 1.5× width. 48 GB fits all of these.
+- **Loss regions:** 448 frames × 96² px scores 9.3× the voxels of today's region in 4.2× the time, so it is 2.2× cheaper per scored voxel.
+- **Data loaders:** they keep up with training. A compiled L40S training step without checkpointing uses 2.3 windows/s of the 5.1 available.
+  - Compiled evaluation would want 8 windows/s on the L40S, so evaluation becomes data-bound at about 5.4 windows/s.
+  - The windows are the same for every checkpoint. Generating each once and scoring all checkpoints on it would remove that limit.
+
+**Estimates from the measurements:**
+- A training run here is S3-type: 4,700 steps of 2 windows, 14 validations of 240 windows, 5 min start, no stats recomputing. An evaluation is 49,000 windows.
+- Evaluation on the L40S is limited by the data loaders. Training without checkpointing is not measured for 2× depth compiled.
+
+| | training run | evaluation |
+|---|---|---|
+| A10G, today's settings | 4.0 h, $6.50 | 5.1 h, $8.40 |
+| A10G, compiled, no checkpointing | 2.2 h, $3.50 | 2.9 h, $4.60 |
+| L40S, compiled, no checkpointing | 1.3 h, $4.00 | ~2.6 h, ~$7.80 (data-bound) |
+| A10G, 2× depth, compiled | 3.6 h, $5.90 | 4.2 h, $6.90 |
+| L40S, 2× depth, compiled | 2.2 h, $6.50 | ~2.7 h, ~$8.10 |
+
+**Decision: the GPU capsule stays on g6e.4xlarge (L40S).**
+- **Why:** a training run takes about 40% less time for 10–15% more per run. The deeper or wider network and larger loss regions need the 48 GB.
+- **Code (4d3f593; GPU capsule d33555d):** training and evaluation now autotune and compile by default. `fast_model` falls back to eager without Triton or on a compile error; `--no_compile` and `--no_cudnn_benchmark` turn them off.
+- **For the next training:**
+  - add `--no_checkpoint` (19 GB of 48);
+  - add `--stats_from` for 803496 and 804730, whose stale one-channel stats otherwise cost 16–43 min per run.
+- **Evaluation:** until windows are shared across checkpoints, the A10G is the better value. It is about as fast, because the L40S waits for data, and costs 40% less. Switching back is a one-line change to `.codeocean/resources.json`.
+- **Not yet confirmed:** compile has been measured in the benchmark, not in a full training run.
