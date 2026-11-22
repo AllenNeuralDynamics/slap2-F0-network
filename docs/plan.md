@@ -1634,11 +1634,10 @@ Pixels in the mask ("new stats" = recomputed with the two maps):
 - **No false positives:** on pixels that miss frames outside artifacts, activity in missing frames reaches at most 0.53× the movie's maximum in 803121, the trial with the most motion and 1,203 such pixels, against the threshold of 2.
 - **The cause** (SILo's filled samples) belongs to GIAnT; a fix there is in progress (GIAnT-MATLAB branch `fit-artifact`).
 
-**Trade-off left open:** the per-frame rule applies only to stats computed from now on.
+**Decided (2026-11-22): existing data stays as it is.** The per-frame rule applies only to stats computed from now on. The growth rule already covers the 804730 case on the existing sidecars and on the `f0p1_sidecars` overlay, which has `n_valid` but not the two maps.
 
-- Existing data gets it from a recompute of selected sessions into an overlay folder (`slap2-f0 stats --out`), or from a version bump (all ~2,800 trials).
-- A pass that computes only the two maps still reads the whole trial: half the cost of the full statistics (37 s against 74 s for an 878030 trial).
-- The growth rule already covers the 804730 case on the existing sidecars.
+- If a session needs the per-frame rule later, run `slap2-f0 stats ROOT --out DIR`. It recomputes into the overlay folder every trial whose sidecar or cached stats lack the two maps, and a rerun resumes from that folder. Before the Copilot review fix (8b7f588), `--out` reused such sidecars and wrote nothing.
+- A version bump would recompute all ~2,800 trials. A pass that computes only the two maps still reads the whole trial: half the cost of the full statistics (37 s against 74 s for an 878030 trial).
 
 ## Experiments 1 and 2: held-out evaluation results (2026-11-21)
 
