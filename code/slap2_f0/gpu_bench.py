@@ -136,13 +136,14 @@ def _loader(kv: dict, w) -> dict:
     from .data import WindowDataset
     from .io import list_trials
     from .stats import load_stats
-    from .train import EVAL_SEEDS, eval_sim
+    from .train import EVAL_SEEDS, _drop_files, eval_sim
 
     kind, workers, n = kv.get("kind", "fast"), int(kv.get("workers", 7)), int(kv.get("windows", 96))
     files = list_trials(kv["data"])
     t0 = time.time()
     stats = load_stats(files, None, workers=min(workers, 6))
-    files = [f for f in files if str(f) in stats]
+    bad = _drop_files(files, stats)  # as training does: no finite noise statistics
+    files = [f for f in files if str(f) in stats and str(f) not in bad]
     st_s = time.time() - t0
     ds = WindowDataset(files, w, stats, length=n + 2 * workers, seed=EVAL_SEEDS.get(kind, 0),
                        sim=eval_sim(kind) if kind != "real" else None, flip=False)
