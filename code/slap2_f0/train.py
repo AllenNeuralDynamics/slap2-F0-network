@@ -447,6 +447,7 @@ def _model_config(args) -> ModelConfig:
     mcfg.varfac_norm = args.varfac_norm
     mcfg.hp_shared = args.hp_shared
     mcfg.motion_features = getattr(args, "motion_features", False)
+    mcfg.edge_features = getattr(args, "edge_features", False)
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -1156,6 +1157,9 @@ def add_arguments(p) -> None:
     p.add_argument("--motion_features", action="store_true",
                    help="box model: also the local displacement and blur seen in the surround, as the change they "
                         "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
+    p.add_argument("--edge_features", action="store_true",
+                   help="per-side window statistics into the fusion and edge-gated corrections of the baseline and "
+                        "noise (ModelConfig.edge_features); starts out exactly as the --init checkpoint")
     p.add_argument("--hp_shared", action="store_true",
                    help="one half-plane trunk for all four directions (v6) instead of one per direction")
     p.add_argument("--photon_zeros", action="store_true",
