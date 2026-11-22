@@ -331,6 +331,9 @@ def fast_model(model: torch.nn.Module, device: torch.device, args) -> torch.nn.M
         return model
     import torch._dynamo as dynamo
     dynamo.config.suppress_errors = True  # fall back to eager on a compile error
+    if getattr(args, "compile_log", False):  # why torch.compile recompiles or breaks the graph
+        import torch._logging as tlog
+        tlog.set_logs(recompiles=True, recompiles_verbose=True, graph_breaks=True)
     return torch.compile(model)
 
 
@@ -1195,6 +1198,8 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--no_amp", action="store_true")
     p.add_argument("--no_compile", action="store_true", help="no torch.compile (default: compiled when Triton is installed)")
     p.add_argument("--no_cudnn_benchmark", action="store_true", help="cuDNN's default algorithms instead of autotuning")
+    p.add_argument("--compile_log", action="store_true",
+                   help="log each torch.compile recompilation with the guard that failed, and each graph break")
     p.add_argument("--seed", type=int, default=0, help="the training seed reproduces its validation windows")
 
 
@@ -1435,6 +1440,8 @@ def add_arguments(p) -> None:
     p.add_argument("--no_amp", action="store_true", help="disable mixed precision on the GPU")
     p.add_argument("--no_compile", action="store_true", help="no torch.compile (default: compiled when Triton is installed)")
     p.add_argument("--no_cudnn_benchmark", action="store_true", help="cuDNN's default algorithms instead of autotuning")
+    p.add_argument("--compile_log", action="store_true",
+                   help="log each torch.compile recompilation with the guard that failed, and each graph break")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--save_every", type=int, default=1000)
