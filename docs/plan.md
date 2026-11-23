@@ -2604,7 +2604,7 @@ The first 16 frames pooled, and edge − control on the same draws:
 - **What remains is the future trunk branch's share** (2–3 points at support). The edge features do not address it, and in full training the edge-gated corrections, which could cancel it, did not learn to. That is with edge windows at 0.5 in both stages, so the training signal was there.
 
 **Next.**
-1. **Does the loss see it?** `edge_windows.py` now has a loss-weighted class (`lw`: all valid pixels, weighted 1 / (gain × mean image + 1) as in training). Run it on windows placed as in training (`--support_frac 0`); this was not run yet (about 12 min on a free GPU).
+1. **Does the loss see it?** `edge_windows.py` now has a loss-weighted class (`lw`: all valid pixels, weighted 1 / (gain × mean image + 1) in counts, with training's floor of 1e-3 × scale on the mean image, as `train._ref_var` weighs them). Run it on windows placed as in training (`--support_frac 0`); this was not run yet (about 12 min on a free GPU).
    - If lw's paired end effect is about 0, the network does what its loss asks. The footprint-pixel effect is then the answer under that weighting given one-sided information, and no architecture change will remove it. Handle edges downstream, or change the objective.
    - If lw is clearly positive, the network falls short of its own optimum at edges. A loss weight on the frames near an edge is then the next arm to try.
 2. **Until then:** for the shipped baseline (control wise), the last ~0.2 s of a trial is 2–2.5% too high at source pixels and up to 1% in background; the first 0.2 s is within 1%.
