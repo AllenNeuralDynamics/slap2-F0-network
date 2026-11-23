@@ -17,6 +17,7 @@ and for the pieces by distance from any edge. Pixels: all valid pixels, and
 footprint support and background where the trial files have the masks.
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -120,7 +121,9 @@ def main():
         print(f"resuming: {len({(lab, n) for lab, n, _ in res})} trial-checkpoint results in {args.out}", flush=True)
 
     def save():  # after every trial and checkpoint, so an interrupted run loses at most one
-        np.savez(args.out, res=np.array([(k, v) for k, v in res.items()], dtype=object), bins=np.array(BINS))
+        tmp = str(args.out) + ".tmp.npz"  # written in full, then swapped in: an interrupted save leaves OUT intact
+        np.savez(tmp, res=np.array([(k, v) for k, v in res.items()], dtype=object), bins=np.array(BINS))
+        os.replace(tmp, args.out)
 
     for kind, item in items:
         t0 = time.time()

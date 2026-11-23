@@ -35,6 +35,7 @@ branch on the missing side, the window statistics, or the same-frame context;
 edge - swapped is that path's share of the edge effect.
 """
 import argparse
+import os
 import sys
 import time
 from dataclasses import fields as dc_fields
@@ -246,9 +247,10 @@ def main():
         val = np.isfinite(w["mean_image"][sR:sR + op, sR:sR + op])
         lab = w["labeled"][sR:sR + op, sR:sR + op]
         masks = {"sup": sup & val, "bg": val & ~lab, "all": val}
-        gain_j = float(stats[str(args.trials[j])]["gain"])
+        gain_j, sc = float(stats[str(args.trials[j])]["gain"]), float(tf.scale)
         mi_c = np.nan_to_num(w["mean_image"][sR:sR + op, sR:sR + op])
-        masks["lw"] = np.where(val, 1.0 / (gain_j * np.maximum(mi_c, 0.0) + 1.0), 0.0)  # as train._losses' ref_var
+        # train._ref_var: mean image / scale clamped at 1e-3, so in counts a floor of 1e-3 * scale
+        masks["lw"] = np.where(val, 1.0 / (gain_j * np.maximum(mi_c, 1e-3 * sc) + 1.0), 0.0)
         for cond in list(conds) + swapped:
             src = "mid" if cond.startswith("mid") else cond.split("_sw_")[0]
             truth = wins[src]["truth"][tR:tR + nf, sR:sR + op, sR:sR + op]
@@ -277,12 +279,19 @@ def main():
         if (i + 1) % 8 == 0 or i == 0:
             print(f"draw {i + 1}/{args.n}, {time.time() - t_start:.0f} s", flush=True)
         if (i + 1) % args.save_every == 0 and i + 1 < args.n:  # partial results
-            np.savez(args.out, bins=np.array(BINS), **{"|".join(k): np.array(v) for k, v in res.items()})
+            _save(args.out, {"|".join(k): np.array(v) for k, v in res.items()})
     for tf in tfs:
         tf.close()
     arr = {"|".join(k): np.array(v) for k, v in res.items()}
-    np.savez(args.out, bins=np.array(BINS), **arr)
+    _save(args.out, arr)
     summarize(arr, [m[0] for m in models], list(conds))
+
+
+def _save(out, arr):
+    """Write OUT in full under a temporary name, then swap it in, so an interrupted save leaves OUT intact."""
+    tmp = str(out) + ".tmp.npz"
+    np.savez(tmp, bins=np.array(BINS), **arr)
+    os.replace(tmp, out)
 
 
 def _wmean(a, wts):
@@ -297,6 +306,8 @@ def summarize(arr, names, conds):
     for name in names:
         for kc in CLASSES:
             for cond in conds:
+                if f"{name}|{cond}|{kc}|bias" not in arr:  # archives made before a class existed (lw)
+                    continue
                 b = arr[f"{name}|{cond}|{kc}|bias"]
                 line = f"{name:10s} {kc:3s} {cond:11s} bias      " + _fmt(b)
                 print(line)
