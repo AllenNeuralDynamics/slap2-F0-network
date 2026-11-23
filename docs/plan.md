@@ -2465,3 +2465,54 @@ The three changes queued on 2026-11-20 are now options in GIAnT-Python, all off 
 - **Deep arm:** it runs with activation checkpointing, because without it it does not fit in memory.
 - **Data:** phase 1's training and validation sessions, all 23 phase-2 sessions, the stats overlay, and the trial filter (34 trials left out).
 - **Test mice:** their data assets are not attached to training runs.
+
+## S4 results: held-out evaluation (2026-11-23)
+
+**Runs:**
+- **Training:** all five arms completed 3,000 pretraining and 1,700 fine-tuning steps, in 5.3 h each (deep 7.2 h). Training ran at 1.65 s per step, with 3% data wait; validation took about as long as training.
+- **Evaluation:** the 8 held-out sessions, 96 windows per kind, on identical windows in every run.
+- **Checkpoints per arm:**
+  - the pretraining pick (`_pre`, fine-tuning step 0);
+  - the fine-tuned best (`_ft`);
+  - the soup of fine-tuning steps 800–1700 (`_soup`);
+  - the WiSE-FT 0.5 blend of `_pre` and the soup (`_wise`), made with `evaluate --ckpt name=avg:...` (#13).
+- **Baseline:** S3's checkpoints, scored in the control's run.
+- **Analysis:** `tools/s4_eval.py`.
+
+**Balanced score on the test mice**, % against the reference (real: mean image; simulated: oracle; lower is better):
+
+| checkpoint | real | fast | free | freedim | fastdim | sim |
+|---|---|---|---|---|---|---|
+| S3_ft | −3.54 | +30.3 | −21.6 | +1.6 | +35.0 | +70.8 |
+| ctrl_pre | −3.34 | +26.1 | −16.7 | +1.6 | +37.4 | +64.0 |
+| ctrl_ft | −3.48 | +28.3 | −9.5 | +6.4 | +39.0 | +66.5 |
+| ctrl_wise | −3.45 | +28.1 | −21.6 | −6.7 | +35.8 | +67.6 |
+| seed1_wise | −3.46 | +27.5 | −22.5 | −6.1 | +35.1 | +67.1 |
+| lowcount_wise | −3.35 | +35.6 | −20.8 | −15.0 | +35.2 | +77.7 |
+| edge_wise | −3.44 | +29.0 | −22.4 | −7.6 | +36.3 | +68.8 |
+| deep_wise | −3.45 | +27.9 | −21.6 | −6.9 | +35.7 | +67.3 |
+
+**Findings** (paired differences, points, with 95% intervals over mice and windows):
+- **Ship the WiSE-FT blend.**
+  - Against the fine-tuned best (control), it keeps the real score (+0.03 [−0.18, +0.30]) and fast (−0.2 [−2.4, +2.7]).
+  - It is much better in activity-free simulations: free −12.1 [−23.8, −3.6], freedim −13.1 [−27.1, −4.4].
+  - The soup alone costs fast (+4.4 [+0.3, +9.5]).
+  - The new selection (real plus 0.1 × fast) already keeps fine-tuning's cost on fast at 2.2 points, against 5–7 in S0–S3.
+- **Seed spread is small for the blend:** seed1 − control is real −0.01 [−0.12, +0.10] and fast −0.6 [−3.6, +2.1]. Picked fine-tuning checkpoints vary much more (free −9.0).
+- **Twice the mice did not move the scores.**
+  - S4 (18 training mice) against S3 (9): real +0.05 [−0.42, +0.39] and fast −2.0 [−13.5, +8.5] for the fine-tuned best.
+  - The blend against S3's fine-tuned best: real +0.09 [−0.18, +0.38], freedim −8.3 [−18.9, +2.2].
+  - The real score sits at about 3.5% below the mean image's error in every arm.
+- **Low-count arm:**
+  - It lowers the bias in dim activity-free simulations, but does not remove it: freedim −8.3 [−13.0, −4.9]. Per mouse in freedim, support and background, it goes from 6.9 and 6.1% to 6.0 and 4.7% (878030), and from 4.4 and 4.9% to 4.2 and 3.6% (876767).
+  - It costs fast +7.5 [+3.5, +11.9] and sim +10.1 [+5.1, +15.4].
+  - Real stays within noise: +0.10 [−0.07, +0.55].
+  - Its fine-tuning picked step 0. **Not adopted as it is;** a milder gain range would be the next try.
+- **Edge arm:** the held-out windows lie mostly mid-trial, so it differs little there: fast +0.9 [+0.1, +2.2], free −0.8 [−1.1, −0.4]. Its trial-edge effect is being measured with `tools/edge_windows.py`.
+- **Deep arm: inconclusive.**
+  - Its new pointwise blocks never switched on. Their ReZero scales stayed at about 0.001 (after the fusion) and 0.004 (in the branches), against about 0.1 for the dilated blocks. So it scored like the control (fast −0.18 [−0.25, −0.12]).
+  - Warm-starting with zero scales and the fine-tuning learning rate lets the new blocks drift around 0.
+  - A real test needs nonzero initial scales (e.g. 0.1, like the trained blocks) or a higher learning rate for the new parameters.
+- **The low baseline bias in activity-free simulations remains in every model:**
+  - +2 to +5% at normal photon counts, +3 to +10% at dim ones (support and background);
+  - largest in 878030, 776270 and 876767.

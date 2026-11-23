@@ -155,6 +155,12 @@ class ModelConfig:
     branch_mlp: int = 0
     fuse_blocks: int = 0
     mlp_hidden: int = 2
+    # how the pointwise blocks start: "rezero" (alpha = 0) or "zero_out" (alpha =
+    # 1, W2 = 0). Both start as the identity. With rezero, W1 and W2 get no
+    # gradient until alpha moves, and warm-started from a trained model alpha
+    # stayed near 0.001 in S4's deep arm, so the blocks never switched on; with
+    # zero_out, W2 gets a gradient from the first step
+    pointwise_init: str = "rezero"
 
     @property
     def spatial_factor(self) -> int:
@@ -235,18 +241,23 @@ class PointwiseBlock(nn.Module):
     voxel without reach. alpha starts at 0 (ReZero), so the block starts as
     the identity."""
 
-    def __init__(self, width: int, hidden: int):
+    def __init__(self, width: int, hidden: int, init: str = "rezero"):
         super().__init__()
+        if init not in ("rezero", "zero_out"):
+            raise ValueError(f"pointwise_init must be rezero or zero_out, not {init!r}")
         self.w1 = nn.Conv3d(width, hidden, 1)
         self.w2 = nn.Conv3d(hidden, width, 1)
-        self.alpha = nn.Parameter(torch.zeros(1))
+        self.alpha = nn.Parameter(torch.zeros(1) if init == "rezero" else torch.ones(1))
+        if init == "zero_out":
+            nn.init.zeros_(self.w2.weight)
+            nn.init.zeros_(self.w2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return _residual(x, self.alpha, self.w2(F.gelu(self.w1(x))))
 
 
 def _pointwise(width: int, cfg: "ModelConfig", n: int) -> nn.ModuleList:
-    return nn.ModuleList([PointwiseBlock(width, cfg.mlp_hidden * width) for _ in range(n)])
+    return nn.ModuleList([PointwiseBlock(width, cfg.mlp_hidden * width, cfg.pointwise_init) for _ in range(n)])
 
 
 class CausalBlock(nn.Module):
