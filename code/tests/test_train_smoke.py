@@ -801,3 +801,39 @@ def test_compile_log_turns_on_recompile_logging(monkeypatch):
     calls.clear()
     tr.fast_model(m, torch.device("cuda"), argparse.Namespace())
     assert calls == {}
+
+
+def test_evaluate_scores_averaged_checkpoints(tmp_path):
+    """evaluate --ckpt name=avg:...: the average is exact (averaged_checkpoint) and is
+    scored like any checkpoint; avg of one checkpoint scores the same as the checkpoint."""
+    import torch
+
+    from slap2_f0.train import averaged_checkpoint
+
+    for k, label in enumerate(["sessA", "sessA", "sessB"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "4", "--batch", "2",
+          "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_every", "2",
+          "--val_windows", "2", "--save_every", "2", "--keep_every", "2"])
+    steps = sorted((out / "steps").glob("step_*.pt"))
+    a, b = (torch.load(p, map_location="cpu", weights_only=False) for p in steps[:2])
+    avg = averaged_checkpoint(f"{steps[0]}=0.25;{out / 'steps' / 'step_00000[2]*.pt'}=0.75")
+    for k in a["model"]:
+        assert torch.allclose(avg["model"][k].double(), 0.25 * a["model"][k].double() + 0.75 * b["model"][k].double())
+    assert avg["config"] == a["config"] and avg["window"] == a["window"]
+    ev = tmp_path / "eval"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", f"last={out / 'last.pt'}", f"same=avg:{out / 'last.pt'}",
+          f"soup=avg:{out / 'steps' / 'step_*.pt'}", f"avg:{steps[0]}=0.25;{steps[1]}=0.75",
+          "--kinds", "real", "--windows", "2", "--workers", "0",
+          "--out", str(ev)])
+    rows = list(csv.DictReader(open(ev / "eval.csv")))
+    names = {r["checkpoint"] for r in rows}
+    assert {"last", "same", "soup", "avg1"} <= names  # an unnamed average is named avg<k>
+    for s in {r["session"] for r in rows}:  # avg of one checkpoint = that checkpoint, on the same windows
+        r1 = next(r for r in rows if r["checkpoint"] == "last" and r["session"] == s)
+        r2 = next(r for r in rows if r["checkpoint"] == "same" and r["session"] == s)
+        assert float(r1["sup_mse8_net"]) == pytest.approx(float(r2["sup_mse8_net"]), rel=1e-5)

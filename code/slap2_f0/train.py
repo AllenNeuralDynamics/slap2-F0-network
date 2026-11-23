@@ -178,6 +178,30 @@ class StepProfiler:
             print(f"torch.compile counters: {e}", flush=True)
 
 
+def averaged_checkpoint(spec: str) -> dict:
+    """``evaluate --ckpt name=avg:SPEC;SPEC;...``: the weighted average of
+    checkpoints (``average.parse_specs``: path, path=weight or a glob whose
+    every match has the glob's weight), made in memory, so soups and WiSE-FT
+    interpolations are scored without saving them first. E.g. WiSE-FT 0.5 of
+    the soup of fine-tuning steps 800-1700, kept every 100:
+    ``avg:FT/steps/step_000000.pt=0.5;FT/steps/step_000[89]00.pt=0.05;FT/steps/step_001[0-7]00.pt=0.05``.
+    The model and window settings are the first checkpoint's; all must share
+    the model configuration."""
+    from .average import average_states, parse_specs
+
+    parts = parse_specs([t for t in spec.split(";") if t])
+    if not parts:
+        raise SystemExit(f"avg: needs at least one checkpoint, not {spec!r}")
+    cks = [torch.load(p, map_location="cpu", weights_only=False) for p, _ in parts]
+    for (p, _), ck in zip(parts, cks):
+        if ck["config"] != cks[0]["config"]:
+            raise SystemExit(f"avg: {p} has another model configuration than {parts[0][0]}")
+    state = average_states([ck["model"] for ck in cks], [w for _, w in parts])
+    tot = sum(w for _, w in parts)
+    print("averaged: " + ", ".join(f"{w / tot:.3g} x {p}" for p, w in parts), flush=True)
+    return {"model": state, "config": cks[0]["config"], "window": cks[0]["window"], "step": None}
+
+
 def quality_files(files: list[Path], args) -> list[Path]:
     """``io.filter_trials`` with the run's thresholds, reporting what it left out."""
     kept, report = filter_trials(files, getattr(args, "min_peak_r", 0.3), getattr(args, "min_path_trials", 4))
@@ -1036,9 +1060,16 @@ def evaluate_checkpoints(args) -> None:
     excess_report(groups, stats, out / "excess.csv")
     rows = []
     specs = []
+    n_avg = 0
     for spec in args.ckpt:  # name=path, or name=folder/step_*.pt for all kept steps (named name@step_<N>)
-        name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
-        if any(c in path for c in "*?["):
+        if spec.startswith("avg:"):  # unnamed average: its weights' "=" are not a name
+            n_avg += 1
+            name, path = f"avg{n_avg}", spec
+        else:
+            name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
+        if path.startswith("avg:"):  # a weighted average of checkpoints, made in memory (average.parse_specs)
+            specs.append((name, path))
+        elif any(c in path for c in "*?["):
             matches = sorted(Path(path).parent.glob(Path(path).name))
             if not matches:
                 raise SystemExit(f"no checkpoints match {path}")
@@ -1052,7 +1083,7 @@ def evaluate_checkpoints(args) -> None:
     # (compiled) model and only their weights are loaded in turn
     cks = []
     for name, path in specs:
-        ck = torch.load(path, map_location=device, weights_only=False)
+        ck = averaged_checkpoint(path[4:]) if path.startswith("avg:") else             torch.load(path, map_location=device, weights_only=False)
         wcfg = WindowConfig(**ck["window"])  # checkpoints from before real_edge_s get its default (2 s)
         if args.real_edge_s is not None:
             wcfg = replace(wcfg, real_edge_s=args.real_edge_s)
@@ -1167,7 +1198,9 @@ def add_eval_arguments(p) -> None:
     p.add_argument("root", help="folder with exported trial files (searched recursively)")
     p.add_argument("--ckpt", nargs="+", required=True,
                    help="checkpoints to score, each path or name=path; a path may be a glob (e.g. "
-                        "run=/data/run/train/steps/step_*.pt), each match named name@<file stem>")
+                        "run=/data/run/train/steps/step_*.pt), each match named name@<file stem>, or "
+                        "avg:SPEC;SPEC;... for a weighted average made in memory (SPEC: path, path=weight or a glob "
+                        "whose every match has that weight; see train.averaged_checkpoint)")
     p.add_argument("--out", default="results/eval")
     p.add_argument("--kinds", default="real,sim",
                    help="comma-separated: real, sim, free (simulated without activity), fast (simulated with fast "
