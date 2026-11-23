@@ -2441,3 +2441,27 @@ The three changes queued on 2026-11-20 are now options in GIAnT-Python, all off 
 **Also found:**
 - The moving median with the bootstrap and without the floor collapses (locsims AP 0.18), because the moving median is biased low at low counts. `variance_floor=False` now requires an external baseline.
 - Once in 24 trials, the port's peak fit hit a LAPACK SVD that did not converge; the same fit succeeds when rerun. Such a fit is now retried with `tr_solver="lsmr"`.
+
+## S4 batch launched; torch.compile slows real training (2026-11-22)
+
+**Training throughput on the L40S** (S4 recipe, 2,668 trials; 200-step timing runs with the loader-wait log of #9 and the profiler of #10):
+
+| | per step (2 windows) | GPU memory |
+|---|---|---|
+| compiled (default since 4d3f593) | 4.3 s | 19.3 GB |
+| `--no_compile` | 1.5 s | 22.7 GB |
+| deep, compiled | 7.9 s | 40.5 GB |
+| deep, `--no_compile`, no checkpointing | out of memory (43.7 of 44.4 GB) | |
+
+- **The GPU is not the limit.** Its kernels take about 0.9 s per step, as the benchmark found. Compiled training adds about 3.4 s of CPU overhead per step.
+  - **Not recompiling:** `--compile_log` shows 5 recompilations at step 1 (grad mode after validation) and none later.
+  - **Likely cause:** the model is split into many small compiled graphs (graph breaks at `slice.indices` in `model.parts`), each with its own runtime overhead. The benchmark used one fixed input and did not show this.
+- **Not the data either:** with compilation, the loaders never kept training waiting, at 4, 8 or 12 workers or with 32 or 256 trials cached per worker. Uncompiled, they wait for about 20% of each interval: with 2,668 trials, most windows rebuild a template.
+- **Possible speed-ups for later:**
+  - remove the graph breaks and compile again;
+  - shard trials across loader workers, so each worker's cache holds its own trials.
+
+**The batch (five arms, from v6r, S4 recipe, all `--no_compile`):** control, `--seed 1`, low-count (`--photon_gain 1,4 --silent_trial 0.2`), edge (`--edge_features`) and deep (`--fuse_blocks 4 --branch_mlp 1`).
+- **Deep arm:** it runs with activation checkpointing, because without it it does not fit in memory.
+- **Data:** phase 1's training and validation sessions, all 23 phase-2 sessions, the stats overlay, and the trial filter (34 trials left out).
+- **Test mice:** their data assets are not attached to training runs.
