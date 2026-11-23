@@ -17,6 +17,7 @@ and for the pieces by distance from any edge. Pixels: all valid pixels, and
 footprint support and background where the trial files have the masks.
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -103,6 +104,8 @@ def main():
     ap.add_argument("--ckpt", nargs="+", required=True)
     ap.add_argument("--piece", type=int, default=512)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--resume", action="store_true",
+                    help="keep the (trial, checkpoint) results already in OUT and run only the others")
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     items = [("file", t) for t in args.trials] + [("reg", s) for s in args.files.split(",") if s and args.registered]
@@ -113,12 +116,24 @@ def main():
         amp = prepare(model, device, "auto")
         models.append((name, model, amp, wcfg))
     res = {}
+    if args.resume and Path(args.out).exists():
+        res = {tuple(k): v for k, v in np.load(args.out, allow_pickle=True)["res"]}
+        print(f"resuming: {len({(lab, n) for lab, n, _ in res})} trial-checkpoint results in {args.out}", flush=True)
+
+    def save():  # after every trial and checkpoint, so an interrupted run loses at most one
+        tmp = str(args.out) + ".tmp.npz"  # written in full, then swapped in: an interrupted save leaves OUT intact
+        np.savez(tmp, res=np.array([(k, v) for k, v in res.items()], dtype=object), bins=np.array(BINS))
+        os.replace(tmp, args.out)
+
     for kind, item in items:
         t0 = time.time()
+        label = Path(item).parent.parent.name + "/" + Path(item).name if kind == "file" else item
+        todo = [m for m in models if (label, m[0], "all") not in res]
+        if not todo:
+            continue
         d = load_trial(item) if kind == "file" else load_reg(args.registered, item)
         st = movie_stats(d["movie"], d["valid"], d["discard"])
-        label = Path(item).parent.parent.name + "/" + Path(item).name if kind == "file" else item
-        for name, model, amp, wcfg in models:
+        for name, model, amp, wcfg in todo:
             rows, cols, full, cut, bounds = run_model(model, wcfg, d, st, device, amp, args.piece)
             T = full.shape[0]
             keep = ~d["discard"]
@@ -154,7 +169,8 @@ def main():
             print(f"{label} {name}: {len(cuts)} cuts, {time.time() - t0:.0f} s; all px, piece - whole after a cut: "
                   + " ".join(f"{v:+.2f}" for v in res[(label, name, 'all')]["cut_after"])
                   + " | before: " + " ".join(f"{v:+.2f}" for v in res[(label, name, 'all')]["cut_before"]), flush=True)
-    np.savez(args.out, res=np.array([(k, v) for k, v in res.items()], dtype=object), bins=np.array(BINS))
+            save()
+    save()
     # summary: mean over trials per model and pixel class
     print(f"\nbins (frames from the edge): {BINS}")
     for name, *_ in models:

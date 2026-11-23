@@ -20,7 +20,9 @@ first and last frames ("trial_start", "trial_end"), where the drift
 bias against the truth is not paired, so it needs many more draws.
 
 Reported per pixel class (footprint support, background = valid and not
-labeled, all valid), by frames from the edge: (mu - truth) / truth in %
+labeled, all valid, and "lw": all valid pixels weighted as training's loss
+weighs them, 1 / (gain * mean image + 1) in counts, so lw's bias is the error
+the loss sees), by frames from the edge: (mu - truth) / truth in %
 pooled over the class's pixels and frames, mean and SE over draws. For the
 mid-trial windows the same frames' bias in the whole window is subtracted
 (paired), and the model's own split of the baseline is given: mu = base *
@@ -33,6 +35,7 @@ branch on the missing side, the window statistics, or the same-frame context;
 edge - swapped is that path's share of the edge effect.
 """
 import argparse
+import os
 import sys
 import time
 from dataclasses import fields as dc_fields
@@ -52,7 +55,7 @@ from slap2_f0.train import eval_sim  # noqa: E402
 BINS = [(0, 4), (4, 8), (8, 16), (16, 32), (32, 64), (64, 128)]
 CONDS = ("mid_end", "mid_start", "end", "start", "trial_end", "trial_start")  # mid_*: the whole window, by
 # frames from its loss region's end or start (paired with end and start)
-CLASSES = ("sup", "bg", "all")
+CLASSES = ("sup", "bg", "all", "lw")  # lw: valid pixels with the loss weights (1 / photon variance)
 QUANT = ("bias", "base", "corr", "wm", "mix")  # (mu-truth), (base-truth), log(mu/base), (wm-truth), mix
 
 
@@ -244,6 +247,10 @@ def main():
         val = np.isfinite(w["mean_image"][sR:sR + op, sR:sR + op])
         lab = w["labeled"][sR:sR + op, sR:sR + op]
         masks = {"sup": sup & val, "bg": val & ~lab, "all": val}
+        gain_j, sc = float(stats[str(args.trials[j])]["gain"]), float(tf.scale)
+        mi_c = np.nan_to_num(w["mean_image"][sR:sR + op, sR:sR + op])
+        # train._ref_var: mean image / scale clamped at 1e-3, so in counts a floor of 1e-3 * scale
+        masks["lw"] = np.where(val, 1.0 / (gain_j * np.maximum(mi_c, 1e-3 * sc) + 1.0), 0.0)
         for cond in list(conds) + swapped:
             src = "mid" if cond.startswith("mid") else cond.split("_sw_")[0]
             truth = wins[src]["truth"][tR:tR + nf, sR:sR + op, sR:sR + op]
@@ -256,25 +263,42 @@ def main():
                     q = {"bias": p["mu"] - truth, "base": p["base"] - truth, "corr": np.log(p["mu"] / p["base"]),
                          "wm": p["wm"] - truth, "mix": p["mix"]}
                 for kc, m in masks.items():
-                    if m.sum() < 5:
+                    if (m > 0).sum() < 5:
                         for qq in q:
                             res[(name, cond, kc, qq)].append(np.full(len(BINS), np.nan))
                         continue
-                    lvl = np.nanmean(truth[:, m])
+                    if m.dtype == bool:
+                        lvl = np.nanmean(truth[:, m])
+                    else:  # weighted: per-frame weighted means over the pixels with data
+                        lvl = _wmean(truth, m).mean()
                     for qq, a in q.items():
-                        pf = np.nanmean(a[:, m], 1)
+                        pf = np.nanmean(a[:, m], 1) if m.dtype == bool else _wmean(a, m)
                         if qq in ("bias", "base", "wm"):
                             pf = 100 * pf / lvl
                         res[(name, cond, kc, qq)].append(binned(pf, dist))
         if (i + 1) % 8 == 0 or i == 0:
             print(f"draw {i + 1}/{args.n}, {time.time() - t_start:.0f} s", flush=True)
         if (i + 1) % args.save_every == 0 and i + 1 < args.n:  # partial results
-            np.savez(args.out, bins=np.array(BINS), **{"|".join(k): np.array(v) for k, v in res.items()})
+            _save(args.out, {"|".join(k): np.array(v) for k, v in res.items()})
     for tf in tfs:
         tf.close()
     arr = {"|".join(k): np.array(v) for k, v in res.items()}
-    np.savez(args.out, bins=np.array(BINS), **arr)
+    _save(args.out, arr)
     summarize(arr, [m[0] for m in models], list(conds))
+
+
+def _save(out, arr):
+    """Write OUT in full under a temporary name, then swap it in, so an interrupted save leaves OUT intact."""
+    tmp = str(out) + ".tmp.npz"
+    np.savez(tmp, bins=np.array(BINS), **arr)
+    os.replace(tmp, out)
+
+
+def _wmean(a, wts):
+    """Per-frame mean of a (frames, H, W) over pixels, weighted by wts (H, W), ignoring NaN."""
+    ok = np.isfinite(a) & (wts > 0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (np.where(ok, a, 0.0) * wts).sum((1, 2)) / np.where(ok, wts, 0.0).sum((1, 2))
 
 
 def summarize(arr, names, conds):
@@ -282,6 +306,8 @@ def summarize(arr, names, conds):
     for name in names:
         for kc in CLASSES:
             for cond in conds:
+                if f"{name}|{cond}|{kc}|bias" not in arr:  # archives made before a class existed (lw)
+                    continue
                 b = arr[f"{name}|{cond}|{kc}|bias"]
                 line = f"{name:10s} {kc:3s} {cond:11s} bias      " + _fmt(b)
                 print(line)

@@ -2516,3 +2516,99 @@ The three changes queued on 2026-11-20 are now options in GIAnT-Python, all off 
 - **The low baseline bias in activity-free simulations remains in every model:**
   - +2 to +5% at normal photon counts, +3 to +10% at dim ones (support and background);
   - largest in 878030, 776270 and 876767.
+
+## Edge features (S4): the trial-edge effect stays (2026-11-23)
+
+**Question.** Does the S4 edge arm (`--edge_features`, recommended in "Edge bias: where it comes from, and an arm to train") remove the baseline's rise at trial edges? The target was under 1% at footprint support in a trial's last 16 frames.
+
+**Checkpoints.** The S4 control and edge arms: same recipe, both stages from v6r, `--edge_frac 0.5` in both stages, current low-count draw (no `--pz_legacy`), uncompiled. For each arm:
+- pre: the pretraining pick (fine-tuning's step 0);
+- best: fine-tuning's `best.pt` (step 300);
+- wise: the shipped WiSE-FT 0.5 (step 0 with the soup of steps 800–1700).
+
+Checkpoints store the validation window settings, so they show `edge_frac 0.0`. Training used 0.5 (`wcfg_train`, and the launch arguments).
+
+**Method.** As in the 2026-11-22 section: `tools/edge_windows.py`, 48 draws of fastpz (current draw) on the four viewer trials as templates, the same draws for all six checkpoints. Edge − whole, in % of the true baseline, ± SE over draws; differences between arms are paired by draw.
+
+**Result 1: the end effect is unchanged.** Support, end, by frames from the edge:
+
+| | 0–4 | 4–8 | 8–16 | 16–32 | 32–64 | 64–128 |
+|---|---|---|---|---|---|---|
+| control, pre | +2.8 ± 0.4 | +2.7 ± 0.4 | +1.9 ± 0.4 | +0.2 ± 0.2 | +0.2 ± 0.2 | +0.2 ± 0.1 |
+| edge, pre | +2.5 ± 0.4 | +2.6 ± 0.4 | +1.7 ± 0.3 | +0.1 ± 0.2 | +0.1 ± 0.2 | +0.1 ± 0.1 |
+| control, best | +3.7 ± 0.4 | +3.7 ± 0.4 | +2.5 ± 0.3 | +0.6 ± 0.2 | +0.3 ± 0.1 | +0.2 ± 0.1 |
+| edge, best | +3.6 ± 0.4 | +3.7 ± 0.4 | +2.8 ± 0.3 | +1.0 ± 0.2 | +0.7 ± 0.1 | +0.6 ± 0.1 |
+| control, wise | +2.7 ± 0.4 | +2.7 ± 0.4 | +1.7 ± 0.3 | −0.1 ± 0.2 | −0.1 ± 0.1 | +0.1 ± 0.1 |
+| edge, wise | +2.3 ± 0.4 | +2.4 ± 0.4 | +1.3 ± 0.3 | −0.3 ± 0.2 | −0.3 ± 0.2 | −0.1 ± 0.1 |
+
+The first 16 frames pooled, and edge − control on the same draws:
+
+| first 16 frames | support, end | support, start | background, end | background, start |
+|---|---|---|---|---|
+| control, pre | +2.1 ± 0.4 | +1.1 ± 0.3 | +1.4 ± 0.2 | +1.5 ± 0.1 |
+| edge, pre | +2.0 ± 0.3 | +1.5 ± 0.3 | +1.1 ± 0.2 | +1.7 ± 0.1 |
+| edge − control, pre | −0.19 ± 0.04 | +0.45 ± 0.03 | −0.33 ± 0.02 | +0.22 ± 0.02 |
+| control, best | +2.9 ± 0.3 | +0.2 ± 0.2 | +1.6 ± 0.2 | +0.6 ± 0.1 |
+| edge, best | +3.0 ± 0.3 | −0.6 ± 0.2 | +1.6 ± 0.2 | −0.5 ± 0.1 |
+| edge − control, best | +0.12 ± 0.04 | −0.75 ± 0.04 | +0.07 ± 0.03 | −1.09 ± 0.03 |
+| control, wise | +2.0 ± 0.4 | +0.4 ± 0.2 | +1.0 ± 0.2 | +0.9 ± 0.1 |
+| edge, wise | +1.7 ± 0.3 | +0.4 ± 0.2 | +0.5 ± 0.2 | +0.7 ± 0.1 |
+| edge − control, wise | −0.32 ± 0.04 | +0.01 ± 0.03 | −0.45 ± 0.03 | −0.18 ± 0.02 |
+
+- **No checkpoint meets the target.** The best is edge wise, at +1.7 ± 0.3% at support in the last 16 frames, 0.3 points below its control.
+- **The arm's changes are small and mixed.**
+  - At the end it gains 0.2–0.45 points in pre and wise, and nothing in best.
+  - At the start, edge best overshoots: −0.6% at support and −0.5% in background, where its control is +0.2 and +0.6.
+- **Fine-tuning raises the end effect, and WiSE takes it back.** Control: +2.1 (pre), +2.9 (best), +2.0 (wise) at support. The edge arm follows the same pattern.
+- **About the size v9 had on the legacy draw.** v9 fine-tuned, 2026-11-22: +3.7 / +3.6 / +3.2 at support, end, in the 0–4 / 4–8 / 8–16 frame bins; control best here: +3.7 / +3.7 / +2.5. The new low-count draw does not change it.
+- **Away from edges the arm changes little.** The mid-window bias against the truth differs by +0.03 to +0.25 points in background and −0.05 to +0.16 at support (SE 0.01–0.05). At true trial ends (unpaired, against the truth) edge − control is −0.1 to −0.2 at support.
+
+**Result 2: the edge features removed the part they targeted, and only that.** Path swaps, support, end, first 8 frames:
+
+| | future trunk branch | window statistics | same-frame context | base (window-mean path) |
+|---|---|---|---|---|
+| control, pre / best / wise | +2.0 / +3.0 / +1.9 | +0.5 / +0.4 / +0.4 | +0.3 / +0.2 / +0.3 | 0.0 |
+| edge, pre / best / wise | +2.1 / +2.6 / +2.1 | 0.0 / +0.5 / −0.1 | +0.2 / +0.2 / +0.2 | 0.0 |
+
+- **The window statistics' share goes to zero** in edge pre and wise. That is what the per-side statistics were for.
+- **The future trunk branch's share stays at 2–3 points,** as in v9 (2.9). The edge-gated corrections could cancel it (their gate is 1 at an end), but training did not make them do so.
+
+**Result 3: real trials agree** (`tools/edge_pieces.py`, the five viewer trials, 512-frame pieces). Piece − whole, % of the whole trial's baseline, ± SE over trials. Support comes from 4 trials, because 847983's export has no support mask; background comes from all 5. Support, end of a piece:
+
+| | 0–8 | 8–16 | 16–32 | 32–64 | 64–128 | 128–256 |
+|---|---|---|---|---|---|---|
+| v9 fine-tuned | +4.6 ± 2.0 | +4.0 ± 1.9 | +2.4 ± 1.2 | +1.6 ± 0.8 | +0.6 ± 0.2 | +0.1 ± 0.1 |
+| control, best | +3.6 ± 0.7 | +2.7 ± 0.8 | +0.9 ± 0.5 | +0.5 ± 0.3 | +0.3 ± 0.1 | +0.1 ± 0.1 |
+| edge, best | +3.8 ± 0.7 | +3.1 ± 0.7 | +1.4 ± 0.4 | +1.0 ± 0.2 | +0.7 ± 0.1 | +0.2 ± 0.1 |
+| control, wise | +2.8 ± 0.5 | +1.9 ± 0.6 | +0.2 ± 0.4 | +0.1 ± 0.2 | +0.2 ± 0.1 | 0.0 ± 0.1 |
+| edge, wise | +2.4 ± 0.6 | +1.7 ± 0.5 | +0.1 ± 0.3 | 0.0 ± 0.1 | +0.1 ± 0.1 | −0.1 ± 0.1 |
+
+| first 16 frames | support, end | support, start | background, end | background, start |
+|---|---|---|---|---|
+| v9 fine-tuned | +4.3 ± 2.0 | +0.5 ± 0.5 | +2.1 ± 0.8 | +0.9 ± 0.2 |
+| control, best | +3.1 ± 0.8 | +0.4 ± 0.7 | +1.5 ± 0.4 | +0.3 ± 0.3 |
+| edge, best | +3.5 ± 0.7 | −0.3 ± 0.7 | +1.5 ± 0.3 | −0.8 ± 0.3 |
+| edge − control, best | +0.32 ± 0.09 | −0.72 ± 0.07 | +0.03 ± 0.05 | −1.16 ± 0.05 |
+| control, wise | +2.4 ± 0.6 | +0.7 ± 0.6 | +0.8 ± 0.3 | +0.6 ± 0.3 |
+| edge, wise | +2.1 ± 0.5 | +0.8 ± 0.6 | +0.3 ± 0.3 | +0.3 ± 0.2 |
+| edge − control, wise | −0.29 ± 0.02 | +0.13 ± 0.06 | −0.50 ± 0.06 | −0.28 ± 0.05 |
+
+- **v9 fine-tuned reproduces the v9 section's table** (+4.6 / +4.0 / +2.4 / +1.6 / +0.6 / +0.1), so these runs are comparable with the earlier ones.
+- **The edge arm gains as much as in the simulations.** With WiSE it is 0.3 points lower at the support end and 0.5 in background; with best.pt there is nothing at the end and an overshoot at the start (−0.7 at support, −1.2 in background).
+- **No checkpoint is under 1% at support.** The shipped control (wise) is at +2.4 ± 0.6, the edge arm's wise at +2.1 ± 0.5.
+- **S4 is lower than v9 on real trials** (control wise +2.4 against +4.3), mostly on 878030: v9 +9.7, S4 +3.4 to +5.1 (first 16 frames). In simulations, S4 control best is about where v9 was in the 2026-11-22 section (legacy draw, other draws), so the difference shows mainly on real data.
+
+**Conclusions.**
+- **The edge arm does not fix the edge bias.** With WiSE it takes 0.3 points off at support and 0.5 in background, the same in simulations and on real trials; with best.pt nothing at the end. All checkpoints miss the target by 1–2.5 points.
+- **Keep or drop the arm on the held-out evaluation, not on edges.** Its edge gain is small. Its best.pt overshoots at trial starts by 0.7–1.2 points (WiSE does not), which counts against shipping a best.pt of this arm.
+- **What remains is the future trunk branch's share** (2–3 points at support). The edge features do not address it, and in full training the edge-gated corrections, which could cancel it, did not learn to. That is with edge windows at 0.5 in both stages, so the training signal was there.
+
+**Next.**
+1. **Does the loss see it?** `edge_windows.py` now has a loss-weighted class (`lw`: all valid pixels, weighted 1 / (gain × mean image + 1) in counts, with training's floor of 1e-3 × scale on the mean image, as `train._ref_var` weighs them). Run it on windows placed as in training (`--support_frac 0`); this was not run yet (about 12 min on a free GPU).
+   - If lw's paired end effect is about 0, the network does what its loss asks. The footprint-pixel effect is then the answer under that weighting given one-sided information, and no architecture change will remove it. Handle edges downstream, or change the objective.
+   - If lw is clearly positive, the network falls short of its own optimum at edges. A loss weight on the frames near an edge is then the next arm to try.
+2. **Until then:** for the shipped baseline (control wise), the last ~0.2 s of a trial is 2–2.5% too high at source pixels and up to 1% in background; the first 0.2 s is within 1%.
+
+**Tools.**
+- `edge_windows.py`: the `lw` class, with the other classes computed as before.
+- `edge_pieces.py`: saves after every trial and checkpoint, and `--resume` runs only what is missing. On the local 4060 Ti a checkpoint takes 4–27 min per viewer trial (803121's scattered pixels need many tiles), and the results used to be saved only at the end.
