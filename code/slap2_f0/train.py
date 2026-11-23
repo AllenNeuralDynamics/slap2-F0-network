@@ -604,6 +604,7 @@ def _model_config(args) -> ModelConfig:
     mcfg.edge_features = getattr(args, "edge_features", False)
     mcfg.branch_mlp = getattr(args, "branch_mlp", 0)
     mcfg.fuse_blocks = getattr(args, "fuse_blocks", 0)
+    mcfg.pointwise_init = getattr(args, "pointwise_init", "rezero")
     if args.hp_temporal_dilations:
         mcfg.hp_temporal_dilations = [int(d) for d in args.hp_temporal_dilations.split(",")]
     if args.hp_spatial_dilations:
@@ -1446,6 +1447,9 @@ def add_arguments(p) -> None:
     p.add_argument("--fuse_blocks", type=int, default=0,
                    help="pointwise residual blocks after the two fusion layers (ModelConfig.fuse_blocks): more "
                         "processing after the branches are combined, same reach; starts out exactly as --init")
+    p.add_argument("--pointwise_init", choices=["rezero", "zero_out"], default="rezero",
+                   help="how --fuse_blocks/--branch_mlp blocks start: rezero (scale 0; their weights get no gradient "
+                        "until the scale moves) or zero_out (scale 1, last weights 0); both start as the identity")
     p.add_argument("--branch_mlp", type=int, default=0,
                    help="pointwise residual blocks after every dilated block of every branch "
                         "(ModelConfig.branch_mlp): more nonlinear processing of the same window, same reach")
