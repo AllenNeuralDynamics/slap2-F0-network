@@ -827,11 +827,12 @@ def test_evaluate_scores_averaged_checkpoints(tmp_path):
     assert avg["config"] == a["config"] and avg["window"] == a["window"]
     ev = tmp_path / "eval"
     main(["evaluate", str(tmp_path / "data"), "--ckpt", f"last={out / 'last.pt'}", f"same=avg:{out / 'last.pt'}",
-          f"soup=avg:{out / 'steps' / 'step_*.pt'}", "--kinds", "real", "--windows", "2", "--workers", "0",
+          f"soup=avg:{out / 'steps' / 'step_*.pt'}", f"avg:{steps[0]}=0.25;{steps[1]}=0.75",
+          "--kinds", "real", "--windows", "2", "--workers", "0",
           "--out", str(ev)])
     rows = list(csv.DictReader(open(ev / "eval.csv")))
     names = {r["checkpoint"] for r in rows}
-    assert {"last", "same", "soup"} <= names
+    assert {"last", "same", "soup", "avg1"} <= names  # an unnamed average is named avg<k>
     for s in {r["session"] for r in rows}:  # avg of one checkpoint = that checkpoint, on the same windows
         r1 = next(r for r in rows if r["checkpoint"] == "last" and r["session"] == s)
         r2 = next(r for r in rows if r["checkpoint"] == "same" and r["session"] == s)

@@ -1061,7 +1061,10 @@ def evaluate_checkpoints(args) -> None:
     rows = []
     specs = []
     for spec in args.ckpt:  # name=path, or name=folder/step_*.pt for all kept steps (named name@step_<N>)
-        name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
+        if spec.startswith("avg:"):  # unnamed average: its weights' "=" are not a name
+            name, path = f"avg{sum(1 for _, q in specs if q.startswith('avg:')) + 1}", spec
+        else:
+            name, path = spec.split("=", 1) if "=" in spec else (Path(spec).stem, spec)
         if path.startswith("avg:"):  # a weighted average of checkpoints, made in memory (average.parse_specs)
             specs.append((name, path))
         elif any(c in path for c in "*?["):
