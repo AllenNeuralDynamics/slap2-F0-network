@@ -634,3 +634,31 @@ def test_pointwise_depth_region_matches_full():
     full, part = model(x), model(x, region=region)
     for f, p in zip(full, part):
         assert torch.allclose(f[(slice(None),) + region], p)
+
+
+@pytest.mark.parametrize("init", ["rezero", "zero_out"])
+def test_pointwise_init_warm_start_and_gradients(init):
+    """Both inits warm-start exactly; with zero_out the blocks' last weights get a
+    gradient at the first step, with rezero they get none (only the scale does)."""
+    from slap2_f0.model import PointwiseBlock
+    from slap2_f0.train import load_compatible
+
+    torch.manual_seed(7)
+    kw = dict(gap=2, width=6, temporal_dilations=[1, 2], spatial_dilations=[1, 1], window_reach=6, full_res_blocks=1)
+    old = SlabBlindSpotNet(ModelConfig(**kw)).double()
+    _activate(old)
+    deep = SlabBlindSpotNet(ModelConfig(**kw, branch_mlp=1, fuse_blocks=2, pointwise_init=init)).double()
+    load_compatible(deep, old.state_dict(), old.cfg)
+    x = torch.randn(1, 5, 20, 12, 12, dtype=torch.float64)
+    x[:, 2] = x[:, 2].abs() + 1
+    a, b = old(x), deep(x)
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+    (b[0].sum() + b[1].sum()).backward()
+    blocks = [m for m in deep.modules() if isinstance(m, PointwiseBlock)]
+    g2 = sum(float(m.w2.weight.grad.abs().sum()) for m in blocks)
+    if init == "zero_out":
+        assert g2 > 0 and all(float(m.alpha) == 1.0 for m in blocks)
+    else:
+        assert g2 == 0 and all(float(m.alpha) == 0.0 for m in blocks)
+    with pytest.raises(ValueError):
+        PointwiseBlock(4, 8, "ones")
