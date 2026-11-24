@@ -2708,3 +2708,56 @@ The first 16 frames pooled, and edge − control on the same draws:
 This replaces "no re-export yet" above. The per-trial maps of the next version (and the session-level activity map) can be written in the same pass.
 
 **What this means for the models so far.** Every network so far was trained on targets that still hold part of the activity at footprints. Those pixels' loss pulled the baseline up during events, which the event mask and the activity-subtracted inputs only partly offset. Results on real-data targets (the held-out evaluations) are measured against the same biased targets, so they need re-running after the re-export.
+
+## Low baseline at low counts: a pilot of a bias loss term and activity-free trials (2026-11-24)
+
+**Question.** The baseline sits low where activity is absent or invisible, most at low photon counts ("Low photon counts: the baseline sits low"; −3.9% under the loss's weights in "Trial edges under the loss's own weights"). Two candidate fixes were tested before spending GPU time:
+1. **a bias term in the loss,** which makes training notice a systematic offset that the per-voxel loss weighs only as d² × photons;
+2. **activity-free trials alone** (`--silent_trial 0.2`), without the low-count arm's photon-gain change, which cost fast and sim in S4.
+
+**The bias term** (`train --bias_weight k`, `train.bias_loss`; off by default):
+- **What it adds.** For each simulated window and pixel class (footprint support, other labeled pixels, background): the squared loss-weighted sum of errors over the weighted count, (Σ w (target − mu) / v)² / Σ w / v.
+- **Its scale.** For an offset that is the same at every voxel of a class, it equals that class's share of the mean loss. For errors of random sign it is about (classes per window) / (voxels) of it. So k adds k times the mean loss's penalty on a systematic offset and almost nothing on noise.
+- **The target is unchanged.** The conditional mean still minimises the total.
+- **Real windows are left out,** because their target (movie − activity) carries GIAnT's biases. Training samples now carry a `sim` flag for this.
+- **Tested:** the constant-offset identity, zero on real windows, the cost of random errors (under 2%), gradients on simulated windows only, and a training run with `--bias_weight` and `--silent_trial`.
+
+**Pilot (local, RTX 4060 Ti).**
+- **Training:** the S4 control's pretraining pick, continued for 400 steps on simulated windows with the S4 options (fastpz with the current draw, `--edge_frac 0.5`), lr 1e-4, loss region 64 × 24².
+- **Data:** the viewer trials of three training mice (780125, 803121, 885233), with 878030 (dim, held out) for validation.
+- **Four arms:** control, `--bias_weight 10`, `--silent_trial 0.2`, and both.
+- **Scoring:** `slap2-f0 evaluate` on the same 48 windows per session and kind (real, fastpz, freepz, freepzdim, fastpzdim), five sessions (847983 and 878030 held out).
+
+**Result: neither change moves the low bias.** Arm − control, points of bias (% of the class's baseline; + = lower), mean over the five sessions:
+
+| kind | bias term: background / all pixels | activity-free trials: background / all | both: background / all |
+|---|---|---|---|
+| fastpz | +0.40 / −0.50 | +0.07 / +0.10 | +0.80 / +0.01 |
+| freepz | +0.39 / −0.56 | +0.05 / +0.06 | +0.75 / 0.00 |
+| freepzdim | +0.39 / −0.51 | 0.00 / +0.06 | +0.68 / −0.01 |
+| fastpzdim | +0.41 / −0.47 | 0.00 / +0.08 | +0.72 / −0.03 |
+| real | +0.39 / −0.14 | +0.05 / 0.00 | +0.77 / +0.15 |
+
+- **The bias term trades one class against another.** It lowers the baseline at background by 0.4 points, so background moves further low. It raises the brighter labeled and footprint pixels, about 0.5 points on all pixels pooled. The background error relative to the oracle gets 0.02–0.03 worse in the free and dim kinds.
+- **Activity-free trials do nothing measurable** at 20% in 400 steps (within ±0.1 point; the error is unchanged).
+- **The pilot's limit.** The control continuation itself removed most of the in-distribution bias. On the training mice's own simulated windows (training's `tr_` metrics), background went from 2.4% low at the start to 1.0% high after 400 steps, with or without the term. So the term had little in-distribution offset left to fix, and what remains is mostly out of the training range (below).
+
+**What the low bias follows: photons below the training range.** Control arm, bias of all pixels pooled (% low):
+
+| | native photon counts | a third of the photons (dim kinds) |
+|---|---|---|
+| 780125, 803121 (training mice), activity-free | +0.3, +0.4 | +0.3, +1.0 |
+| 885233 (training mouse, 0.4–0.5 photons per frame at footprints), activity-free | +1.8 | +4.1 |
+| 878030 (held out, 0.2 photons), activity-free | +3.6 | +6.2 |
+| 878030, with activity (fastpz) | +3.1 | +5.2 |
+| 878030, real background (target = movie − activity) | +3.0 | |
+
+The start checkpoint was at +6.7% on 878030 (activity-free, training's validation windows); 400 steps on these three mice took the control to +4.2%. Real rows are measured against targets that still hold part of each event at footprints ("Activity under-fit in the training targets": the exporter subtracted only about 0.5–0.8 of GIAnT's activity, and GIAnT under-fits). There, a target too high during events reads as a network that is too low, so real footprint numbers overstate the low bias; background pixels, with no fitted activity, are unaffected. The simulated kinds score against the true baseline and are unaffected.
+
+**Conclusions.**
+- **Drop activity-free trials alone** as a fix for the low bias: no effect.
+- **The bias term is not shown to help.** It stays as an option (off by default), because it is cheap and leaves the target unchanged. Only a full training run, where the in-distribution offset persists (S4's pick: 2.4% low at background), can test it.
+- **The lever is low-photon coverage.** Within the training mice's photon range the bias is about 0; below it, it grows to 3–6%. That is what the low-count arm's photon gain addressed (S4: freedim −8.3 points, but fast +7.5 and sim +10.1). A milder version is the next arm:
+  - `--photon_gain 1,2`, or the gain applied to a share of the trials only;
+  - judged on freepzdim and fastpzdim, the real background of the dim mice, and the fast and sim cost.
+- **A session-level activity map** (pooled over all of a session's trials, so even sub-photon activity shows which pixels are active) is planned for the next architecture update; see "Training data audit, and per-trial features for the next version" for its design and leak check.

@@ -837,3 +837,20 @@ def test_evaluate_scores_averaged_checkpoints(tmp_path):
         r1 = next(r for r in rows if r["checkpoint"] == "last" and r["session"] == s)
         r2 = next(r for r in rows if r["checkpoint"] == "same" and r["session"] == s)
         assert float(r1["sup_mse8_net"]) == pytest.approx(float(r2["sup_mse8_net"]), rel=1e-5)
+
+
+def test_train_bias_weight_and_silent_trials(tmp_path):
+    """--bias_weight (systematic-error term) and --silent_trial run end to end on simulated windows."""
+    for k, label in enumerate(["sessA", "sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    out = tmp_path / "out"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--data", "sim", "--steps", "2", "--batch", "2",
+          "--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0", "--val_every", "2",
+          "--val_windows", "2", "--log_every", "1", "--save_every", "2", "--bias_weight", "5",
+          "--silent_trial", "0.5"])
+    rows = list(csv.DictReader(open(out / "metrics.csv")))
+    assert rows and all(np.isfinite(float(r["sim_loss"])) for r in rows)
+    assert json.load(open(out / "config.json"))["args"]["bias_weight"] == 5.0

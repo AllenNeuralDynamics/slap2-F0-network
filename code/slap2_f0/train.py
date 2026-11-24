@@ -321,7 +321,42 @@ def _losses(args, b, mu, var, region):
     y, yn = b["target"][sel], b["noisy"][sel]
     mu_loss = (w * (y - mu) ** 2 / _ref_var(b, region)).sum() / w.sum().clamp_min(1.0)
     var_loss = gaussian_nll(yn, mu.detach(), var, w)
-    return args.w_mu * mu_loss + args.w_var * var_loss, mu_loss, var_loss
+    loss = args.w_mu * mu_loss + args.w_var * var_loss
+    if getattr(args, "bias_weight", 0.0) > 0:
+        loss = loss + args.w_mu * args.bias_weight * bias_loss(b, mu, region)
+    return loss, mu_loss, var_loss
+
+
+def bias_loss(b, mu, region):
+    """Systematic error of the baseline (``--bias_weight``). For each simulated
+    window and pixel class (footprint support, other labeled pixels,
+    background): (sum of w (target - mu) / v)^2 / (sum of w / v), with the mean
+    loss's weights w / v; summed and divided by the mean loss's normalisation.
+    For an error that is the same offset at every voxel of a class this equals
+    that class's share of the mean loss; for independent errors of random sign
+    it is about (classes per window) / (voxels) of it. So --bias_weight k adds k
+    times the mean loss's penalty on a systematic offset and almost nothing on
+    noise: the mean loss weighs a relative bias d at p photons per frame only as
+    d^2 p, which is why the network sits low at low counts (docs/plan.md, "Low
+    photon counts"). The conditional mean minimises it too (its class sums are
+    the conditional means of the truth's), so it changes what training attends
+    to, not what it aims at. Real windows are left out: their target (movie -
+    activity) carries GIAnT's own biases."""
+    sim = b.get("sim")
+    if sim is None:
+        return mu.new_zeros(())
+    sel = (slice(None),) + region
+    w = b["weight"][sel]
+    wv = w * sim.to(w.dtype).view(-1, 1, 1, 1) / _ref_var(b, region)
+    r = wv * (b["target"][sel] - mu)
+    sup = b["support"][(slice(None),) + region[1:]].bool()
+    lab = b["labeled"][(slice(None),) + region[1:]].bool()
+    total = mu.new_zeros(())
+    for m in (sup, lab & ~sup, ~lab):
+        m = m[:, None].to(r.dtype)
+        s, n = (r * m).sum((1, 2, 3)), (wv * m).sum((1, 2, 3))
+        total = total + (s ** 2 / n.clamp_min(1e-12)).sum()
+    return total / w.sum().clamp_min(1.0)
 
 
 def _forward(model, b, device, amp_dtype, region, aux=False):
@@ -1424,6 +1459,10 @@ def add_arguments(p) -> None:
     add_quality_arguments(p)
     p.add_argument("--w_mu", type=float, default=1.0, help="weight of the mean loss")
     p.add_argument("--w_var", type=float, default=0.1, help="weight of the noise (variance) loss")
+    p.add_argument("--bias_weight", type=float, default=0.0,
+                   help="weight of the systematic-error term (train.bias_loss): per simulated window and pixel class, "
+                        "the squared loss-weighted mean error; k adds k times the mean loss's penalty on a constant "
+                        "offset (default 0: off)")
     p.add_argument("--window_reach", type=int, default=254, help="frames beyond the gap for the blind window stats")
     p.add_argument("--max_log_correction", type=float, default=0.7, help="soft cap of |log| of the baseline correction")
     p.add_argument("--select", choices=["balanced", "balanced_free", "mse8", "loss"], default="balanced",

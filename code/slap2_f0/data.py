@@ -236,6 +236,7 @@ class WindowDataset(Dataset):
             "weight": torch.from_numpy(weight * np.isfinite(target) * np.isfinite(noisy)),
             "support": torch.from_numpy(support.astype(np.uint8)),
             "labeled": torch.from_numpy(labeled.astype(np.uint8)),
+            "sim": torch.tensor(np.float32(use_sim)),  # 1: simulated (target = the true baseline)
         }
 
 
