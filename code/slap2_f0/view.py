@@ -49,7 +49,8 @@ API (all GET, used by the page):
     /api/frame?key=K&t=T&avg=A        float32 (layers, N): the mean over A
                                       frames from T - (A - 1) // 2 of each
                                       layer in ``layers`` (movie, activity,
-                                      then the models), NaN-aware
+                                      then the models; for exported trials
+                                      movie, activity, target), NaN-aware
     /api/trace?key=K&r=R&c=C&rad=D    float32 (layers, frames): the mean over
                                       valid pixels within D rows and columns
                                       of (R, C); header X-Pixels the count
@@ -110,6 +111,10 @@ class _Frames:
     def _arrays(self) -> list[np.ndarray]:
         raise NotImplementedError
 
+    def _blocks(self, idx) -> list[np.ndarray]:
+        """Each layer's values at ``idx`` (frames, pixels)."""
+        return [a[idx] for a in self._arrays()]
+
     def _index(self):
         self.index = np.full((self.R, self.C), -1, np.int64)
         self.index[self.rows, self.cols] = np.arange(self.N)
@@ -118,8 +123,8 @@ class _Frames:
         lo = min(max(t - (avg - 1) // 2, 0), self.T - 1)
         hi = min(max(lo + avg, lo + 1), self.T)
         out = np.empty((len(self.layers), self.N), np.float32)
-        for i, a in enumerate(self._arrays()):
-            blk = a[lo:hi].astype(np.float32)
+        for i, blk in enumerate(self._blocks(np.s_[lo:hi])):
+            blk = blk.astype(np.float32)
             with np.errstate(invalid="ignore"), _quiet():
                 out[i] = blk[0] if hi - lo == 1 else np.nanmean(blk, 0)
         return out
@@ -129,9 +134,9 @@ class _Frames:
         k = sub[sub >= 0]
         out = np.full((len(self.layers), self.T), np.nan, np.float32)
         if len(k):
-            for i, a in enumerate(self._arrays()):
+            for i, blk in enumerate(self._blocks(np.s_[:, k])):
                 with _quiet():
-                    out[i] = np.nanmean(a[:, k].astype(np.float32), 1)
+                    out[i] = np.nanmean(blk.astype(np.float32), 1)
         return out, int(len(k))
 
     def _static(self) -> dict:
@@ -167,6 +172,9 @@ class Trial(_Frames):
         if self.movie is None:
             raise ValueError(f"no movie in {[str(f) for f in files]} (run predict without --no_movie once)")
         self.T, self.N = self.movie.shape
+        # activity only where the movie has data, so frame means and traces of data - activity
+        # average the same frames
+        self.activity[np.isnan(self.movie)] = np.nan
         self.baselines = {m: self.baselines[m] for m in _ordered(list(self.baselines), order)}
         for b in self.baselines.values():  # no data, never trained on: a baseline there means nothing
             b[self.discard] = np.nan
@@ -193,7 +201,9 @@ class ExportTrial(_Frames):
     ``stats.unfit_pixels`` on maps computed here as ``stats.trial_stats``
     computes them) and ``edge`` frames at each end of the trial."""
 
-    layers = ["movie", "activity"]
+    # the target, movie - activity, is a layer of its own, averaged over the frames that have a
+    # movie; the activity layer keeps GIAnT's fit everywhere, for its panel
+    layers = ["movie", "activity", "target"]
     # the exporter's chunks are 256 frames x 64 x 64 pixels: each read decompresses whole chunks once,
     # in small enough pieces that the server keeps answering while a trial loads
     T_BLOCK, C_BLOCK = 256, 64
@@ -264,6 +274,10 @@ class ExportTrial(_Frames):
 
     def _arrays(self):
         return [self.movie, self.activity]
+
+    def _blocks(self, idx):
+        m, a = self.movie[idx], self.activity[idx]
+        return [m, a, m - a]
 
     def static(self) -> dict:
         mt = [None if not np.isfinite(v) else round(float(v), 3) for v in self.mean_target]
@@ -345,7 +359,7 @@ class CodeOcean:
         self.cache_gb, self.workers = cache_gb, max(1, workers)
         self._locks: dict[Path, threading.Lock] = {}
         self._locks_lock = threading.Lock()
-        self.in_use: set[Path] = set()
+        self._held: dict[Path, int] = {}  # files eviction must keep, with their number of holders
 
     def _api(self, path: str, data=None):
         req = urllib.request.Request(self.base + path, data=None if data is None else json.dumps(data).encode(),
@@ -391,6 +405,8 @@ class CodeOcean:
         out = []
         for asset, summ in zip(assets, summaries):
             for a in summ.get("trials", []):
+                if a.get("error"):  # a failed export: no file
+                    continue
                 f = str(a.get("file", ""))
                 rec = _export_record(a, str(summ.get("label", "")), f"Path{a.get('path')}",
                                      Path(f).stem if f else f"trial_{int(a.get('trial', 0)):03d}")
@@ -421,13 +437,39 @@ class CodeOcean:
             total = int(str(r.headers.get("Content-Range", "/0")).rsplit("/", 1)[-1] or 0)
         return data, total or len(data)
 
-    def fetch(self, rec: dict, progress=None) -> Path:
-        """The trial's file in the cache, downloaded first if missing."""
+    def hold(self, p: Path):
+        with self._locks_lock:
+            self._held[p] = self._held.get(p, 0) + 1
+
+    def release(self, p: Path):
+        with self._locks_lock:
+            n = self._held.get(p, 0) - 1
+            if n > 0:
+                self._held[p] = n
+            else:
+                self._held.pop(p, None)
+
+    def fetch(self, rec: dict, progress=None, hold: bool = False) -> Path:
+        """The trial's file in the cache, downloaded first if missing. With
+        ``hold``, the file is kept from eviction until ``release`` (the cache
+        may pass its size meanwhile), so it can be opened."""
         dst = self.local_path(rec)
+        if hold:
+            self.hold(dst)
+        try:
+            self._fetch(rec, dst, progress)
+            self._evict(keep={dst})
+        except BaseException:
+            if hold:
+                self.release(dst)
+            raise
+        return dst
+
+    def _fetch(self, rec: dict, dst: Path, progress=None):
         with self._lock(dst):
             if dst.exists():
                 os.utime(dst)  # recently used: evicted last
-                return dst
+                return
             dst.parent.mkdir(parents=True, exist_ok=True)
             part = dst.with_name(dst.name + ".part")
             r = rec["remote"]
@@ -462,16 +504,16 @@ class CodeOcean:
             if done != total or part.stat().st_size != total:
                 raise OSError(f"incomplete download of {r['rel']}: {done} of {total} bytes")
             os.replace(part, dst)
-        self._evict()
-        return dst
 
-    def _evict(self):
+    def _evict(self, keep=()):
+        with self._locks_lock:
+            protected = set(self._held) | set(keep)
         files = [p for p in self.cache_dir.rglob("trial_*.h5") if p.is_file()]
         total = sum(p.stat().st_size for p in files)
         for p in sorted(files, key=lambda p: p.stat().st_mtime):
             if total <= self.cache_gb * 1e9:
                 break
-            if p in self.in_use:
+            if p in protected:
                 continue
             total -= p.stat().st_size
             p.unlink()
@@ -569,6 +611,8 @@ class Store:
                 if sp.exists():
                     summarized.add(r["session"])
                     for a in json.loads(sp.read_text(encoding="utf-8")).get("trials", []):
+                        if a.get("error"):  # a failed export: no file, not a trial training has
+                            continue
                         x = _export_record(a, r["session"], f"Path{a.get('path')}",
                                            f"trial_{int(a.get('trial', 0)):03d}")
                         rule_recs.append((x["session"], x["path"], x["trial"], x["peak_r"]))
@@ -581,8 +625,8 @@ class Store:
         why = dict(zip(owner, reasons))
         for r in recs:
             key = r["key"]
-            if key in self.exports:  # the same trial in two assets: keep both, apart
-                key = f"{key} ({r.get('remote', {}).get('mount', 'local')})"
+            if key in self.exports or key in self.files:  # the same trial twice: keep both, apart
+                key = f"{key} ({r.get('remote', {}).get('mount', 'export')})"
             self.exports[key] = {"file": r["file"]} if "file" in r else {"rec": r}
             m = {k: v for k, v in r.items() if k not in ("file", "remote", "peak_r")}
             m.update(key=key, role=roles.get(r["session"], ""), left_out=why.get(r["key"]), remote="remote" in r)
@@ -614,8 +658,8 @@ class Store:
                     self._cache[key] = tr
                     while len(self._cache) > self.cache_trials:
                         _, old = self._cache.popitem(last=False)
-                        if self.remote is not None and getattr(old, "file", None) is not None:
-                            self.remote.in_use.discard(old.file)
+                        if getattr(old, "held", False):
+                            self.remote.release(old.file)
             finally:
                 with self._lock:
                     self._loading.pop(key, None)
@@ -633,13 +677,18 @@ class Store:
                 tr = Trial(self.files[key], self.order)
             else:
                 e = self.exports[key]
-                if "rec" in e:
-                    fn = self.remote.fetch(e["rec"], say)
-                    self.remote.in_use.add(fn)
+                if "rec" in e:  # held in the cache while it loads and while it is shown
+                    fn = self.remote.fetch(e["rec"], say, hold=True)
                     self._meta(key)["cached"] = True
+                    try:
+                        tr = ExportTrial(fn, self.edge_s, self.w_unfitted, progress=say)
+                    except BaseException:
+                        self.remote.release(fn)
+                        raise
+                    tr.held = True
                 else:
                     fn = e["file"]
-                tr = ExportTrial(fn, self.edge_s, self.w_unfitted, progress=say)
+                    tr = ExportTrial(fn, self.edge_s, self.w_unfitted, progress=say)
                 tr.file = fn
         finally:
             self.progress.pop(key, None)

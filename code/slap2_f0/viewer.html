@@ -383,8 +383,12 @@ function values(tile) {
   const N = S.N, out = new Float32Array(N);
   if (tile.kind === "movie") return F.movie;
   if (tile.kind === "activity") return F.activity;
-  if (tile.kind === "target") { for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n]; return out; }
-  if (tile.kind === "dev") { for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n] - S.meanT[n]; return out; }
+  if (tile.kind === "target") {
+    if (F.target) return F.target;  // exported trials: averaged over the frames with a movie
+    for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n];
+    return out;
+  }
+  if (tile.kind === "dev") { for (let n = 0; n < N; n++) out[n] = F.target[n] - S.meanT[n]; return out; }
   const b = F[tile.model];
   if (tile.kind === "base") return b;
   for (let n = 0; n < N; n++) out[n] = residual(F.movie[n], F.activity[n], b[n]);
@@ -591,7 +595,7 @@ function updateReadout() {
   if (n < 0) { el.textContent = `row ${h.r}, col ${h.c}: not imaged`; return; }
   const F = S.frame, parts = [`row ${h.r}, col ${h.c}`, `data ${fmt(F.movie[n])}`, `activity ${fmt(F.activity[n])}`];
   if (S.kind === "export") {
-    const tg = F.movie[n] - F.activity[n];
+    const tg = F.target[n];
     parts.push(`target ${fmt(tg)}`, `target − trial mean ${fmt(tg - S.meanT[n])}`, NOLOSS[S.loss[n]]);
     const off = frameNoLoss(S.t); if (off && !S.loss[n]) parts[parts.length - 1] = `no loss in this frame (${off})`;
   }
@@ -666,8 +670,8 @@ function smooth(a, k) {
 function chartSeries() {
   if (!S.trace) return null;
   const k = S.tsmooth, tr = S.trace, T = S.T;
-  const target = new Float32Array(T);
-  for (let i = 0; i < T; i++) target[i] = tr.movie[i] - tr.activity[i];
+  let target = tr.target;  // exported trials: the ROI mean over pixels with a movie
+  if (!target) { target = new Float32Array(T); for (let i = 0; i < T; i++) target[i] = tr.movie[i] - tr.activity[i]; }
   const sT = smooth(target, k);
   const top = [{ name: "data", color: css("--data"), w: 1, y: smooth(tr.movie, k) },
                { name: "data − activity", color: css("--target"), w: 1.25, y: sT }];

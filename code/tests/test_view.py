@@ -29,6 +29,7 @@ def _trial(root, session, path, trial, peak_r=0.5, sources=True, seed=0, summary
     act = np.zeros_like(movie)
     if sources:
         act[0, 30:36, 4:7, 4:7] = 6.0
+        act[0, 40, 4:7, 4:7] = 9.0  # in the discarded frame, where the movie has no data
         act[0, :, 9, 11] = 5000.0  # fit artifact
     movie += np.where(act < 100, act, 0)
     valid = np.ones((R, C), np.uint8)
@@ -62,6 +63,10 @@ def _trial(root, session, path, trial, peak_r=0.5, sources=True, seed=0, summary
     return fn
 
 
+def at_index(rows, cols, r, c):
+    return int(np.nonzero((rows == r) & (cols == c))[0][0])
+
+
 def _get(url):
     with urllib.request.urlopen(url) as r:
         return r.read(), r.headers
@@ -91,7 +96,8 @@ def test_export_trials(tmp_path):
         key = "S1/Path1/trial_001"
         fn = data / "S1" / "Path1" / "trial_001.h5"
         st = json.loads(_get(f"{base}/api/static?key={key}")[0])
-        assert st["kind"] == "export" and st["layers"] == ["movie", "activity"] and st["shape"] == [T, R, C]
+        assert st["kind"] == "export" and st["layers"] == ["movie", "activity", "target"]
+        assert st["shape"] == [T, R, C]
         assert st["edge_frames"] == 20 and st["discard"] == [40]
         rows, cols, loss = np.array(st["rows"]), np.array(st["cols"]), np.array(st["loss"])
         at = {(r, c): v for r, c, v in zip(rows, cols, loss)}
@@ -102,21 +108,31 @@ def test_export_trials(tmp_path):
         with TrialFile(fn) as tf:
             p = tf.read(0, T, 0, R, 0, C)
         body, h = _get(f"{base}/api/frame?key={key}&t=10&avg=1")
-        fr = np.frombuffer(body, np.float32).reshape(2, len(rows))
-        assert json.loads(h["X-Layers"]) == ["movie", "activity"]
+        fr = np.frombuffer(body, np.float32).reshape(3, len(rows))
+        assert json.loads(h["X-Layers"]) == ["movie", "activity", "target"]
         assert np.array_equal(fr[0], p.movie[10, rows, cols]) and np.array_equal(fr[1], p.activity[10, rows, cols])
-        body, _ = _get(f"{base}/api/frame?key={key}&t=40&avg=1")  # discarded: no movie
-        assert np.isnan(np.frombuffer(body, np.float32).reshape(2, len(rows))[0]).all()
+        assert np.array_equal(fr[2], fr[0] - fr[1])
+        body, _ = _get(f"{base}/api/frame?key={key}&t=40&avg=1")  # discarded: no movie, the fit stays
+        fr = np.frombuffer(body, np.float32).reshape(3, len(rows))
+        assert np.isnan(fr[0]).all() and np.isnan(fr[2]).all() and fr[1][at_index(rows, cols, 5, 5)] == 9
+        # frames 39-41: the target averages frames 39 and 41 (40 has no movie), not mean(movie) - mean(activity)
+        body, _ = _get(f"{base}/api/frame?key={key}&t=40&avg=3")
+        fr = np.frombuffer(body, np.float32).reshape(3, len(rows))
+        tgt = p.movie[[39, 41]][:, rows, cols] - p.activity[[39, 41]][:, rows, cols]
+        assert np.allclose(fr[2], tgt.mean(0), rtol=1e-6)
+        assert not np.allclose(fr[2], fr[0] - fr[1])
         mt = np.array([np.nan if v is None else v for v in st["mean_target"]])
         tgt = p.movie[:, rows, cols] - p.activity[:, rows, cols]
         assert np.allclose(mt, np.nanmean(tgt, 0), rtol=1e-4)
         body, h = _get(f"{base}/api/trace?key={key}&r=5&c=5&rad=1")
-        tr = np.frombuffer(body, np.float32).reshape(2, T)
+        tr = np.frombuffer(body, np.float32).reshape(3, T)
         assert h["X-Pixels"] == "9"
         with warnings.catch_warnings():  # the discarded frame has no data
             warnings.simplefilter("ignore", RuntimeWarning)
             ref = np.nanmean(p.movie[:, 4:7, 4:7].reshape(T, -1), 1)
-        assert np.allclose(tr[0], ref, equal_nan=True)
+            ref_t = np.nanmean((p.movie - p.activity)[:, 4:7, 4:7].reshape(T, -1), 1)
+        assert np.allclose(tr[0], ref, equal_nan=True) and np.allclose(tr[2], ref_t, equal_nan=True)
+        assert np.isnan(tr[2][40]) and tr[1][40] == 9
         assert json.loads(_get(f"{base}/api/progress?key={key}")[0]) == {"msg": ""}
 
         st0 = json.loads(_get(f"{base}/api/static?key=S2/Path1/trial_001")[0])  # no sources: all of it counts
@@ -136,6 +152,10 @@ def test_path_rule_uses_the_export_summary(tmp_path):
     (data / "S3" / "export_summary.json").write_text(json.dumps(summ))
     store = Store(data, roles={})
     assert [m["left_out"] for m in store.meta] == [None, None]
+    # 3 usable trials plus a failed export (no file, no peak r): too few, as training sees them
+    summ["trials"] = summ["trials"][:3] + [{"path": 1, "trial": 4, "error": "export failed"}]
+    (data / "S3" / "export_summary.json").write_text(json.dumps(summ))
+    assert Store(data, roles={}).meta[0]["left_out"].startswith("path left out whole: 3 usable")
     (data / "S3" / "export_summary.json").unlink()
     assert Store(data, roles={}).meta[0]["left_out"].startswith("path left out whole: 2 usable")
 
@@ -193,6 +213,7 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
         with h5py.File(f, "r") as h:
             a = {k: _scalar(v) for k, v in h.attrs.items()}
         summ["trials"].append({**a, "file": f"/root/capsule/results/S1/Path1/{f.name}"})
+    summ["trials"].append({"path": 1, "trial": 9, "error": "export failed"})  # no file: not listed
     blobs["S1/export_summary.json"] = json.dumps(summ).encode()
     size = len(blobs["S1/Path1/trial_001.h5"])
     cache = tmp_path / "cache"
@@ -222,3 +243,33 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
     co.fetch(store.exports["S1/Path1/trial_004"]["rec"])
     left = sorted(p.name for p in cache.rglob("trial_*.h5"))
     assert left == ["trial_001.h5", "trial_004.h5"]  # trial_001 is shown (in use), trial_002 went
+
+
+def test_codeocean_small_cache_and_key_collisions(tmp_path, monkeypatch):
+    """A trial larger than the whole cache is kept while it loads and while
+    it is shown; an exported trial whose key a predict trial has stays
+    reachable under its own key."""
+    src = tmp_path / "src"
+    f = _trial(src, "S1", 1, 1)
+    blobs = {"S1/Path1/trial_001.h5": f.read_bytes()}
+    with h5py.File(f, "r") as h:
+        a = {k: _scalar(v) for k, v in h.attrs.items()}
+    blobs["S1/export_summary.json"] = json.dumps({"label": "S1", "trials": [
+        {**a, "file": "/root/capsule/results/S1/Path1/trial_001.h5"}]}).encode()
+    pred = tmp_path / "pred"
+    pred.mkdir()
+    with h5py.File(pred / "p.h5", "w") as h:
+        h.attrs.update({"slap2_f0_predictions": 1, "session": "S1", "path": "Path1", "trial": "trial_001",
+                        "n_frames": T, "n_rows": R, "n_cols": C})
+        h["rows"] = np.zeros(1, np.int32)
+    co = _FakeCodeOcean(tmp_path / "cache", blobs, monkeypatch, cache_gb=1e-9)
+    store = Store(pred, remote=co, roles={}, cache_trials=1)
+    keys = [m["key"] for m in store.meta]
+    assert keys == ["S1/Path1/trial_001", "S1/Path1/trial_001 (f0p1_S1)"]
+    assert [m["kind"] for m in store.meta] == ["predict", "export"]
+    tr = store.trial("S1/Path1/trial_001 (f0p1_S1)")
+    assert isinstance(tr, ExportTrial) and tr.file.exists()  # not evicted before or after loading
+    assert co._held == {tr.file: 1}
+    co.release(tr.file)
+    co._evict()
+    assert not tr.file.exists()  # released: the over-full cache lets it go
