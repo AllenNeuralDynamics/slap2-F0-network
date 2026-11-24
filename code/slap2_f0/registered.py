@@ -191,8 +191,9 @@ def run(args: argparse.Namespace) -> None:
             print(f"{dest.name} exists, skipped", flush=True)
             continue
         t0 = time.time()
-        movie, valid, discard, varfac, hz = load_registered(movie_path, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1,
-                                                            args.nan_thresh, args.motion_thresh, args.discard_initial_s)
+        movie, valid, discard, varfac, hz = load_registered(
+            movie_path, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1, args.nan_thresh, args.motion_thresh,
+            args.discard_initial_s)
         t1 = time.time()
         tr = ArrayTrial(movie, valid, discard, varfac)
         st = movie_stats(movie, valid, discard)
