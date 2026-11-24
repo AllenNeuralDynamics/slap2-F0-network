@@ -2752,7 +2752,7 @@ This replaces "no re-export yet" above. The per-trial maps of the next version (
 | 878030, with activity (fastpz) | +3.1 | +5.2 |
 | 878030, real background (target = movie − activity) | +3.0 | |
 
-The start checkpoint was at +6.7% on 878030 (activity-free, training's validation windows); 400 steps on these three mice took the control to +4.2%. Real rows are measured against targets that still hold part of the activity at footprints ("Activity under-fit in the training targets"); background, which has no activity, is the least affected.
+The start checkpoint was at +6.7% on 878030 (activity-free, training's validation windows); 400 steps on these three mice took the control to +4.2%. Real rows are measured against targets that still hold part of each event at footprints ("Activity under-fit in the training targets": the exporter subtracted only about 0.5–0.8 of GIAnT's activity, and GIAnT under-fits). There, a target too high during events reads as a network that is too low, so real footprint numbers overstate the low bias; background pixels, with no fitted activity, are unaffected. The simulated kinds score against the true baseline and are unaffected.
 
 **Conclusions.**
 - **Drop activity-free trials alone** as a fix for the low bias: no effect.
@@ -2760,4 +2760,4 @@ The start checkpoint was at +6.7% on 878030 (activity-free, training's validatio
 - **The lever is low-photon coverage.** Within the training mice's photon range the bias is about 0; below it, it grows to 3–6%. That is what the low-count arm's photon gain addressed (S4: freedim −8.3 points, but fast +7.5 and sim +10.1). A milder version is the next arm:
   - `--photon_gain 1,2`, or the gain applied to a share of the trials only;
   - judged on freepzdim and fastpzdim, the real background of the dim mice, and the fast and sim cost.
-- **A session-level activity map** (pooled over all of a session's trials, so even sub-photon activity shows which pixels are active) is planned for the next architecture update.
+- **A session-level activity map** (pooled over all of a session's trials, so even sub-photon activity shows which pixels are active) is planned for the next architecture update; see "Training data audit, and per-trial features for the next version" for its design and leak check.
