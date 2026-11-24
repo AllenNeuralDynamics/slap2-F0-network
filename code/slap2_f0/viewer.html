@@ -327,9 +327,11 @@ async function loadTrial(key) {
     let t1 = S.edge; while (t1 < S.T - 1 && S.discard.has(t1)) t1++;
     if (t1 < S.T - S.edge) { S.t = Math.min(S.T - 1, t1 + Math.floor(S.avg / 2)); $("tslider").value = S.t; updateTLabel(); }
   }
-  buildModels(); buildTiles();
+  S.frame = null; S.trace = null;  // the last trial's arrays do not fit this one
+  buildModels(); buildTiles(); drawCharts();
   S.autoNext = true;
   await requestFrame();
+  if (seq !== S.seq) return;
   loadTrace();
 }
 
@@ -337,9 +339,12 @@ async function requestFrame() {
   if (!S.trial) return;
   if (S.inflight) { S.pending = true; return; }
   S.inflight = true;
-  const t = S.t, avg = S.avg;
+  const t = S.t, avg = S.avg, seq = S.seq;
+  // exported trials, loss blanked: the target averages only the frames with loss
+  const loss = S.kind === "export" && S.hideLoss ? "&loss=1" : "";
   try {
-    const { buf } = await getBin(`/api/frame?key=${encodeURIComponent(S.trial.key)}&t=${t}&avg=${avg}`);
+    const { buf } = await getBin(`/api/frame?key=${encodeURIComponent(S.trial.key)}&t=${t}&avg=${avg}${loss}`);
+    if (seq !== S.seq) throw null;  // another trial was picked meanwhile: its layout differs
     const all = new Float32Array(buf);
     S.frame = {};
     S.layers.forEach((name, i) => { S.frame[name] = all.subarray(i * S.N, (i + 1) * S.N); });
@@ -347,16 +352,18 @@ async function requestFrame() {
     if (S.autoNext) { autoRange(); S.autoNext = false; }
     renderAll();
     setStatus(S.playing ? "playing" : "");
-  } catch (e) { setStatus(e.message, true); }
+  } catch (e) { if (e && seq === S.seq) setStatus(e.message, true); }
   S.inflight = false;
   if (S.pending) { S.pending = false; requestFrame(); }
 }
 
 async function loadTrace() {
   if (!S.trial || !S.sel) return;
-  const { r, c } = S.sel;
+  const { r, c } = S.sel, seq = S.seq, rad = S.rad;
   try {
-    const { buf, headers } = await getBin(`/api/trace?key=${encodeURIComponent(S.trial.key)}&r=${r}&c=${c}&rad=${S.rad}`);
+    const { buf, headers } = await getBin(`/api/trace?key=${encodeURIComponent(S.trial.key)}&r=${r}&c=${c}&rad=${rad}`);
+    // stale: another trial, pixel or ROI was picked meanwhile
+    if (seq !== S.seq || !S.sel || S.sel.r !== r || S.sel.c !== c || S.rad !== rad) return;
     const all = new Float32Array(buf);
     S.trace = {};
     S.layers.forEach((name, i) => { S.trace[name] = all.subarray(i * S.T, (i + 1) * S.T); });
@@ -373,7 +380,7 @@ async function loadTrace() {
     $("pixinfo").textContent = `row ${r}, col ${c} · ${headers.get("X-Pixels")} valid px · ${where}${loss}`;
     drawCharts();
     drawAllTiles();
-  } catch (e) { setStatus(e.message, true); }
+  } catch (e) { if (seq === S.seq) setStatus(e.message, true); }
 }
 
 // ---------- values ----------
@@ -483,10 +490,9 @@ function renderTile(t) {
   const u = t.u32, pix = S.pix, N = S.N;
   // exported trials: the target panels can leave blank what the training loss ignores
   const blank = S.kind === "export" && S.hideLoss && (t.kind === "target" || t.kind === "dev");
-  if (blank) {
-    const off = frameNoLoss(S.t);
-    t.subEl.textContent = off ? `no loss in this frame (${off})` : t.sub;
-    if (off) { u.fill(0); t.octx.putImageData(t.img, 0, 0); return; }
+  if (blank) {  // the server averaged the target over loss frames only: NaN where there were none
+    const off = windowNoLoss();
+    t.subEl.textContent = off ? `no loss in ${S.avg > 1 ? "these frames" : "this frame"} (${off})` : t.sub;
   } else if (t.subEl) t.subEl.textContent = t.sub;
   if (t.kind === "res" || t.kind === "dev") {
     const k = 127.5 / S.rr;
@@ -628,6 +634,12 @@ function frameNoLoss(t) {  // why training puts no loss on frame t of an exporte
   if (t >= S.T - S.edge) return `last ${s} s`;
   return "";
 }
+function windowNoLoss() {  // why no frame of the current frame mean has loss ("" if one has)
+  const lo = Math.min(Math.max(S.t - Math.floor((S.avg - 1) / 2), 0), S.T - 1), hi = Math.min(Math.max(lo + S.avg, lo + 1), S.T);
+  const why = new Set();
+  for (let t = lo; t < hi; t++) { const w = frameNoLoss(t); if (!w) return ""; why.add(w); }
+  return [...why].join(", ");
+}
 function updateTLabel() {
   const a = S.avg > 1 ? ` (mean of ${S.avg})` : "";
   const off = frameNoLoss(S.t);
@@ -755,7 +767,7 @@ function noLossRuns() {  // [start, end) frame runs without loss, cached per tri
 function drawCharts() {
   const ser = chartSeries();
   const lg = $("legend"); lg.innerHTML = "";
-  if (!ser) return;
+  if (!ser) { for (const id of ["c1", "c2"]) { const cv = $(id); cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); } return; }
   for (const s of S.kind === "export" ? ser.top.concat(ser.bottom) : ser.top) {
     const sp = document.createElement("span");
     sp.innerHTML = `<span class="sw" style="background:${s.color};height:${Math.max(2, s.w)}px"></span>${s.name}`;
@@ -828,7 +840,7 @@ for (const id of ["lo", "hi", "rr"]) $(id).addEventListener("change", () => {
   const v = parseFloat($(id).value); if (Number.isFinite(v)) { S[id] = v; renderAll(); }
 });
 $("bauto").onclick = () => { autoRange(); renderAll(); };
-$("hideloss").onchange = (e) => { S.hideLoss = e.target.checked; renderAll(); };
+$("hideloss").onchange = (e) => { S.hideLoss = e.target.checked; requestFrame(); };
 $("tprev").onclick = () => stepTrial(-1);
 $("tnext").onclick = () => stepTrial(1);
 $("gamma").onchange = (e) => { S.gamma = +e.target.value; renderAll(); };

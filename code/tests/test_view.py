@@ -126,6 +126,14 @@ def test_export_trials(tmp_path):
         tgt = p.movie[[39, 41]][:, rows, cols] - p.activity[[39, 41]][:, rows, cols]
         assert np.allclose(fr[2], tgt.mean(0), rtol=1e-6)
         assert not np.allclose(fr[2], fr[0] - fr[1])
+        # loss frames only: 8 frames at t=20 are 17-24, of which 20-24 are past the 2 s edge
+        body, _ = _get(f"{base}/api/frame?key={key}&t=20&avg=8&loss=1")
+        fr = np.frombuffer(body, np.float32).reshape(3, len(rows))
+        tgt = p.movie[20:25][:, rows, cols] - p.activity[20:25][:, rows, cols]
+        assert np.allclose(fr[2], tgt.mean(0), rtol=1e-6)
+        body, _ = _get(f"{base}/api/frame?key={key}&t=5&avg=8&loss=1")  # all within the first 2 s
+        fr = np.frombuffer(body, np.float32).reshape(3, len(rows))
+        assert np.isnan(fr[2]).all() and np.isfinite(fr[0]).all()
         mt = np.array([np.nan if v is None else v for v in st["mean_target"]])
         tgt = p.movie[:, rows, cols] - p.activity[:, rows, cols]
         assert np.allclose(mt, np.nanmean(tgt, 0), rtol=1e-4)
@@ -204,7 +212,12 @@ class _FakeCodeOcean(CodeOcean):
     def _get_json(self, url):
         return json.loads(self.blobs[url[len("mem://"):]])
 
+    fail_first = 0  # this many first-range requests fail, as a timeout would
+
     def _range(self, url, lo, hi):
+        if lo == 0 and self.fail_first > 0:
+            self.fail_first -= 1
+            raise TimeoutError("first range timed out")
         b = self.blobs[url[len("mem://"):]]
         return b[lo:hi + 1], len(b)
 
@@ -219,10 +232,13 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
             a = {k: _scalar(v) for k, v in h.attrs.items()}
         summ["trials"].append({**a, "file": f"/root/capsule/results/S1/Path1/{f.name}"})
     summ["trials"].append({"path": 1, "trial": 9, "error": "export failed"})  # no file: not listed
+    summ["trials"].append({**summ["trials"][0], "trial": 7.0,  # would leave the cache: not listed
+                           "file": "/root/capsule/results/../../../outside/trial_007.h5"})
     blobs["S1/export_summary.json"] = json.dumps(summ).encode()
     size = len(blobs["S1/Path1/trial_001.h5"])
     cache = tmp_path / "cache"
     co = _FakeCodeOcean(cache, blobs, monkeypatch, cache_gb=2.5 * size / 1e9)
+    co.fail_first = 1  # the first download's first range fails once
     recs = co.trials()
     assert [r["key"] for r in recs] == [f"S1/Path1/trial_00{t}" for t in range(1, 6)]
     assert recs[0]["remote"] == {"asset": "A1", "rel": "S1/Path1/trial_001.h5", "mount": "f0p1_S1"}
@@ -242,7 +258,8 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
     assert got.read_bytes() == blobs["S1/Path1/trial_001.h5"]  # assembled from many ranges
     assert any(s.startswith("downloading") for s in msgs) and any(s.startswith("reading") for s in msgs)
     assert m["S1/Path1/trial_001"]["cached"] and isinstance(tr, ExportTrial) and tr.T == T
-    assert not list(cache.rglob("*.part"))
+    assert not list(cache.rglob("*.part")) and co.fail_first == 0
+    assert not (tmp_path / "outside").exists()
     # the cache holds 2.5 trials: fetching two more evicts the least recently used one not in use
     co.fetch(store.exports["S1/Path1/trial_002"]["rec"])
     co.fetch(store.exports["S1/Path1/trial_004"]["rec"])

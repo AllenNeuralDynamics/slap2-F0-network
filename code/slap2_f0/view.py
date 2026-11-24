@@ -119,9 +119,13 @@ class _Frames:
         self.index = np.full((self.R, self.C), -1, np.int64)
         self.index[self.rows, self.cols] = np.arange(self.N)
 
-    def frame(self, t: int, avg: int) -> np.ndarray:
+    def span(self, t: int, avg: int) -> tuple[int, int]:
+        """The frames [lo, hi) a frame mean of ``avg`` frames at ``t`` covers."""
         lo = min(max(t - (avg - 1) // 2, 0), self.T - 1)
-        hi = min(max(lo + avg, lo + 1), self.T)
+        return lo, min(max(lo + avg, lo + 1), self.T)
+
+    def frame(self, t: int, avg: int, loss_only: bool = False) -> np.ndarray:
+        lo, hi = self.span(t, avg)
         out = np.empty((len(self.layers), self.N), np.float32)
         for i, blk in enumerate(self._blocks(np.s_[lo:hi])):
             blk = blk.astype(np.float32)
@@ -279,6 +283,21 @@ class ExportTrial(_Frames):
         m, a = self.movie[idx], self.activity[idx]
         return [m, a, m - a]
 
+    def frame(self, t: int, avg: int, loss_only: bool = False) -> np.ndarray:
+        """With ``loss_only``, the target layer averages only the frames
+        training puts loss on (not within ``edge`` of the trial's ends;
+        discarded frames have no movie anyway): NaN if there are none."""
+        out = super().frame(t, avg)
+        if loss_only and self.edge:
+            lo, hi = self.span(t, avg)
+            fr = np.arange(lo, hi)
+            ok = (fr >= self.edge) & (fr < self.T - self.edge)
+            if not ok.all():
+                with np.errstate(invalid="ignore"), _quiet():
+                    out[2] = (np.nanmean(self.movie[lo:hi][ok] - self.activity[lo:hi][ok], 0) if ok.any()
+                              else np.nan)
+        return out
+
     def static(self) -> dict:
         mt = [None if not np.isfinite(v) else round(float(v), 3) for v in self.mean_target]
         return {**self._static(), "kind": "export", "loss": self.loss.tolist(), "edge_frames": self.edge,
@@ -416,11 +435,22 @@ class CodeOcean:
                 rel = (f.split("/results/", 1)[1] if "/results/" in f
                        else f"{rec['session']}/Path{rec['path']}/trial_{rec['trial']:03d}.h5")
                 rec["remote"] = {"asset": asset["id"], "rel": rel, "mount": asset.get("mount") or asset["id"]}
+                try:
+                    self.local_path(rec)
+                except ValueError as e:  # a path that would leave the cache: not listed
+                    print(f"skipping {rec['key']}: {e}", flush=True)
+                    continue
                 out.append(rec)
         return out
 
     def local_path(self, rec: dict) -> Path:
-        return self.cache_dir / self.DOWNLOADS / rec["remote"]["mount"] / rec["remote"]["rel"]
+        """Where the trial goes in the cache; never outside the downloads
+        folder, whatever the asset's mount or summary paths say."""
+        root = (self.cache_dir / self.DOWNLOADS).resolve()
+        dst = (root / rec["remote"]["mount"] / rec["remote"]["rel"]).resolve()
+        if root not in dst.parents or dst.suffix != ".h5":
+            raise ValueError(f"remote trial path outside the download folder: {rec['remote']}")
+        return dst
 
     def cached(self, rec: dict) -> bool:
         return self.local_path(rec).exists()
@@ -479,21 +509,25 @@ class CodeOcean:
             url_path = f"/data_assets/{r['asset']}/files/download_url?path={urllib.parse.quote(r['rel'])}"
             url = [self._api(url_path)["url"]]
             t0 = time.time()
-            first, total = self._range(url[0], 0, self.PART - 1)
+
+            def ranged(lo, hi):
+                for attempt in range(4):
+                    try:
+                        return self._range(url[0], lo, hi)
+                    except (urllib.error.URLError, OSError):
+                        if attempt == 3:
+                            raise
+                        time.sleep(2 ** attempt)
+                        url[0] = self._api(url_path)["url"]  # presigned URLs expire
+
+            first, total = ranged(0, self.PART - 1)
             done = len(first)
             with open(part, "wb") as f:
                 f.truncate(total)
                 f.write(first)
 
             def get(o):
-                for attempt in range(4):
-                    try:
-                        return o, self._range(url[0], o, min(o + self.PART, total) - 1)[0]
-                    except (urllib.error.URLError, OSError):
-                        if attempt == 3:
-                            raise
-                        time.sleep(2 ** attempt)
-                        url[0] = self._api(url_path)["url"]  # presigned URLs expire
+                return o, ranged(o, min(o + self.PART, total) - 1)[0]
 
             with ThreadPoolExecutor(self.workers) as ex, open(part, "r+b") as f:
                 for fut in as_completed([ex.submit(get, o) for o in range(self.PART, total, self.PART)]):
@@ -513,7 +547,7 @@ class CodeOcean:
         # snapshot of the held files and its deletion
         with self._locks_lock:
             protected = set(self._held) | set(keep)
-            root = self.cache_dir / self.DOWNLOADS
+            root = (self.cache_dir / self.DOWNLOADS).resolve()  # as local_path names the files
             files = [(p, p.stat()) for p in root.rglob("trial_*.h5") if p.is_file()] if root.exists() else []
             total = sum(st.st_size for _, st in files)
             for p, st in sorted(files, key=lambda x: x[1].st_mtime):
@@ -773,7 +807,7 @@ def make_handler(store: Store):
                 elif u.path == "/api/frame":
                     tr = store.trial(q["key"])
                     t = min(max(int(q.get("t", 0)), 0), tr.T - 1)
-                    a = tr.frame(t, max(1, int(q.get("avg", 1))))
+                    a = tr.frame(t, max(1, int(q.get("avg", 1))), loss_only=q.get("loss") == "1")
                     self._send(200, a.tobytes(), "application/octet-stream",
                                {"X-Layers": json.dumps(tr.layers), "X-Frame": str(t)})
                 elif u.path == "/api/progress":
