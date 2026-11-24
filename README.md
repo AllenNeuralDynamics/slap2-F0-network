@@ -89,6 +89,8 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 
 `slap2-f0 train <folder>` trains the slab blind-spot network on the exported trials under `<folder>`.
 
+- **Architecture** (`docs/figures/network_architecture.svg`): the deep architecture by default. Pointwise residual blocks follow every dilated block (`--branch_mlp 1`) and the fusion (`--fuse_blocks 4`), starting as the identity (`--pointwise_init zero_out`); `--fuse_blocks 0 --branch_mlp 0` gives the shallow model (v9, the S4 control). A shallow `--init` checkpoint gets the new blocks as identities, so it starts out computing what it did.
+
 - **Data** (`--data`):
   - `sim` (default): simulated windows with the true baseline as the target (`slap2_f0/simulate.py`), for pretraining.
   - `real`: real windows with movie − activity as the target, for fine-tuning a pretrained checkpoint (`--init best.pt`).

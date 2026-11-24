@@ -1444,15 +1444,21 @@ def add_arguments(p) -> None:
     p.add_argument("--motion_features", action="store_true",
                    help="box model: also the local displacement and blur seen in the surround, as the change they "
                         "make at the pixel (model.motion_features); warm-starts from checkpoints without them")
-    p.add_argument("--fuse_blocks", type=int, default=0,
+    # the deep architecture is the default (docs/plan.md, "Deep arm rerun"): --fuse_blocks 0 --branch_mlp 0
+    # trains the shallow model (v9, the S4 control). A shallow --init checkpoint gets the new blocks as
+    # identities (zero_out), so it starts out computing what it did
+    p.add_argument("--fuse_blocks", type=int, default=4,
                    help="pointwise residual blocks after the two fusion layers (ModelConfig.fuse_blocks): more "
-                        "processing after the branches are combined, same reach; starts out exactly as --init")
-    p.add_argument("--pointwise_init", choices=["rezero", "zero_out"], default="rezero",
+                        "processing after the branches are combined, same reach; starts out exactly as --init "
+                        "(default 4, the deep architecture; 0 for the shallow model)")
+    p.add_argument("--pointwise_init", choices=["rezero", "zero_out"], default="zero_out",
                    help="how --fuse_blocks/--branch_mlp blocks start: rezero (scale 0; their weights get no gradient "
-                        "until the scale moves) or zero_out (scale 1, last weights 0); both start as the identity")
-    p.add_argument("--branch_mlp", type=int, default=0,
+                        "until the scale moves, and warm-started they stayed off in S4's deep arm) or zero_out "
+                        "(scale 1, last weights 0; the default); both start as the identity")
+    p.add_argument("--branch_mlp", type=int, default=1,
                    help="pointwise residual blocks after every dilated block of every branch "
-                        "(ModelConfig.branch_mlp): more nonlinear processing of the same window, same reach")
+                        "(ModelConfig.branch_mlp): more nonlinear processing of the same window, same reach "
+                        "(default 1, the deep architecture; 0 for the shallow model)")
     p.add_argument("--edge_features", action="store_true",
                    help="per-side window statistics into the fusion and edge-gated corrections of the baseline and "
                         "noise (ModelConfig.edge_features); starts out exactly as the --init checkpoint")

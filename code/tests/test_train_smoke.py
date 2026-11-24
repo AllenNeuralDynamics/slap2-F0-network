@@ -645,6 +645,35 @@ def test_edge_features_finetune_from_checkpoint(tmp_path):
     assert len(list(csv.DictReader(open(ev / "eval.csv")))) == 3
 
 
+def test_deep_architecture_is_the_default(tmp_path):
+    """slap2-f0 train builds the deep architecture by default (pointwise blocks
+    after every dilated block and after the fusion, zero_out). A shallow
+    checkpoint (--fuse_blocks 0 --branch_mlp 0) warm-starts it exactly: its
+    step-0 validation is the checkpoint's own."""
+    for k, label in enumerate(["sessA", "sessB", "sessC"]):
+        d = tmp_path / "data" / label / "Path1"
+        d.mkdir(parents=True, exist_ok=True)
+        _trial(d / f"trial_{k:03d}.h5", label, k)
+    arch = ["--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
+            "--window_reach", "6", "--box_radius", "2", "--hp_width", "4", "--hp_temporal_dilations", "1,2",
+            "--hp_spatial_dilations", "1,1", "--hp_full_res_blocks", "1", "--pool_scales", "4,0"]
+    common = ["--data", "sim", "--batch", "1", "--out_frames", "16", "--out_px", "8", "--workers", "0",
+              "--val_windows", "2", "--val_every", "2"]
+    pre = tmp_path / "shallow"
+    main(["train", str(tmp_path / "data"), "--out", str(pre), "--steps", "2", "--fuse_blocks", "0", "--branch_mlp", "0"]
+         + arch + common)
+    cfg = json.loads((pre / "config.json").read_text())["model"]
+    assert cfg["fuse_blocks"] == 0 and cfg["branch_mlp"] == 0
+    out = tmp_path / "deep"
+    main(["train", str(tmp_path / "data"), "--out", str(out), "--steps", "2", "--init", str(pre / "last.pt"),
+          "--stats_cache", str(pre / "stats")] + arch + common)
+    cfg = json.loads((out / "config.json").read_text())["model"]
+    assert (cfg["fuse_blocks"], cfg["branch_mlp"], cfg["pointwise_init"]) == (4, 1, "zero_out")
+    last = list(csv.DictReader(open(pre / "metrics.csv")))[-1]
+    first = list(csv.DictReader(open(out / "metrics.csv")))[0]
+    assert np.isclose(float(first["sim_mse_net"]), float(last["sim_mse_net"]), rtol=1e-5)  # starts as the checkpoint
+
+
 SMALL = ["--width", "4", "--temporal_dilations", "1,2", "--spatial_dilations", "1,1", "--gap", "2",
          "--window_reach", "6", "--out_frames", "16", "--out_px", "8", "--workers", "0"]
 
