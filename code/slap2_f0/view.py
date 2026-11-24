@@ -315,8 +315,12 @@ class _quiet:
         self._w.__exit__(*exc)
 
 
-QC_FIELDS = ("peakR", "peakSlope", "activityGain", "blurSigma", "eventResidualFraction", "diskR", "diskSlope",
-             "nEvents", "photonScale", "giantRef")
+# an exported trial's QC attributes passed to the viewer (README, "Output format"); exports
+# made before the gain was dropped scaled the activity by activityGain and lack activitySlope,
+# blurShapeRatio and the eventRatio* fields
+QC_FIELDS = ("peakR", "peakSlope", "activityGain", "activitySlope", "blurSigma", "blurShapeRatio",
+             "eventResidualFraction", "diskR", "diskSlope", "nEvents", "eventRatioCore", "eventRatio2px",
+             "eventRatioSources", "eventRatioEvents", "eventRatioArtifactSources", "photonScale", "giantRef")
 SESSION_LISTS = ("export_phase1.csv", "export_phase2.csv")
 
 

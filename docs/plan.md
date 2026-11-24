@@ -2685,29 +2685,59 @@ The first 16 frames pooled, and edge − control on the same draws:
   - a local export folder works as well.
   A trial takes 13–18 s to open, download included. The session's next trial loads in the background, so stepping through a session takes about 0.2 s per trial.
 
-## Activity under-fit in the training targets: re-export after a GIAnT fix (2026-11-24)
+## Activity in the training targets: GIAnT over-estimates found events, the exporter's gain was a regression artifact (2026-11-24)
 
-**Found with the training-data viewer.** At source footprints the target (movie − activity) keeps a large share of each event: GIAnT's fitted activity does not explain all of it. The user's view of 776266_2025-01-09 path 1 trial 1 shows it plainly in the traces. That makes the targets wrong, and GIAnT's own F0, ΔF/F0 and spine brightness estimates biased. **Decision (the user): fix it in GIAnT-MATLAB, then re-export the training data.** Plan: [GIAnT-MATLAB#56](https://github.com/AllenNeuralDynamics/GIAnT-MATLAB/issues/56). Integration tests that measure the fit's under- and over-fit: [slap2-dev#64](https://github.com/AllenNeuralDynamics/slap2-dev/issues/64).
+This replaces the section merged in #20 ("Activity under-fit in the training targets: re-export after a GIAnT fix"). That section said GIAnT under-fits and that the re-export should use gain 1 alone. A closer look found otherwise. The revised plan, approved by the user on 2026-11-24, is in [GIAnT-MATLAB#56](https://github.com/AllenNeuralDynamics/GIAnT-MATLAB/issues/56); the integration tests that follow from it are in [slap2-dev#64](https://github.com/AllenNeuralDynamics/slap2-dev/issues/64).
 
-**Two causes, one of them ours.**
-- **The exporter scaled the activity down.** `exportF0TrainingData.m` multiplies GIAnT's `dF_denoised` by `activityGain`, the least-squares slope of the movie on the activity (disk flux, clamped to 0.5–1.5). Any error in the activity pulls that slope toward 0.
-  - Over the 3,265 exported trials: median 0.63 (5–95%: 0.51–0.83), never above 1, correlating 0.79 with `peakR`. That is regression dilution, not a units correction.
-  - Every export therefore subtracts only about 0.5–0.8 of GIAnT's activity.
-  - At the ROI the user viewed, the export removes 39–44% of the movie's event amplitude where GIAnT's fit alone removes 77–86%.
-- **GIAnT under-fits too** (`extractTrial.m`):
-  - Footprints are narrower than the events in the 80 Hz movie. For a source's own events, the activity/movie ratio falls from 1.05 at 4 px to 0.72 at 5–6 px (776266 trial 1).
-  - Events below the debias threshold (S < 0.1) are dropped.
-  - The baseline is fitted against the activity minus its floor and noise, so it absorbs part of the activity.
-  - Some sessions over-fit instead: on 804730 path 2 the activity at GIAnT's own events is several times the movie's.
+**GIAnT's activity estimate is nonlinear, not shrunk.** A ground-truth refit test on saved extraction subproblems of 803121 (path 2 trial 1: 45 subproblems, 47 sources, 2,990 events) takes GIAnT's fit as the truth, draws new data from it under the loss's own noise model with the real sampling pattern, and fits again.
+- **Found events come out about 30% too large:** 1.27–1.34 × the truth below 4 units at the peak pixel, 1.15 at 4–8 units, 0.95 above 8 (units: movie counts / 25).
+- **Events below a detection threshold** (about 1–2 units) **are dropped whole.** With the true events halved, 36–55% of those below 4 units are found; quartered, 2–8%.
+- **Whether a session looks over- or under-subtracted** depends on how its events sit relative to that threshold.
+- F0 comes out 3.5–5.6% high in the same test. The cause is not identified.
 
-**For the re-export:**
-- export from the fixed GIAnT;
-- stop scaling the activity in the exporter (gain 1, or an estimator that errors in the activity do not bias), and pick the blur by a criterion that does not lean on that gain;
-- check the result in the viewer and with slap2-dev#64's residual metrics before training on it.
+**Cause and fix of the over-estimate.** GIAnT's final "debias" refit of the traces minimises Σ (Z − T)² / (F·(T + 1)), so the model's own predicted variance sits in the denominator.
+- A larger model raises that variance and lowers the loss. During the L1 fits the penalty outweighs this; in the debias refit, which has no penalty, nothing does.
+- Holding the variance fixed in that one refit brings recovery to 0.99 (0.94–1.04) in the same test. This is GIAnT change A in #56.
+- It changes `dF_denoised`, `events` and `SNR`. The source list, F0 and `dF_ls` stay the same.
+- Holding the variance fixed in every trace fit instead collapses detection: λ = 0.9 was tuned with the upward pull in place.
 
-This replaces "no re-export yet" above. The per-trial maps of the next version (and the session-level activity map) can be written in the same pass.
+**The exporter's gain was a regression artifact.** `exportF0TrainingData.m` multiplied GIAnT's activity by `activityGain`: the least-squares slope of the movie on the activity (flux in a 4 px disk), clamped to 0.5–1.5.
+- Over 3,125 trials above the clamp it tracks the fit's correlation (r = 0.87 with `peakR`), not the scan (r = 0.10 with lines per cycle).
+- In every group of trials its median equals the median disk correlation to within 0.05. It is never above 1; the median is 0.63.
+- A slope equal to the correlation is what least squares gives for two signals of equal variance that agree imperfectly. It measures agreement, not scale, and it removed about half of GIAnT's activity.
+- Part of it did offset the 30% over-estimate (1/1.3 = 0.77). So gain 1 alone would over-subtract found events until change A is in.
+- **With the gain removed,** and events picked on the movie 3–5 px from each source, activity / movie event amplitude is:
+  - 776266_2025-01-09 path 1 trial 1: 1.69 at ≤ 1.5 px and 1.00 at 1.5–2.5 px;
+  - 804730_2025-07-25 path 2 trial 27: 1.30 and 1.07.
 
-**What this means for the models so far.** Every network so far was trained on targets that still hold part of the activity at footprints. Those pixels' loss pulled the baseline up during events, which the event mask and the activity-subtracted inputs only partly offset. Results on real-data targets (the held-out evaluations) are measured against the same biased targets, so they need re-running after the re-export.
+  Neither the core's noise nor the activity's noise drives that selection, but it favours spatially broad events.
+- **The time mapping is fine.** With the same selection, movie and activity have the same time course.
+
+**Claims of the #20 section that do not hold:**
+- *"GIAnT's fit alone removes 77–86%" at the user's ROI.* The events were picked on the measured pixels or on the activity. Each choice biases the comparison, in opposite directions.
+- *"Footprints are narrower than the events in the 80 Hz movie."* This is seen only in the export, not established in GIAnT's own data (candidate D below).
+- *"804730 over-fits."* The large ratios came from #52's fit artifacts and from the event selection. With the safe selection the core ratio is 1.30.
+- *"Events below the debias threshold (S < 0.1) are dropped."* The L1 threshold drops them, upstream of that freeze.
+- *"The baseline absorbs part of the activity."* The evidence is mixed. In 803121's fits the baseline takes 0–1% of strong sources' events, and about 22% of weak sources' events within 6 px. Those events are spatially broad, which is what the surround predictors exist to absorb.
+
+**Decisions (the user, 2026-11-24):**
+- the plan is approved, and change A becomes GIAnT's default (the old behaviour stays reachable through a parameter);
+- activity below GIAnT's detection threshold stays in the training targets; λ does not change;
+- broad fast transients count as baseline: fast transients that can be predicted from beyond the blind spot belong to F0. GIAnT's activity is subtracted there exactly as elsewhere, and the exporter does nothing special. The user will inspect the pilot's targets in the viewer before the next training run, and decide then whether those cases need anything more;
+- validation and the pilot leave out sessions with few synapses, or with other problems that would hamper scientific analysis;
+- the full re-export happens only after the pilot is accepted.
+
+**Order:**
+1. **GIAnT change A** (fixed variance in the debias refit), after the refit test reproduces the over-estimate on two more sessions (#56).
+2. **Exporter** (this repository):
+   - the activity is written unscaled (`activityGain` 1); the fitted disk slope is kept as a QC attribute, `activitySlope`;
+   - the blur is chosen by shape: the movie-on-activity slope of the core flux (≤ 1.5 px) must equal that of the flux 1.5–3.5 px out;
+   - each trial records the selection-safe event ratios (`eventRatioCore`, `eventRatio2px`) in its attributes and in `export_summary.json`, and the viewer shows them.
+3. **Pilot re-export** of 4–6 sessions with many synapses, made with GIAnT main plus change A. It is checked in the viewer and with the three event selections (on the activity, on the measured pixels' movie, on the movie 3–5 px away), which should bracket 1 at the core.
+4. **Decide from the pilot** whether to take up GIAnT's baseline bias (candidate B, F0 4–6% high) or footprint width (candidate D).
+5. **Full re-export.** The per-trial maps of the next network version can be written in the same pass.
+
+**What this means for the models so far.** Every network so far was trained on targets from which only about half of GIAnT's activity was removed. At found events GIAnT's activity is itself about 30% too large, so the two errors partly cancel; where events fall below the threshold, none of their activity is removed. The loss at those pixels pulled the baseline up during events, which the event mask and the activity-subtracted inputs only partly offset. Results on real-data targets (the held-out evaluations) are measured against the same targets, so they need re-running after the re-export.
 
 ## Deep arm rerun (S4_deep2): consistent gains on simulations, none measurable on real data (2026-11-24)
 
@@ -2734,7 +2764,7 @@ This replaces "no re-export yet" above. The per-trial maps of the next version (
   - deep2_ft − ctrl_ft: free −12.3 [−25.3, −3.2], freedim −16.5 [−32.3, −5.8].
   - WiSE-FT adds little on top: deep2_wise − deep2_ft is free −1.1, freedim −0.4.
   - The extra nonlinear processing seems to let real-data fine-tuning fit without unlearning the simulations.
-- **Real data: no measurable difference.** The real targets still hold part of the activity at footprints (see "Activity under-fit in the training targets" above), so this comparison may not resolve the difference. Re-run it after the re-export.
+- **Real data: no measurable difference.** The real targets still hold about half of GIAnT's activity at footprints (see "Activity in the training targets" above), so this comparison may not resolve the difference. Re-run it after the re-export.
 - **Cost:** 7.2 h per run against 5.3 h for the control (`--no_compile`, with checkpointing).
 
 **Recommendation:** keep the deep architecture (`--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out`) as the candidate for the next version, with the per-trial maps. Confirm it on real data after the re-export. Until then, the delivered model stays ctrl WiSE-FT 0.5.
