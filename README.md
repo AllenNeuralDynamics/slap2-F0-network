@@ -77,7 +77,7 @@ Root attributes hold provenance (session, path, trial, GIAnT commit, crop origin
 - `peakSlope`, `peakR`: movie on activity at source peak pixels, high-passed, for the activity as written (after `activityGain`);
 - `diskSlope`, `diskR`: the same for the flux in a 4 px disk;
 - `eventResidualFraction`: the residual's event-triggered peak relative to the movie's, with events picked on the activity (near 0 when the activity is removed);
-- `eventRatioCore`, `eventRatio2px`: activity / movie event amplitude at ≤ 1.5 px and 1.5–2.5 px from each source. Events are picked on the movie 3–5 px away, so neither the core's noise nor the activity's selects them; sources touching GIAnT fit artifacts are left out. Both are near 1 when the activity has the movie's size. The selection favours spatially broad events. `eventRatioSources`, `eventRatioEvents` and `eventRatioArtifactSources` count what went in (`code/matlab/ringEventRatios.m`).
+- `eventRatioCore`, `eventRatio2px`: activity / movie event amplitude at ≤ 1.5 px and 1.5–2.5 px from each source. Events are picked on the movie 3–5 px away, so neither the core's noise nor the activity's selects them; sources touching GIAnT fit artifacts are left out. Both are near 1 when the activity has the movie's size. The selection favours spatially broad events. `eventRatioSources`, `eventRatioEvents` and `eventRatioArtifactSources` count what went in. The exporter computes them with `code/matlab/ringEventRatios.m`. Its tested Python reference is `slap2_f0/ringqc.py`; `python -m slap2_f0.ringqc <folder>` prints the same ratios for any export, old ones included (the activity divided by `activityGain`).
 
 ### How the activity is put on the movie's grid
 
