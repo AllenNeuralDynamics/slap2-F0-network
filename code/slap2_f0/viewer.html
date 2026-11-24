@@ -58,6 +58,7 @@ main { padding: 10px 16px 24px; }
 .tile .tt { display: flex; justify-content: space-between; gap: 8px; padding: 3px 8px; font-size: 12px;
   color: var(--text-secondary); border-bottom: 1px solid var(--border); }
 .tile .tt b { color: var(--text-primary); font-weight: 600; }
+.tile .tt span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tile canvas { display: block; width: 100%; background: var(--well); cursor: crosshair; touch-action: none; }
 #readout { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-height: 18px; margin: 6px 0 2px; }
 .charts { margin-top: 10px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
@@ -72,14 +73,24 @@ main { padding: 10px 16px 24px; }
   font-variant-numeric: tabular-nums; }
 #tip .r { display: flex; gap: 6px; align-items: center; justify-content: space-between; }
 #tip .r span:last-child { margin-left: 14px; }
-@media (max-width: 700px) { header { padding: 8px; } main { padding: 8px; } #tlabel { min-width: 0; } }
+#qc { color: var(--text-secondary); font-variant-numeric: tabular-nums; gap: 4px 12px; }
+#qc:empty { display: none; }
+.chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); border-radius: 10px;
+  padding: 0 8px; color: var(--text-primary); background: var(--surface-2); }
+.chip.out { border-color: #d03b3b; }
+.chip.test { border-color: var(--accent); }
+.band { display: inline-block; width: 14px; height: 10px; border-radius: 2px; background: var(--text-muted); opacity: .25; }
+#session { max-width: 420px; }
+@media (max-width: 700px) { header { padding: 8px; } main { padding: 8px; } #tlabel { min-width: 0; } #session { max-width: 100%; } }
 </style>
 </head>
 <body>
 <header>
   <div class="row">
     <h1>SLAP2 F0 viewer</h1>
+    <label>Session <select id="session"></select></label>
     <label>Trial <select id="trial"></select></label>
+    <button id="tprev" title="Previous trial (Page Up)">‹</button><button id="tnext" title="Next trial (Page Down)">›</button>
     <span id="tinfo" class="hint"></span>
     <span id="status">loading…</span>
   </div>
@@ -95,7 +106,8 @@ main { padding: 10px 16px 24px; }
     <label>step <select id="skip"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option></select> frames</label>
   </div>
   <div class="row">
-    <label>Residual <select id="resmode">
+    <label id="hidelossL" title="Blank, in the target panels, the pixels and frames where training puts no loss"><input id="hideloss" type="checkbox" checked> Blank what the loss ignores</label>
+    <label id="resmodeL">Residual <select id="resmode">
       <option value="target" selected>data − activity − F0</option>
       <option value="raw">data − F0</option>
       <option value="dff">(data − F0) / F0</option>
@@ -105,10 +117,11 @@ main { padding: 10px 16px 24px; }
     <label>Data / F0 range <input id="lo" type="number" step="any"> – <input id="hi" type="number" step="any"></label>
     <label>Residual ± <input id="rr" type="number" step="any" min="0"></label>
     <button id="bauto" title="Set both ranges from the current frame">Auto range</button>
-    <label>Columns <select id="ncols"><option>2</option><option selected>4</option><option>6</option></select></label>
+    <label>Columns <select id="ncols"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>6</option></select></label>
     <button id="zin" title="Zoom in (Ctrl + scroll)">＋</button><button id="zout" title="Zoom out">－</button><button id="zreset" title="Fit (double-click)">Fit</button>
     <button id="btheme" title="Light / dark">◐</button>
   </div>
+  <div class="row" id="qc"></div>
   <div class="row models" id="models"></div>
   <div class="hint">Over the images: scroll steps through time (Shift: 10 frames) · Ctrl + scroll or pinch zooms · drag pans · click picks the trace pixel · double-click fits. Keys: ← → Space Home End.</div>
 </header>
@@ -124,9 +137,9 @@ main { padding: 10px 16px 24px; }
       <span class="hint">Scroll zooms time · drag pans · click sets the frame · double-click shows the whole trial</span>
     </div>
     <div class="legend" id="legend"></div>
-    <div class="ctitle">Data, data − activity and each baseline (counts, ROI mean)</div>
+    <div class="ctitle" id="ct1">Data, data − activity and each baseline (counts, ROI mean)</div>
     <div class="chart"><canvas id="c1"></canvas></div>
-    <div class="ctitle">Residual: data − activity − baseline (counts)</div>
+    <div class="ctitle" id="ct2">Residual: data − activity − baseline (counts)</div>
     <div class="chart"><canvas id="c2"></canvas></div>
   </section>
 </main>
@@ -140,7 +153,9 @@ const S = {
   view: { z: 1, cx: 0, cy: 0 }, sel: null, rad: 1, resMode: "target",
   lo: 0, hi: 1, rr: 1, gamma: 0.5, models: [], shown: new Set(), ncols: 4,
   trace: null, tsmooth: 8, xr: [0, 1], hoverT: null, pix: null, tiles: [],
+  kind: "predict", loss: null, edge: 0, meanT: null, hideLoss: true, seq: 0, sessions: [],
 };
+const NOLOSS = ["in the loss", "no loss: labeled, outside every footprint", "no loss: GIAnT fit artifact"];
 const MEAN = "mean image";
 
 function label(m) { return m === "silo" ? "SiLo" : m === MEAN ? "mean image" : m.replace(/_/g, " "); }
@@ -185,31 +200,113 @@ async function init() {
   try {
     S.meta = await getJSON("/api/meta");
   } catch (e) { setStatus("could not load the trial list: " + e.message, true); return; }
-  const sel = $("trial");
+  // sessions in listing order, each with its trials
+  const bySession = new Map();
   for (const t of S.meta.trials) {
+    const s = String(t.session || "");
+    if (!bySession.has(s)) bySession.set(s, []);
+    bySession.get(s).push(t);
+  }
+  S.sessions = [...bySession.entries()];
+  const ss = $("session");
+  for (const [s, trials] of S.sessions) {
     const o = document.createElement("option");
-    o.value = t.key; o.textContent = `${t.key} (${t.models.length} models)`;
+    const out = trials.filter((t) => t.left_out).length, role = trials[0].role;
+    o.value = s;
+    o.textContent = `${s || "(no session)"}${role ? " · " + role : ""} · ${trials.length} trials${out ? `, ${out} left out` : ""}`;
+    ss.appendChild(o);
+  }
+  ss.onchange = () => { fillTrials(ss.value); loadTrial($("trial").value); };
+  $("trial").onchange = () => loadTrial($("trial").value);
+  if (S.meta.trials.length) { fillTrials(S.sessions[0][0]); loadTrial(S.meta.trials[0].key); }
+  else setStatus("no trials", true);
+}
+function trialLabel(t) {
+  if (t.kind !== "export") return `${[t.path, t.trial].filter((x) => x !== "" && x != null).join(" · ")} (${t.models.length} models)`;
+  let s = `Path ${t.path} · trial ${t.trial}`;
+  {
+    if (t.qc && t.qc.peakR != null) s += ` · peak r ${(+t.qc.peakR).toFixed(2)}`;
+    if (t.left_out) s += " · left out";
+    if (t.remote && !t.cached) s += " · not downloaded";
+  }
+  return s;
+}
+function fillTrials(session) {
+  const sel = $("trial"); sel.innerHTML = "";
+  const list = (S.sessions.find(([s]) => s === session) || [null, []])[1];
+  for (const t of list) {
+    const o = document.createElement("option");
+    o.value = t.key; o.textContent = trialLabel(t);
     sel.appendChild(o);
   }
-  sel.onchange = () => loadTrial(sel.value);
-  if (S.meta.trials.length) loadTrial(S.meta.trials[0].key);
-  else setStatus("no trials", true);
+}
+function stepTrial(d) {
+  if (!S.trial) return;
+  const i = S.meta.trials.findIndex((t) => t.key === S.trial.key);
+  const t = S.meta.trials[Math.max(0, Math.min(S.meta.trials.length - 1, i + d))];
+  if (!t || t.key === S.trial.key) return;
+  if (String(t.session || "") !== $("session").value) { $("session").value = String(t.session || ""); fillTrials($("session").value); }
+  loadTrial(t.key);
+}
+
+function fmtQC(v, d) { return v == null || !Number.isFinite(+v) ? "–" : (+v).toFixed(d); }
+function showQC() {
+  const el = $("qc"), tr = S.trial;
+  if (S.kind !== "export") { el.innerHTML = ""; return; }
+  const q = tr.qc || {};
+  let chip;
+  if (tr.left_out) chip = `<span class="chip out" title="Training's trial filter (io.filter_trials)">✕ left out: ${tr.left_out}</span>`;
+  else if (tr.role === "test") chip = `<span class="chip test" title="sessions/export_phase*.csv">◐ test mouse: not trained on</span>`;
+  else if (tr.role === "validation") chip = `<span class="chip test" title="sessions/export_phase*.csv">◐ validation session: not trained on</span>`;
+  else if (tr.role === "train") chip = `<span class="chip" title="sessions/export_phase*.csv">✓ training</span>`;
+  else if (tr.role) chip = `<span class="chip" title="sessions/export_phase*.csv">${tr.role}</span>`;
+  else chip = `<span class="chip" title="not in sessions/export_phase*.csv">? not in the session lists</span>`;
+  const cnt = [0, 0, 0]; for (let n = 0; n < S.N; n++) cnt[S.loss[n]]++;
+  const parts = [chip,
+    `peak r ${fmtQC(q.peakR, 2)}`, `activity gain ${fmtQC(q.activityGain, 2)}`, `blur σ ${fmtQC(q.blurSigma, 2)} px`,
+    `event residual ${fmtQC(q.eventResidualFraction, 2)}`, `${tr.n_sources} sources`, `${q.nEvents != null ? q.nEvents : "–"} events`,
+    `loss on ${cnt[0].toLocaleString()} of ${S.N.toLocaleString()} px (${cnt[1].toLocaleString()} labeled outside footprints, ${cnt[2].toLocaleString()} fit artifacts)`,
+    `${S.edge} frames at each end`];
+  if (q.giantRef) parts.push(`GIAnT ${String(q.giantRef).slice(0, 7)}`);
+  el.innerHTML = parts.map((p) => `<span>${p}</span>`).join("");
 }
 
 async function loadTrial(key) {
+  const seq = ++S.seq;
   S.trial = S.meta.trials.find((t) => t.key === key);
+  if ($("trial").value !== key) $("trial").value = key;
   setStatus(`loading ${key}…`);
-  try { S.st = await getJSON(`/api/static?key=${encodeURIComponent(key)}`); }
-  catch (e) { setStatus(e.message, true); return; }
+  const poll = setInterval(async () => {
+    try { const p = await getJSON(`/api/progress?key=${encodeURIComponent(key)}`); if (p.msg && seq === S.seq) setStatus(`${key}: ${p.msg}`); } catch (e) {}
+  }, 500);
+  let st;
+  try { st = await getJSON(`/api/static?key=${encodeURIComponent(key)}`); }
+  catch (e) { if (seq === S.seq) setStatus(e.message, true); return; }
+  finally { clearInterval(poll); }
+  if (seq !== S.seq) return;  // another trial was picked meanwhile
+  S.st = st;
+  if (S.trial.remote && !S.trial.cached) { S.trial.cached = true; const o = $("trial").selectedOptions[0]; if (o) o.textContent = trialLabel(S.trial); }
   const tr = S.trial;
-  S.R = tr.n_rows; S.C = tr.n_cols; S.T = tr.n_frames; S.fr = tr.frame_rate || 80; S.N = S.st.rows.length;
+  S.kind = S.st.kind || "predict";
+  const shape = S.st.shape || [tr.n_frames, tr.n_rows, tr.n_cols];
+  S.T = shape[0]; S.R = shape[1]; S.C = shape[2]; S.fr = tr.frame_rate || 80; S.N = S.st.rows.length;
   S.layers = S.st.layers;
-  S.models = S.layers.slice(2).concat([MEAN]);
+  const exp = S.kind === "export";
+  S.models = exp ? [] : S.layers.slice(2).concat([MEAN]);
   S.shown = new Set(S.models.filter((m) => m !== MEAN));
   S.pix = new Int32Array(S.N);
   for (let n = 0; n < S.N; n++) S.pix[n] = S.st.rows[n] * S.C + S.st.cols[n];
   S.mean = Float32Array.from(S.st.mean);
   S.discard = new Set(S.st.discard);
+  S.loss = exp ? Uint8Array.from(S.st.loss) : null;
+  S.edge = exp ? S.st.edge_frames : 0;
+  S.meanT = exp ? Float32Array.from(S.st.mean_target, (v) => (v === null ? NaN : v)) : null;
+  $("models").style.display = exp ? "none" : "";
+  $("resmodeL").style.display = exp ? "none" : "";
+  $("hidelossL").style.display = exp ? "" : "none";
+  $("ct1").textContent = exp ? "Data and data − activity, the training target (counts, ROI mean)" : "Data, data − activity and each baseline (counts, ROI mean)";
+  $("ct2").textContent = exp ? "GIAnT fit: activity (counts, ROI mean)" : "Residual: data − activity − baseline (counts)";
+  showQC();
   $("tinfo").textContent = `${S.T} frames (${(S.T / S.fr).toFixed(1)} s) · ${S.R} × ${S.C} px, ${S.N} valid · ${tr.n_sources} sources`;
   $("tslider").max = S.T - 1;
   // start at the first imaged frame (exported trials often begin with discarded frames)
@@ -226,6 +323,10 @@ async function loadTrial(key) {
   }
   S.sel = best >= 0 ? { r: S.st.rows[best], c: S.st.cols[best] } : { r: S.R >> 1, c: S.C >> 1 };
   if (!S.userCols) { S.ncols = S.C / S.R > 2 ? 2 : 4; $("ncols").value = S.ncols; }  // wide trials: 2 per row
+  if (exp) {  // start where the loss looks: past the edge frames
+    let t1 = S.edge; while (t1 < S.T - 1 && S.discard.has(t1)) t1++;
+    if (t1 < S.T - S.edge) { S.t = Math.min(S.T - 1, t1 + Math.floor(S.avg / 2)); $("tslider").value = S.t; updateTLabel(); }
+  }
   buildModels(); buildTiles();
   S.autoNext = true;
   await requestFrame();
@@ -260,15 +361,16 @@ async function loadTrace() {
     S.trace = {};
     S.layers.forEach((name, i) => { S.trace[name] = all.subarray(i * S.T, (i + 1) * S.T); });
     // mean image over the same ROI (constant in time)
-    let s = 0, k = 0, lab = 0, sup = 0;
+    let s = 0, k = 0, lab = 0, sup = 0, inLoss = 0;
     for (let n = 0; n < S.N; n++) {
       if (Math.abs(S.st.rows[n] - r) <= S.rad && Math.abs(S.st.cols[n] - c) <= S.rad) {
-        s += S.mean[n]; k++; lab += S.st.labeled[n]; sup += S.st.support[n];
+        s += S.mean[n]; k++; lab += S.st.labeled[n]; sup += S.st.support[n]; if (S.loss && !S.loss[n]) inLoss++;
       }
     }
     S.trace[MEAN] = new Float32Array(S.T).fill(k ? s / k : NaN);
     const where = !k ? "no valid pixels" : sup ? `${sup} in footprint support` : lab ? `${lab} labeled, outside footprints` : "background";
-    $("pixinfo").textContent = `row ${r}, col ${c} · ${headers.get("X-Pixels")} valid px · ${where}`;
+    const loss = S.loss && k ? ` · ${inLoss} in the loss` : "";
+    $("pixinfo").textContent = `row ${r}, col ${c} · ${headers.get("X-Pixels")} valid px · ${where}${loss}`;
     drawCharts();
     drawAllTiles();
   } catch (e) { setStatus(e.message, true); }
@@ -280,7 +382,9 @@ function values(tile) {
   if (!F) return null;
   const N = S.N, out = new Float32Array(N);
   if (tile.kind === "movie") return F.movie;
+  if (tile.kind === "activity") return F.activity;
   if (tile.kind === "target") { for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n]; return out; }
+  if (tile.kind === "dev") { for (let n = 0; n < N; n++) out[n] = F.movie[n] - F.activity[n] - S.meanT[n]; return out; }
   const b = F[tile.model];
   if (tile.kind === "base") return b;
   for (let n = 0; n < N; n++) out[n] = residual(F.movie[n], F.activity[n], b[n]);
@@ -297,7 +401,7 @@ function pct(a, q) {
   if (!v.length) return NaN;
   return v[Math.min(v.length - 1, Math.max(0, Math.round(q * (v.length - 1))))];
 }
-function nice(x) { if (!Number.isFinite(x) || x === 0) return x; const p = Math.pow(10, Math.floor(Math.log10(Math.abs(x))) - 1); return Math.round(x / p) * p; }
+function nice(x) { if (!Number.isFinite(x) || x === 0) return x; const p = Math.pow(10, Math.floor(Math.log10(Math.abs(x))) - 1); return parseFloat((Math.round(x / p) * p).toPrecision(6)); }
 function autoRange() {
   if (!S.frame) return;
   // from the frame's data; from the mean image when the frame has none (discarded frames)
@@ -305,8 +409,15 @@ function autoRange() {
   if (src.filter(Number.isFinite).length < 10) src = S.mean;
   const lo = nice(pct(src, 0.005)), hi = nice(pct(src, 0.995));
   if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) { S.lo = lo; S.hi = hi; }
-  const first = S.models.find((m) => S.shown.has(m)) || S.models[0];
-  const rr = nice(pct(values({ kind: "res", model: first }).map(Math.abs), 0.99));
+  let rr = NaN;
+  if (S.kind === "export") {  // over the pixels in the loss
+    const v = values({ kind: "dev" }), a = [];
+    for (let n = 0; n < S.N; n++) if (!S.loss[n] && Number.isFinite(v[n])) a.push(Math.abs(v[n]));
+    rr = nice(pct(a, 0.99));
+  } else if (S.models.length) {
+    const first = S.models.find((m) => S.shown.has(m)) || S.models[0];
+    rr = nice(pct(values({ kind: "res", model: first }).map(Math.abs), 0.99));
+  }
   if (Number.isFinite(rr) && rr > 0) S.rr = rr;
   $("lo").value = S.lo; $("hi").value = S.hi; $("rr").value = S.rr;
 }
@@ -327,7 +438,12 @@ function buildModels() {
 function buildTiles() {
   const grid = $("tiles"); grid.innerHTML = "";
   grid.style.gridTemplateColumns = `repeat(${S.ncols}, minmax(0, 1fr))`;
-  const defs = [{ kind: "movie", title: "Data", sub: "movie" }, { kind: "target", title: "Data − activity", sub: "GIAnT's fit removed" }];
+  const defs = S.kind === "export"
+    ? [{ kind: "movie", title: "Data", sub: "registered movie" },
+       { kind: "activity", title: "GIAnT fit", sub: "activity" },
+       { kind: "target", title: "Data − activity", sub: "training target" },
+       { kind: "dev", title: "Target − trial mean", sub: "± residual" }]
+    : [{ kind: "movie", title: "Data", sub: "movie" }, { kind: "target", title: "Data − activity", sub: "GIAnT's fit removed" }];
   for (const m of S.models) if (S.shown.has(m)) {
     defs.push({ kind: "base", model: m, title: label(m), sub: "baseline F0" });
     defs.push({ kind: "res", model: m, title: label(m), sub: "residual" });
@@ -335,13 +451,13 @@ function buildTiles() {
   S.tiles = defs.map((d) => {
     const el = document.createElement("div"); el.className = "tile";
     const sw = d.model ? `<span class="sw" style="background:${seriesColor(d.model)}"></span> ` : "";
-    el.innerHTML = `<div class="tt"><span>${sw}<b>${d.title}</b></span><span>${d.sub}</span></div><canvas></canvas>`;
+    el.innerHTML = `<div class="tt"><span>${sw}<b>${d.title}</b></span><span class="sub">${d.sub}</span></div><canvas></canvas>`;
     grid.appendChild(el);
     const cv = el.querySelector("canvas");
     const off = document.createElement("canvas"); off.width = S.C; off.height = S.R;
     const ctx = off.getContext("2d");
     const img = ctx.createImageData(S.C, S.R);
-    const tile = { ...d, el, cv, off, octx: ctx, img, u32: new Uint32Array(img.data.buffer) };
+    const tile = { ...d, el, cv, off, octx: ctx, img, u32: new Uint32Array(img.data.buffer), subEl: el.querySelector(".sub") };
     attachTileEvents(tile);
     return tile;
   });
@@ -361,11 +477,26 @@ function renderTile(t) {
   const v = values(t);
   if (!v) return;
   const u = t.u32, pix = S.pix, N = S.N;
-  if (t.kind === "res") {
+  // exported trials: the target panels can leave blank what the training loss ignores
+  const blank = S.kind === "export" && S.hideLoss && (t.kind === "target" || t.kind === "dev");
+  if (blank) {
+    const off = frameNoLoss(S.t);
+    t.subEl.textContent = off ? `no loss in this frame (${off})` : t.sub;
+    if (off) { u.fill(0); t.octx.putImageData(t.img, 0, 0); return; }
+  } else if (t.subEl) t.subEl.textContent = t.sub;
+  if (t.kind === "res" || t.kind === "dev") {
     const k = 127.5 / S.rr;
     for (let n = 0; n < N; n++) {
       const x = v[n];
-      u[pix[n]] = Number.isFinite(x) ? DIV[Math.max(0, Math.min(255, Math.round(127.5 + x * k)))] : 0;
+      u[pix[n]] = Number.isFinite(x) && !(blank && S.loss[n]) ? DIV[Math.max(0, Math.min(255, Math.round(127.5 + x * k)))] : 0;
+    }
+  } else if (blank) {
+    const lo = S.lo, k = 1 / Math.max(1e-9, S.hi - S.lo), g = S.gamma;
+    for (let n = 0; n < N; n++) {
+      const x = v[n];
+      if (!Number.isFinite(x) || S.loss[n]) { u[pix[n]] = 0; continue; }
+      const f = Math.max(0, Math.min(1, (x - lo) * k));
+      u[pix[n]] = GRAY[Math.round(255 * (g === 1 ? f : Math.pow(f, g)))];
     }
   } else {
     const lo = S.lo, k = 1 / Math.max(1e-9, S.hi - S.lo), g = S.gamma;
@@ -459,6 +590,11 @@ function updateReadout() {
   for (let i = 0; i < S.N; i++) if (S.pix[i] === target) { n = i; break; }
   if (n < 0) { el.textContent = `row ${h.r}, col ${h.c}: not imaged`; return; }
   const F = S.frame, parts = [`row ${h.r}, col ${h.c}`, `data ${fmt(F.movie[n])}`, `activity ${fmt(F.activity[n])}`];
+  if (S.kind === "export") {
+    const tg = F.movie[n] - F.activity[n];
+    parts.push(`target ${fmt(tg)}`, `target − trial mean ${fmt(tg - S.meanT[n])}`, NOLOSS[S.loss[n]]);
+    const off = frameNoLoss(S.t); if (off && !S.loss[n]) parts[parts.length - 1] = `no loss in this frame (${off})`;
+  }
   for (const m of S.models) if (S.shown.has(m)) {
     const b = F[m][n], d = F.movie[n];
     const res = residual(d, F.activity[n], b);
@@ -480,9 +616,18 @@ function setT(t) {
   drawCharts();
   requestFrame();
 }
+function frameNoLoss(t) {  // why training puts no loss on frame t of an exported trial ("" if it does)
+  if (S.kind !== "export") return "";
+  if (S.discard && S.discard.has(t)) return "discarded";
+  const s = (S.edge / S.fr).toFixed(S.edge % S.fr ? 2 : 0);
+  if (t < S.edge) return `first ${s} s`;
+  if (t >= S.T - S.edge) return `last ${s} s`;
+  return "";
+}
 function updateTLabel() {
   const a = S.avg > 1 ? ` (mean of ${S.avg})` : "";
-  const disc = S.discard && S.discard.has(S.t) ? " · discarded" : "";
+  const off = frameNoLoss(S.t);
+  const disc = off ? ` · no loss (${off})` : S.discard && S.discard.has(S.t) ? " · discarded" : "";
   $("tlabel").textContent = `frame ${S.t} / ${S.T - 1} · ${(S.t / S.fr).toFixed(3)} s${a}${disc}`;
 }
 let lastTick = 0;
@@ -527,6 +672,10 @@ function chartSeries() {
   const top = [{ name: "data", color: css("--data"), w: 1, y: smooth(tr.movie, k) },
                { name: "data − activity", color: css("--target"), w: 1.25, y: sT }];
   const bottom = [];
+  if (S.kind === "export") {
+    bottom.push({ name: "GIAnT fit (activity)", color: css("--series-2"), w: 1.5, y: smooth(tr.activity, k) });
+    return { top, bottom };
+  }
   for (const m of S.models) if (S.shown.has(m)) {
     const b = smooth(tr[m], k), r = new Float32Array(T);
     for (let i = 0; i < T; i++) r[i] = sT[i] - b[i];
@@ -563,6 +712,11 @@ function drawChart(cv, series, zero) {
   for (const s of ticks(x0 / S.fr, x1 / S.fr, 8)) { const x = X(s * S.fr); if (x >= L && x <= L + pw) ctx.fillText(`${+s.toFixed(3)} s`, x, Tm + ph + 5); }
   if (zero) { ctx.strokeStyle = css("--text-muted"); const y = Math.round(Y(0)) + 0.5; ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke(); }
   ctx.save(); ctx.beginPath(); ctx.rect(L, Tm, pw, ph); ctx.clip();
+  if (S.kind === "export") {  // frames without loss: the trial's edges and discarded frames
+    ctx.fillStyle = css("--text-muted"); ctx.globalAlpha = 0.16;
+    for (const [a, b] of noLossRuns()) if (b > x0 && a < x1) ctx.fillRect(X(a), Tm, X(b) - X(a), ph);
+    ctx.globalAlpha = 1;
+  }
   const stride = Math.max(1, Math.floor((i1 - i0) / (pw * 2)));
   for (const s of series) {
     ctx.strokeStyle = s.color; ctx.lineWidth = s.w; ctx.setLineDash(s.dash ? [5, 4] : []); ctx.lineJoin = "round";
@@ -582,13 +736,30 @@ function drawChart(cv, series, zero) {
   if (S.hoverT !== null) { ctx.strokeStyle = css("--text-muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]); const x = X(S.hoverT + 0.5); ctx.beginPath(); ctx.moveTo(x, Tm); ctx.lineTo(x, Tm + ph); ctx.stroke(); ctx.setLineDash([]); }
   ctx.restore();
 }
+function noLossRuns() {  // [start, end) frame runs without loss, cached per trial
+  if (S._runsFor === S.st) return S._runs;
+  const runs = [];
+  let a = -1;
+  for (let t = 0; t <= S.T; t++) {
+    const off = t < S.T && frameNoLoss(t) !== "";
+    if (off && a < 0) a = t;
+    if (!off && a >= 0) { runs.push([a, t]); a = -1; }
+  }
+  S._runsFor = S.st; S._runs = runs;
+  return runs;
+}
 function drawCharts() {
   const ser = chartSeries();
   const lg = $("legend"); lg.innerHTML = "";
   if (!ser) return;
-  for (const s of ser.top) {
+  for (const s of S.kind === "export" ? ser.top.concat(ser.bottom) : ser.top) {
     const sp = document.createElement("span");
     sp.innerHTML = `<span class="sw" style="background:${s.color};height:${Math.max(2, s.w)}px"></span>${s.name}`;
+    lg.appendChild(sp);
+  }
+  if (S.kind === "export") {
+    const sp = document.createElement("span");
+    sp.innerHTML = `<span class="band"></span>no loss: first and last ${(S.edge / S.fr).toFixed(S.edge % S.fr ? 2 : 0)} s, discarded frames`;
     lg.appendChild(sp);
   }
   drawChart($("c1"), ser.top, false);
@@ -653,6 +824,9 @@ for (const id of ["lo", "hi", "rr"]) $(id).addEventListener("change", () => {
   const v = parseFloat($(id).value); if (Number.isFinite(v)) { S[id] = v; renderAll(); }
 });
 $("bauto").onclick = () => { autoRange(); renderAll(); };
+$("hideloss").onchange = (e) => { S.hideLoss = e.target.checked; renderAll(); };
+$("tprev").onclick = () => stepTrial(-1);
+$("tnext").onclick = () => stepTrial(1);
 $("gamma").onchange = (e) => { S.gamma = +e.target.value; renderAll(); };
 $("ncols").onchange = (e) => { S.ncols = +e.target.value; S.userCols = true; buildTiles(); renderAll(); };
 $("zin").onclick = () => { S.view.z = Math.min(64, S.view.z * 1.5); drawAllTiles(); };
@@ -676,6 +850,8 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === " ") { togglePlay(); ev.preventDefault(); }
   else if (ev.key === "Home") setT(0);
   else if (ev.key === "End") setT(S.T - 1);
+  else if (ev.key === "PageDown") { stepTrial(1); ev.preventDefault(); }
+  else if (ev.key === "PageUp") { stepTrial(-1); ev.preventDefault(); }
 });
 let rz = null;
 window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { sizeTiles(); drawCharts(); }, 100); });

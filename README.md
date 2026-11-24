@@ -119,9 +119,23 @@ GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export
 - **Controls without activity:** a session where SiLo finds no sources, such as a GFP mouse without a glutamate sensor, is exported with zero activity. All its valid pixels are exact targets with loss weight 1, so any bias on its labeled pixels (`lab_bias_*`) is spurious ΔF.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
 
-### Viewing baselines
+### Viewing the training data and baselines
 
-`slap2-f0 predict` runs saved checkpoints over whole trials and adds SiLo's baseline; `slap2-f0 view` shows the result in a browser.
+`slap2-f0 view` shows exported trials (the training data) or `slap2-f0 predict` output in a browser, frame by frame.
+
+```bash
+slap2-f0 view --codeocean                     # the export data assets on Code Ocean, downloaded on demand (CODEOCEAN_API_TOKEN)
+slap2-f0 view <export folder>                 # exported trials on disk
+```
+
+- **Training data** (a folder of exported trials without predict output, `--data export`, or `--codeocean`).
+  - **Panels:** the movie; GIAnT's fit (its activity); the training target (movie − activity); and the target minus its trial mean.
+  - **Loss mask:** "Blank what the loss ignores" blanks, in the target panels, the pixels and frames that real windows give no loss. These are labeled pixels outside every footprint (`--w_unfitted`), GIAnT fit artifacts (`stats.unfit_pixels`, computed while the trial loads), the first and last `--edge_s` seconds, and discarded frames. Traces shade those frames.
+  - **QC line:** calibration QC, and whether training uses the trial. The trial filter (`--min_peak_r`, `--min_path_trials`) is applied over the session's `export_summary.json` when there is one; the session's role comes from `sessions/export_phase*.csv`.
+  - **Code Ocean:** `--codeocean` finds the assets by search (`--co_query`, `--co_name`), so no asset IDs are needed. Trials download in parallel ranges to `--cache_dir` (default `$SLAP2_F0_TRIAL_CACHE` or `D:/f0_trial_cache`); beyond `--cache_gb` the least recently used are deleted.
+  - **Navigation:** pick a session and a trial; Page Up and Page Down step through trials. The session's next trial loads in the background.
+
+`slap2-f0 predict` runs saved checkpoints over whole trials and adds SiLo's baseline; `slap2-f0 view` shows the result.
 
 ```bash
 slap2-f0 predict <export folder> --ckpt v6=<best.pt> v5b=<best.pt> --files 878030_2026-08-28_14-41-35/Path1/trial_002 --out <predictions>

@@ -2652,3 +2652,25 @@ The first 16 frames pooled, and edge − control on the same draws:
 **Proposed next step:** one re-export with GIAnT main, writing the new per-trial maps too. That gives one pass for both.
 - **Quantify first:** re-export 3–4 diverse sessions (e.g. 780125, 803121, 804730, 885233) and compare their activity and targets with the current exports.
 - **Cost:** a full re-export of the 40 sessions is about 5–7 h each on the data capsule.
+
+**Decision (the user, 2026-11-24): no re-export yet.**
+- **The leak is negligible.** The skewness and SVD maps would come from the aligned movie. Training targets the activity-subtracted movie and sees only a window of it, never the whole time series, so what these statistics reveal about a pixel's hidden frames is minuscule.
+- **GIAnT changes.** Of the changes merged since 9695d27, only the fast-source filter (#50) matters for the targets, and it may be fine as it is. The training-data viewer (below) is for judging that on the exported trials themselves.
+
+**Training-data viewer** (`slap2-f0 view`, README "Viewing the training data and baselines"). It shows any exported trial frame by frame, with the same zoom, playback and pixel traces as the baseline viewer:
+- **Panels:**
+  - the registered movie;
+  - GIAnT's fit (its activity);
+  - the training target, movie − activity;
+  - the target minus its trial mean, which shows what changes over time: noise, slow drift, and any activity GIAnT left in.
+- **Loss mask.** The target panels can blank what training's loss ignores:
+  - labeled pixels outside every footprint;
+  - GIAnT fit artifacts, by `stats.unfit_pixels`;
+  - the first and last 2 s of the trial;
+  - discarded frames.
+  On 804730 path 2 trial 27, the artifact mask matches the one training computes from its stats, pixel for pixel. Trial 33 of that path shows the #52 artifacts: up to 1.5 × 10⁵ counts of activity at the field's edge, where the movie has no data (148 pixels, all masked).
+- **QC and trial status.** Each trial shows its calibration QC (peak r, gain, blur, event residual, sources, events) and whether training uses it: training, validation, test mouse, or left out by the trial filter, with the reason.
+- **Sources:**
+  - `--codeocean` lists the 40 export assets (3,265 trials, 34 left out) and downloads trials on demand, at about 60 MB/s, to a cache on D: (`--cache_dir`, 50 GB by default, least recently used trials deleted first);
+  - a local export folder works as well.
+  A trial takes 13–18 s to open, download included. The session's next trial loads in the background, so stepping through a session takes about 0.2 s per trial.
