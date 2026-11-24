@@ -2723,6 +2723,7 @@ This replaces the section merged in #20 ("Activity under-fit in the training tar
 **Decisions (the user, 2026-11-24):**
 - the plan is approved, and change A becomes GIAnT's default (the old behaviour stays reachable through a parameter);
 - activity below GIAnT's detection threshold stays in the training targets; λ does not change;
+- broad fast transients count as baseline: fast transients that can be predicted from beyond the blind spot belong to F0. GIAnT's activity is subtracted there exactly as elsewhere, and the exporter does nothing special. The user will inspect the pilot's targets in the viewer before the next training run, and decide then whether those cases need anything more;
 - validation and the pilot leave out sessions with few synapses, or with other problems that would hamper scientific analysis;
 - the full re-export happens only after the pilot is accepted.
 
