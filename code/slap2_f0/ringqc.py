@@ -31,6 +31,8 @@ import h5py
 import numpy as np
 from scipy.ndimage import median_filter
 
+from .io import list_trials
+
 RAD = 8  # box half-width around each peak pixel
 EDGE = 160  # frames at each end where no event is picked
 BINS = ((0.0, 1.5), (1.5, 2.5))
@@ -139,7 +141,7 @@ def main(argv=None) -> None:
     files = []
     for a in args:
         p = Path(a)
-        files += sorted(p.rglob("trial_*.h5")) if p.is_dir() else [p]
+        files += list_trials(p) if p.is_dir() else [p]  # folders: exported trials only (not trial_table.h5)
     for fn in files:
         q = trial_ring_event_ratios(fn)
         print(f"{fn}: activity/movie {q.core:.4f} at <= 1.5 px, {q.near:.4f} at 1.5-2.5 px "

@@ -3,7 +3,7 @@ exporter's ringEventRatios.m) on a synthetic trial with known answers."""
 import h5py
 import numpy as np
 
-from slap2_f0.ringqc import ring_event_ratios, trial_ring_event_ratios
+from slap2_f0.ringqc import main, ring_event_ratios, trial_ring_event_ratios
 
 T, R, C = 2000, 40, 60
 EVENTS = list(range(220, 1800, 130))  # 13 events, fewer than 1% of frames
@@ -76,3 +76,23 @@ def test_trial_file_divides_by_the_applied_gain(tmp_path):
         f.attrs["activityGain"] = np.array([0.6])
     q = trial_ring_event_ratios(fn)
     assert np.isclose(q.core, 1.5, rtol=1e-5) and np.isclose(q.near, 0.8, rtol=1e-5)
+
+
+def test_folder_scan_skips_other_hdf5_files(tmp_path, capsys):
+    """python -m slap2_f0.ringqc <folder> reports the exported trials and skips
+    GIAnT's trial_table.h5 next to them."""
+    movie, act, valid, pr, pc, disc = _trial()
+    d = tmp_path / "S1" / "Path1"
+    d.mkdir(parents=True)
+    with h5py.File(d / "trial_001.h5", "w") as f:
+        f["movie"] = movie[None].astype(np.float32)
+        f["activity"] = act[None].astype(np.float32)
+        f["mask/valid"] = valid.astype(np.uint8)
+        f["frame/discard"] = disc.astype(np.uint8)
+        f["sources/peak_row"] = pr.astype(np.int32)
+        f["sources/peak_col"] = pc.astype(np.int32)
+    with h5py.File(tmp_path / "S1" / "trial_table.h5", "w") as f:  # GIAnT's table: no movie, no masks
+        f["filename"] = np.zeros(2)
+    main([str(tmp_path)])
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and "trial_001.h5" in out[0] and "1.5000 at <= 1.5 px" in out[0]
