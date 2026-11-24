@@ -48,8 +48,11 @@ RAD = 8; EDGE = 160;
 [DC, DR] = meshgrid(-RAD:RAD, -RAD:RAD);
 dist = hypot(DR(:), DC(:));
 discard = logical(discard(:)');
+% the movie's time-mean. The built-in makes no full-size temporary: on a 2.4 GB
+% single array the peak working set rose by 15 MB, and it takes 0.5 s (blocks
+% of pixels or frames took 8-14 s). Every other array here is a source's box.
 mm = mean(Y, 2, 'omitnan');
-bad = ~isnan(mm) & meanA(:) > 3 * max(mm, 1);
+bad =~isnan(mm) & meanA(:) > 3 * max(mm, 1);
 numM = zeros(1, 2); numA = zeros(1, 2);
 bins = [0 1.5; 1.5 2.5];
 q = struct('core', NaN, 'near', NaN, 'nSources', 0, 'nEvents', 0, 'nArtifactSources', 0);

@@ -48,11 +48,14 @@ class RingEventRatios:
 
 
 def ring_event_ratios(movie: np.ndarray, activity: np.ndarray, valid: np.ndarray, peak_row, peak_col,
-                      discard: np.ndarray) -> RingEventRatios:
+                      discard: np.ndarray, activity_scale: float = 1.0) -> RingEventRatios:
     """The ratios for one trial.
 
     movie, activity: (frame, row, col); the movie is NaN where a pixel is not
-    imaged (discarded frames are set NaN here). valid: (row, col) bool.
+    imaged (discarded frames count as NaN). Neither is copied whole: only each
+    source's box is taken out, so a large trial needs no memory beyond its two
+    arrays. activity_scale multiplies the activity (1 / activityGain for an
+    old export). valid: (row, col) bool.
     peak_row, peak_col: the sources' 0-based peak pixels. discard: (frame,)
     bool. A source counts when its 17 x 17 px box lies inside the arrays, its
     peak pixel is valid, no pixel within 4 px is a fit artifact (mean activity
@@ -64,11 +67,18 @@ def ring_event_ratios(movie: np.ndarray, activity: np.ndarray, valid: np.ndarray
     """
     T, R, C = movie.shape
     discard = np.asarray(discard, bool)
-    M = np.array(movie, np.float64)
-    M[discard] = np.nan
-    A = np.asarray(activity, np.float64)
-    with np.errstate(invalid="ignore"), _quiet():
-        ma, mm = A.mean(0), np.nanmean(M, 0)
+    keep = np.flatnonzero(~discard)
+    ma = np.zeros((R, C)); ms = np.zeros((R, C)); mn = np.zeros((R, C))
+    for t0 in range(0, T, 256):  # time-means in blocks of frames (float64 sums, no full-size temporary)
+        ma += activity[t0:t0 + 256].sum(0, dtype=np.float64)
+        k = keep[(keep >= t0) & (keep < t0 + 256)]
+        if len(k):
+            blk = movie[k]
+            ok = np.isfinite(blk)
+            ms += np.where(ok, blk, 0).sum(0, dtype=np.float64); mn += ok.sum(0)
+    ma *= activity_scale / T
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mm = np.where(mn > 0, ms / np.maximum(mn, 1), np.nan)
         bad_px = ma > 3 * np.maximum(mm, 1)  # NaN (never imaged) compares False
     rr, cc = np.mgrid[-RAD:RAD + 1, -RAD:RAD + 1]
     dist = np.hypot(rr, cc)
@@ -86,7 +96,8 @@ def ring_event_ratios(movie: np.ndarray, activity: np.ndarray, valid: np.ndarray
         core = v & (dist <= 1.5)
         if ring.sum() < 12 or core.sum() < 5:
             continue
-        mr = M[:, box[0], box[1]][:, ring]
+        mr = np.asarray(movie[:, box[0], box[1]][:, ring], np.float64)
+        mr[discard] = np.nan
         sel = np.where(np.isnan(mr).any(1), np.nan, mr.mean(1))
         if np.isnan(sel).all():  # every frame misses a ring pixel: no events
             continue
@@ -97,7 +108,9 @@ def ring_event_ratios(movie: np.ndarray, activity: np.ndarray, valid: np.ndarray
         if len(ev) < 3:
             continue
         for e in ev:
-            mw = M[e - 8:e + 17, box[0], box[1]]; aw = A[e - 8:e + 17, box[0], box[1]]
+            # no discarded frame in the window (see ev), so the movie needs no masking here
+            mw = np.asarray(movie[e - 8:e + 17, box[0], box[1]], np.float64)
+            aw = np.asarray(activity[e - 8:e + 17, box[0], box[1]], np.float64) * activity_scale
             am = mw[7:10].mean(0) - mw[:6].mean(0); aa = aw[7:10].mean(0) - aw[:6].mean(0)
             okp = v & np.isfinite(am)
             for i, (lo, hi) in enumerate(BINS):
@@ -121,19 +134,8 @@ def trial_ring_event_ratios(path: str | Path, channel: int = 0) -> RingEventRati
         pr, pc = f["sources/peak_row"][:].astype(int), f["sources/peak_col"][:].astype(int)
         gain = float(np.ravel(f.attrs.get("activityGain", 1.0))[0])
         movie = f["movie"][channel]
-        activity = f["activity"][channel] / gain
-    return ring_event_ratios(movie, activity, valid, pr, pc, discard)
-
-
-class _quiet:
-    def __enter__(self):
-        import warnings
-        self._w = warnings.catch_warnings()
-        self._w.__enter__()
-        warnings.simplefilter("ignore", RuntimeWarning)
-
-    def __exit__(self, *exc):
-        self._w.__exit__(*exc)
+        activity = f["activity"][channel]
+    return ring_event_ratios(movie, activity, valid, pr, pc, discard, activity_scale=1.0 / gain)
 
 
 def main(argv=None) -> None:
