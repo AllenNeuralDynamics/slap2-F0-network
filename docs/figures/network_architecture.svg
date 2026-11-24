@@ -1,252 +1,265 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1010" viewBox="0 0 1600 1010" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" font-family="Helvetica, Arial, sans-serif">
 <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#52606D"/></marker><pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#F9D9D5"/><line x1="0" y1="0" x2="0" y2="5" stroke="#B03A2E" stroke-width="1.6"/></pattern></defs>
-<rect width="1600" height="1010" fill="#FFFFFF"/>
-<text x="20.0" y="34.0" font-size="21" font-weight="bold" fill="#1F2933" text-anchor="start">SLAP2 F0 network: inputs, box blind spot, outputs (v9 fine-tuned, the default)</text>
+<rect width="1600" height="1040" fill="#FFFFFF"/>
+<text x="20.0" y="34.0" font-size="21" font-weight="bold" fill="#1F2933" text-anchor="start">SLAP2 F0 network: the deep architecture (S4 deep arm, the default from now on)</text>
 <text x="20.0" y="56.0" font-size="12.5" font-weight="normal" fill="#52606D" text-anchor="start">One forward pass predicts the baseline F0 and the noise variance σ² at every pixel and frame. The output at (t, r, c) never sees the movie within ±8 frames and ±4 px of itself, so events there cannot leak into it.</text>
-<text x="20.0" y="92.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">1  Inputs</text>
-<text x="350.0" y="92.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">2  Branches: each sees a different part of the window</text>
-<text x="815.0" y="92.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">3  Fusion and outputs</text>
-<text x="1175.0" y="92.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">4  What the output at (t, r, c) sees</text>
-<path d="M40,152 L152,106 L270,106 L158,152 z" fill="#E9EDF1" stroke="#5D6B7A"/>
-<path d="M158,152 L270,106 L270,224 L158,270 z" fill="#DDE3E9" stroke="#5D6B7A"/>
-<rect x="40.0" y="152.0" width="118.0" height="118.0" rx="0" fill="#F4F6F8" stroke="#5D6B7A" stroke-width="1.2"/>
-<rect x="109.9" y="164.0" width="60.3" height="60.3" rx="0" fill="none" stroke="#2F5F9E" stroke-width="1.3" stroke-dasharray="4 3"/>
-<rect x="139.8" y="151.7" width="60.3" height="60.3" rx="0" fill="none" stroke="#2F5F9E" stroke-width="1.3" stroke-dasharray="4 3"/>
-<line x1="109.9" y1="164.0" x2="139.8" y2="151.7" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
-<line x1="170.2" y1="164.0" x2="200.1" y2="151.7" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
-<line x1="109.9" y1="224.3" x2="139.8" y2="212.0" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
-<line x1="170.2" y1="224.3" x2="200.1" y2="212.0" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
-<text x="99.0" y="288.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="middle">94 px</text>
-<text x="32.0" y="211.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 32 211.0)">94 px</text>
-<text x="224.0" y="261.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start" transform="rotate(-22 224.0 261.0)">time: 718 frames</text>
-<text x="20.0" y="312.0" font-size="12.2" font-weight="bold" fill="#1F2933" text-anchor="start">Training window: 718 frames × 94 × 94 px</text>
-<text x="20.0" y="329.0" font-size="11.2" font-weight="normal" fill="#52606D" text-anchor="start">loss on the central 192 frames × 48 × 48 px (dashed)</text>
-<text x="20.0" y="344.0" font-size="11.2" font-weight="normal" fill="#52606D" text-anchor="start">prediction tiles whole trials the same way</text>
-<text x="20.0" y="378.0" font-size="12.5" font-weight="bold" fill="#1F2933" text-anchor="start">5 input channels at every voxel</text>
-<circle cx="30" cy="398" r="8" fill="#E8ECF1" stroke="#34495E"/>
-<text x="30.0" y="402.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">1</text>
-<text x="46.0" y="402.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">movie ÷ trial scale (missing = 0)</text>
-<circle cx="30" cy="421" r="8" fill="#E8ECF1" stroke="#34495E"/>
-<text x="30.0" y="425.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">2</text>
-<text x="46.0" y="425.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">validity flag (imaged pixel, kept frame)</text>
-<circle cx="30" cy="444" r="8" fill="#E8ECF1" stroke="#34495E"/>
-<text x="30.0" y="448.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">3</text>
-<text x="46.0" y="448.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">mean image M ÷ scale (whole trial)</text>
-<circle cx="30" cy="467" r="8" fill="#E8ECF1" stroke="#34495E"/>
-<text x="30.0" y="471.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">4</text>
-<text x="46.0" y="471.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">log variance factor (SiLo's, ÷ trial median)</text>
-<circle cx="30" cy="490" r="8" fill="#E8ECF1" stroke="#34495E"/>
-<text x="30.0" y="494.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">5</text>
-<text x="46.0" y="494.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">log (variance map ÷ g · M): events add variance</text>
-<text x="20.0" y="532.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Channels 3–5 are whole-trial maps, constant in</text>
-<text x="20.0" y="547.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">time: each frame enters with weight 1/T,</text>
-<text x="20.0" y="563.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">a negligible leak through the blind spot.</text>
-<text x="20.0" y="578.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start"></text>
-<text x="20.0" y="594.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Per trial: scale (median brightness) and</text>
-<text x="20.0" y="609.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">photon gain g (variance per count).</text>
-<line x1="300.0" y1="260.0" x2="330.0" y2="260.0" stroke="#52606D" stroke-width="1.6"/>
-<line x1="330.0" y1="152.0" x2="330.0" y2="700.0" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="108.0" width="425.0" height="104.0" rx="7" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.4"/>
-<text x="362.0" y="128.0" font-size="13" font-weight="bold" fill="#2F5F9E" text-anchor="start">Past branch</text>
-<text x="763.0" y="128.0" font-size="12" font-weight="bold" fill="#2F5F9E" text-anchor="end">32 ch</text>
-<text x="362.0" y="146.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 5 → 32, then 7 residual (ReZero) blocks, each:</text>
-<text x="362.0" y="161.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">per-frame 3×3 conv, dilation 1, 1, 1, 1, 2, 2, 4 (blocks 3–7 at ½ res)</text>
-<text x="362.0" y="176.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and a causal temporal conv, kernel 3, dilation 1, 2, 4, …, 64</text>
-<text x="362.0" y="191.6" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">then shifted by 9 frames: sees frames t−263 … t−9, ±23 px</text>
-<line x1="330.0" y1="160.0" x2="348.0" y2="160.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="160.0" x2="795.0" y2="160.0" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="222.0" width="425.0" height="44.0" rx="7" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.4"/>
-<text x="362.0" y="242.0" font-size="13" font-weight="bold" fill="#2F5F9E" text-anchor="start">Future branch: the same on reversed time (t+9 … t+263)</text>
-<text x="763.0" y="242.0" font-size="12" font-weight="bold" fill="#2F5F9E" text-anchor="end">32 ch</text>
-<line x1="330.0" y1="244.0" x2="348.0" y2="244.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="244.0" x2="795.0" y2="244.0" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="276.0" width="425.0" height="119.0" rx="7" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1.4"/>
-<text x="362.0" y="296.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="start">Half-plane branches ×4 (one trunk per direction)</text>
-<text x="763.0" y="296.0" font-size="12" font-weight="bold" fill="#2C7A4B" text-anchor="end">4 × 24 ch</text>
-<text x="362.0" y="314.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 5 → 24, then 5 blocks: a 2×3 conv that sees rows r−d … r</text>
-<text x="362.0" y="329.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">only (dilation 1, 1, 1, 2, 4; blocks 3–5 at ½ res) and a symmetric</text>
-<text x="362.0" y="344.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">temporal conv, dilation 1, 2, 4, 8, 16; then shifted down 5 rows.</text>
-<text x="362.0" y="359.6" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">Rotated 0, 90, 180, 270°, the four see every pixel outside the box,</text>
-<text x="362.0" y="374.8" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">up to 22 px away, in frames t−31 … t+31: the output frame too</text>
-<line x1="330.0" y1="335.5" x2="348.0" y2="335.5" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="335.5" x2="795.0" y2="335.5" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="409.0" width="425.0" height="89.0" rx="7" fill="#FBE6CF" stroke="#B5651D" stroke-width="1.4"/>
-<text x="362.0" y="429.0" font-size="13" font-weight="bold" fill="#B5651D" text-anchor="start">Pooled same-frame features</text>
-<text x="763.0" y="429.0" font-size="12" font-weight="bold" fill="#B5651D" text-anchor="end">8 ch</text>
-<text x="362.0" y="447.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">fractional deviation Σ(movie − M) / Σ M over squares of half-width</text>
-<text x="362.0" y="462.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">8, 16, 32 px and the whole window, each minus the box, in frame t</text>
-<text x="362.0" y="477.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and over frames t−3 … t+4: shared brightness changes, even fast ones</text>
-<line x1="330.0" y1="453.5" x2="348.0" y2="453.5" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="453.5" x2="795.0" y2="453.5" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="512.0" width="425.0" height="104.0" rx="7" fill="#ECE4F6" stroke="#6B44A0" stroke-width="1.4"/>
-<text x="362.0" y="532.0" font-size="13" font-weight="bold" fill="#6B44A0" text-anchor="start">The pixel's own long window, and its whole-trial maps</text>
-<text x="763.0" y="532.0" font-size="12" font-weight="bold" fill="#6B44A0" text-anchor="end">6 ch</text>
-<text x="362.0" y="550.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">mean W̄ and variance of the movie at (r, c) over 9 ≤ |dt| ≤ 262:</text>
-<text x="362.0" y="565.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">log (W̄ / M), log (variance / g W̄), share of the window with data;</text>
-<text x="362.0" y="580.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and log M, log variance ratio, log variance factor at (r, c).</text>
-<text x="362.0" y="595.6" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">Enter at the output only: inside a branch they would reach hidden frames</text>
-<line x1="330.0" y1="564.0" x2="348.0" y2="564.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="564.0" x2="795.0" y2="564.0" stroke="#52606D" stroke-width="1.6"/>
-<rect x="350.0" y="630.0" width="425.0" height="74.0" rx="7" fill="#F2F3F5" stroke="#7A808A" stroke-width="1.4" stroke-dasharray="5 4"/>
-<text x="362.0" y="650.0" font-size="13" font-weight="bold" fill="#7A808A" text-anchor="start">Motion features (v10b, optional)</text>
-<text x="763.0" y="650.0" font-size="12" font-weight="bold" fill="#7A808A" text-anchor="end">12 ch</text>
-<text x="362.0" y="668.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">per pool square, the surround fitted as a M − d · ∇M + b · ∇²M;</text>
-<text x="362.0" y="683.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">the change that d and b make at the pixel, and its own ∇M / M, ∇²M / M</text>
-<line x1="330.0" y1="667.0" x2="348.0" y2="667.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="775.0" y1="667.0" x2="795.0" y2="667.0" stroke="#52606D" stroke-width="1.6" stroke-dasharray="5 4"/>
-<line x1="795.0" y1="130.0" x2="795.0" y2="667.0" stroke="#52606D" stroke-width="1.6"/>
-<line x1="795.0" y1="210.0" x2="813.0" y2="210.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="815.0" y="180.0" width="330.0" height="60.0" rx="7" fill="#E8ECF1" stroke="#34495E" stroke-width="1.4"/>
-<text x="827.0" y="200.0" font-size="13" font-weight="bold" fill="#34495E" text-anchor="start">Concatenate at every voxel</text>
-<text x="827.0" y="218.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">174 channels (186 with motion features)</text>
-<line x1="980.0" y1="240.0" x2="980.0" y2="260.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="815.0" y="262.0" width="330.0" height="76.0" rx="7" fill="#E8ECF1" stroke="#34495E" stroke-width="1.4"/>
-<text x="827.0" y="282.0" font-size="13" font-weight="bold" fill="#34495E" text-anchor="start">Pointwise fusion</text>
-<text x="827.0" y="300.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 174 → 64, GELU</text>
-<text x="827.0" y="315.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 64 → 32, GELU</text>
-<line x1="980.0" y1="338.0" x2="864.0" y2="364.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="815.0" y="366.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
-<text x="864.0" y="384.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">mix m</text>
-<text x="864.0" y="401.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
-<line x1="864.0" y1="412.0" x2="864.0" y2="434.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="980.0" y1="338.0" x2="980.0" y2="364.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="931.0" y="366.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
-<text x="980.0" y="384.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">correction c</text>
-<text x="980.0" y="401.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
-<line x1="980.0" y1="412.0" x2="980.0" y2="434.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<line x1="980.0" y1="338.0" x2="1096.0" y2="364.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="1047.0" y="366.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
-<text x="1096.0" y="384.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">noise v</text>
-<text x="1096.0" y="401.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
-<line x1="1096.0" y1="412.0" x2="1096.0" y2="434.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="815.0" y="436.0" width="330.0" height="118.0" rx="7" fill="#FFFFFF" stroke="#34495E" stroke-width="1.3"/>
-<text x="827.0" y="458.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">base = M + tanh(m) · (W̄ − M)</text>
-<text x="827.0" y="474.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">between the mean image and the window mean</text>
-<text x="827.0" y="492.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">F0 = base · exp(0.7 · tanh(c / 0.7))</text>
-<text x="827.0" y="508.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">a correction of ×0.5 … ×2 at most</text>
-<text x="827.0" y="526.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">σ² = (g · F0 + floor) · exp(3 · tanh(v / 3))</text>
-<text x="827.0" y="542.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">photon noise, corrected</text>
-<line x1="980.0" y1="554.0" x2="980.0" y2="574.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
-<rect x="815.0" y="576.0" width="330.0" height="80.0" rx="7" fill="#34495E" stroke="#34495E" stroke-width="1.3"/>
-<text x="980.0" y="600.0" font-size="13.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Outputs at every pixel and frame</text>
-<text x="980.0" y="621.0" font-size="12.4" font-weight="normal" fill="#FFFFFF" text-anchor="middle">F0 (t, r, c): baseline, counts</text>
-<text x="980.0" y="640.0" font-size="12.4" font-weight="normal" fill="#FFFFFF" text-anchor="middle">σ² (t, r, c): noise variance, counts²</text>
-<text x="815.0" y="678.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Heads start at 0: the untrained network predicts F0 = M.</text>
-<text x="815.0" y="694.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">309,510 parameters.</text>
-<clipPath id="clip124"><rect x="1215" y="124" width="355" height="132"/></clipPath>
-<rect x="1215.0" y="124.0" width="355.0" height="132.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
-<g clip-path="url(#clip124)">
-<rect x="1215.0" y="157.7" width="171.4" height="64.6" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
-<rect x="1398.6" y="157.7" width="171.4" height="64.6" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
-<rect x="1371.6" y="159.1" width="41.8" height="23.9" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
-<rect x="1371.6" y="197.0" width="41.8" height="23.9" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
-<rect x="1390.5" y="124.0" width="4.7" height="59.0" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
-<rect x="1390.5" y="197.0" width="4.7" height="59.0" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
-<rect x="1215.7" y="189.3" width="170.8" height="2.2" fill="#6B44A0"/>
-<rect x="1398.6" y="189.3" width="170.8" height="2.2" fill="#6B44A0"/>
+<text x="20.0" y="74.0" font-size="12.5" font-weight="normal" fill="#52606D" text-anchor="start">Deep: pointwise (1×1×1) residual blocks after every dilated block and after the fusion (bold, new) add nonlinear processing of the same window; they see one voxel's features, so the reach and the blind spot are unchanged.</text>
+<text x="20.0" y="100.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">1  Inputs</text>
+<text x="350.0" y="100.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">2  Branches: each sees a different part of the window</text>
+<text x="815.0" y="100.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">3  Fusion and outputs</text>
+<text x="1175.0" y="100.0" font-size="15" font-weight="bold" fill="#1F2933" text-anchor="start">4  What the output at (t, r, c) sees</text>
+<path d="M40,162 L152,116 L270,116 L158,162 z" fill="#E9EDF1" stroke="#5D6B7A"/>
+<path d="M158,162 L270,116 L270,234 L158,280 z" fill="#DDE3E9" stroke="#5D6B7A"/>
+<rect x="40.0" y="162.0" width="118.0" height="118.0" rx="0" fill="#F4F6F8" stroke="#5D6B7A" stroke-width="1.2"/>
+<rect x="109.9" y="174.0" width="60.3" height="60.3" rx="0" fill="none" stroke="#2F5F9E" stroke-width="1.3" stroke-dasharray="4 3"/>
+<rect x="139.8" y="161.7" width="60.3" height="60.3" rx="0" fill="none" stroke="#2F5F9E" stroke-width="1.3" stroke-dasharray="4 3"/>
+<line x1="109.9" y1="174.0" x2="139.8" y2="161.7" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
+<line x1="170.2" y1="174.0" x2="200.1" y2="161.7" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
+<line x1="109.9" y1="234.3" x2="139.8" y2="222.0" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
+<line x1="170.2" y1="234.3" x2="200.1" y2="222.0" stroke="#2F5F9E" stroke-width="1.1" stroke-dasharray="4 3"/>
+<text x="99.0" y="298.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="middle">94 px</text>
+<text x="32.0" y="221.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 32 221.0)">94 px</text>
+<text x="224.0" y="271.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start" transform="rotate(-22 224.0 271.0)">time: 718 frames</text>
+<text x="20.0" y="322.0" font-size="12.2" font-weight="bold" fill="#1F2933" text-anchor="start">Training window: 718 frames × 94 × 94 px</text>
+<text x="20.0" y="339.0" font-size="11.2" font-weight="normal" fill="#52606D" text-anchor="start">loss on the central 192 frames × 48 × 48 px (dashed)</text>
+<text x="20.0" y="354.0" font-size="11.2" font-weight="normal" fill="#52606D" text-anchor="start">prediction tiles whole trials the same way</text>
+<text x="20.0" y="388.0" font-size="12.5" font-weight="bold" fill="#1F2933" text-anchor="start">5 input channels at every voxel</text>
+<circle cx="30" cy="408" r="8" fill="#E8ECF1" stroke="#34495E"/>
+<text x="30.0" y="412.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">1</text>
+<text x="46.0" y="412.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">movie ÷ trial scale (missing = 0)</text>
+<circle cx="30" cy="431" r="8" fill="#E8ECF1" stroke="#34495E"/>
+<text x="30.0" y="435.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">2</text>
+<text x="46.0" y="435.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">validity flag (imaged pixel, kept frame)</text>
+<circle cx="30" cy="454" r="8" fill="#E8ECF1" stroke="#34495E"/>
+<text x="30.0" y="458.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">3</text>
+<text x="46.0" y="458.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">mean image M ÷ scale (whole trial)</text>
+<circle cx="30" cy="477" r="8" fill="#E8ECF1" stroke="#34495E"/>
+<text x="30.0" y="481.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">4</text>
+<text x="46.0" y="481.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">log variance factor (SiLo's, ÷ trial median)</text>
+<circle cx="30" cy="500" r="8" fill="#E8ECF1" stroke="#34495E"/>
+<text x="30.0" y="504.0" font-size="10.5" font-weight="bold" fill="#34495E" text-anchor="middle">5</text>
+<text x="46.0" y="504.0" font-size="11.3" font-weight="normal" fill="#1F2933" text-anchor="start">log (variance map ÷ g · M): events add variance</text>
+<text x="20.0" y="542.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Channels 3–5 are whole-trial maps, constant in</text>
+<text x="20.0" y="557.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">time: each frame enters with weight 1/T,</text>
+<text x="20.0" y="573.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">a negligible leak through the blind spot.</text>
+<text x="20.0" y="588.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start"></text>
+<text x="20.0" y="604.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Per trial: scale (median brightness) and</text>
+<text x="20.0" y="619.5" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">photon gain g (variance per count).</text>
+<line x1="300.0" y1="270.0" x2="330.0" y2="270.0" stroke="#52606D" stroke-width="1.6"/>
+<line x1="330.0" y1="160.0" x2="330.0" y2="735.0" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="112.0" width="425.0" height="119.0" rx="7" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.4"/>
+<text x="362.0" y="132.0" font-size="13" font-weight="bold" fill="#2F5F9E" text-anchor="start">Past branch</text>
+<text x="763.0" y="132.0" font-size="12" font-weight="bold" fill="#2F5F9E" text-anchor="end">32 ch</text>
+<text x="362.0" y="150.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 5 → 32, then 7 residual (ReZero) blocks, each:</text>
+<text x="362.0" y="165.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">per-frame 3×3 conv, dilation 1, 1, 1, 1, 2, 2, 4 (blocks 3–7 at ½ res)</text>
+<text x="362.0" y="180.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and a causal temporal conv, kernel 3, dilation 1, 2, 4, …, 64</text>
+<text x="362.0" y="195.6" font-size="11.2" font-weight="bold" fill="#2F5F9E" text-anchor="start">then a pointwise block: x + α · W₂ GELU(W₁ x), 32 → 64 → 32</text>
+<text x="362.0" y="210.8" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">then shifted by 9 frames: sees frames t−263 … t−9, ±23 px</text>
+<line x1="330.0" y1="171.5" x2="348.0" y2="171.5" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="171.5" x2="795.0" y2="171.5" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="241.0" width="425.0" height="44.0" rx="7" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.4"/>
+<text x="362.0" y="261.0" font-size="13" font-weight="bold" fill="#2F5F9E" text-anchor="start">Future branch: the same on reversed time (t+9 … t+263)</text>
+<text x="763.0" y="261.0" font-size="12" font-weight="bold" fill="#2F5F9E" text-anchor="end">32 ch</text>
+<line x1="330.0" y1="263.0" x2="348.0" y2="263.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="263.0" x2="795.0" y2="263.0" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="295.0" width="425.0" height="134.0" rx="7" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1.4"/>
+<text x="362.0" y="315.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="start">Half-plane branches ×4 (one trunk per direction)</text>
+<text x="763.0" y="315.0" font-size="12" font-weight="bold" fill="#2C7A4B" text-anchor="end">4 × 24 ch</text>
+<text x="362.0" y="333.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 5 → 24, then 5 blocks: a 2×3 conv that sees rows r−d … r</text>
+<text x="362.0" y="348.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">only (dilation 1, 1, 1, 2, 4; blocks 3–5 at ½ res) and a symmetric</text>
+<text x="362.0" y="363.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">temporal conv, dilation 1, 2, 4, 8, 16; then shifted down 5 rows.</text>
+<text x="362.0" y="378.6" font-size="11.2" font-weight="bold" fill="#2C7A4B" text-anchor="start">After each block a pointwise block, 24 → 48 → 24</text>
+<text x="362.0" y="393.8" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">Rotated 0, 90, 180, 270°, the four see every pixel outside the box,</text>
+<text x="362.0" y="409.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">up to 22 px away, in frames t−31 … t+31: the output frame too</text>
+<line x1="330.0" y1="362.0" x2="348.0" y2="362.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="362.0" x2="795.0" y2="362.0" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="443.0" width="425.0" height="89.0" rx="7" fill="#FBE6CF" stroke="#B5651D" stroke-width="1.4"/>
+<text x="362.0" y="463.0" font-size="13" font-weight="bold" fill="#B5651D" text-anchor="start">Pooled same-frame features</text>
+<text x="763.0" y="463.0" font-size="12" font-weight="bold" fill="#B5651D" text-anchor="end">8 ch</text>
+<text x="362.0" y="481.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">fractional deviation Σ(movie − M) / Σ M over squares of half-width</text>
+<text x="362.0" y="496.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">8, 16, 32 px and the whole window, each minus the box, in frame t</text>
+<text x="362.0" y="511.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and over frames t−3 … t+4: shared brightness changes, even fast ones</text>
+<line x1="330.0" y1="487.5" x2="348.0" y2="487.5" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="487.5" x2="795.0" y2="487.5" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="546.0" width="425.0" height="104.0" rx="7" fill="#ECE4F6" stroke="#6B44A0" stroke-width="1.4"/>
+<text x="362.0" y="566.0" font-size="13" font-weight="bold" fill="#6B44A0" text-anchor="start">The pixel's own long window, and its whole-trial maps</text>
+<text x="763.0" y="566.0" font-size="12" font-weight="bold" fill="#6B44A0" text-anchor="end">6 ch</text>
+<text x="362.0" y="584.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">mean W̄ and variance of the movie at (r, c) over 9 ≤ |dt| ≤ 262:</text>
+<text x="362.0" y="599.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">log (W̄ / M), log (variance / g W̄), share of the window with data;</text>
+<text x="362.0" y="614.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">and log M, log variance ratio, log variance factor at (r, c).</text>
+<text x="362.0" y="629.6" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">Enter at the output only: inside a branch they would reach hidden frames</text>
+<line x1="330.0" y1="598.0" x2="348.0" y2="598.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="598.0" x2="795.0" y2="598.0" stroke="#52606D" stroke-width="1.6"/>
+<rect x="350.0" y="664.0" width="425.0" height="74.0" rx="7" fill="#F2F3F5" stroke="#7A808A" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="362.0" y="684.0" font-size="13" font-weight="bold" fill="#7A808A" text-anchor="start">Motion features (v10b, optional)</text>
+<text x="763.0" y="684.0" font-size="12" font-weight="bold" fill="#7A808A" text-anchor="end">12 ch</text>
+<text x="362.0" y="702.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">per pool square, the surround fitted as a M − d · ∇M + b · ∇²M;</text>
+<text x="362.0" y="717.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">the change that d and b make at the pixel, and its own ∇M / M, ∇²M / M</text>
+<line x1="330.0" y1="701.0" x2="348.0" y2="701.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="775.0" y1="701.0" x2="795.0" y2="701.0" stroke="#52606D" stroke-width="1.6" stroke-dasharray="5 4"/>
+<line x1="795.0" y1="140.0" x2="795.0" y2="701.0" stroke="#52606D" stroke-width="1.6"/>
+<line x1="795.0" y1="150.0" x2="813.0" y2="150.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="120.0" width="330.0" height="60.0" rx="7" fill="#E8ECF1" stroke="#34495E" stroke-width="1.4"/>
+<text x="827.0" y="140.0" font-size="13" font-weight="bold" fill="#34495E" text-anchor="start">Concatenate at every voxel</text>
+<text x="827.0" y="158.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">174 channels (186 with motion features)</text>
+<line x1="980.0" y1="180.0" x2="980.0" y2="200.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="202.0" width="330.0" height="76.0" rx="7" fill="#E8ECF1" stroke="#34495E" stroke-width="1.4"/>
+<text x="827.0" y="222.0" font-size="13" font-weight="bold" fill="#34495E" text-anchor="start">Pointwise fusion</text>
+<text x="827.0" y="240.0" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 174 → 64, GELU</text>
+<text x="827.0" y="255.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">1×1×1 conv 64 → 32, GELU</text>
+<line x1="980.0" y1="278.0" x2="980.0" y2="298.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="300.0" width="330.0" height="100.0" rx="7" fill="#E8ECF1" stroke="#34495E" stroke-width="1.4"/>
+<text x="827.0" y="320.0" font-size="13" font-weight="bold" fill="#34495E" text-anchor="start">4 pointwise residual blocks</text>
+<text x="1133.0" y="320.0" font-size="12" font-weight="bold" fill="#34495E" text-anchor="end">new</text>
+<text x="827.0" y="338.0" font-size="11.2" font-weight="bold" fill="#34495E" text-anchor="start">each x + α · W₂ GELU(W₁ x), 1×1×1, 32 → 64 → 32</text>
+<text x="827.0" y="353.2" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">combine the branches, window statistics and</text>
+<text x="827.0" y="368.4" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">same-frame context nonlinearly: 10 pointwise</text>
+<text x="827.0" y="383.6" font-size="11.2" font-weight="normal" fill="#1F2933" text-anchor="start">layers after the concatenation instead of 2</text>
+<line x1="980.0" y1="400.0" x2="864.0" y2="426.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="428.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
+<text x="864.0" y="446.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">mix m</text>
+<text x="864.0" y="463.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
+<line x1="864.0" y1="474.0" x2="864.0" y2="496.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="980.0" y1="400.0" x2="980.0" y2="426.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="931.0" y="428.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
+<text x="980.0" y="446.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">correction c</text>
+<text x="980.0" y="463.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
+<line x1="980.0" y1="474.0" x2="980.0" y2="496.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<line x1="980.0" y1="400.0" x2="1096.0" y2="426.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="1047.0" y="428.0" width="98.0" height="46.0" rx="6" fill="#E8ECF1" stroke="#34495E" stroke-width="1.3"/>
+<text x="1096.0" y="446.0" font-size="11.8" font-weight="bold" fill="#34495E" text-anchor="middle">noise v</text>
+<text x="1096.0" y="463.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">1×1×1, 32 → 1</text>
+<line x1="1096.0" y1="474.0" x2="1096.0" y2="496.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="498.0" width="330.0" height="118.0" rx="7" fill="#FFFFFF" stroke="#34495E" stroke-width="1.3"/>
+<text x="827.0" y="520.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">base = M + tanh(m) · (W̄ − M)</text>
+<text x="827.0" y="536.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">between the mean image and the window mean</text>
+<text x="827.0" y="554.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">F0 = base · exp(0.7 · tanh(c / 0.7))</text>
+<text x="827.0" y="570.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">a correction of ×0.5 … ×2 at most</text>
+<text x="827.0" y="588.0" font-size="12.6" font-weight="bold" fill="#1F2933" text-anchor="start">σ² = (g · F0 + floor) · exp(3 · tanh(v / 3))</text>
+<text x="827.0" y="604.0" font-size="10.6" font-weight="normal" fill="#52606D" text-anchor="start">photon noise, corrected</text>
+<line x1="980.0" y1="616.0" x2="980.0" y2="636.0" stroke="#52606D" stroke-width="1.4" marker-end="url(#arr)"/>
+<rect x="815.0" y="638.0" width="330.0" height="80.0" rx="7" fill="#34495E" stroke="#34495E" stroke-width="1.3"/>
+<text x="980.0" y="662.0" font-size="13.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Outputs at every pixel and frame</text>
+<text x="980.0" y="683.0" font-size="12.4" font-weight="normal" fill="#FFFFFF" text-anchor="middle">F0 (t, r, c): baseline, counts</text>
+<text x="980.0" y="702.0" font-size="12.4" font-weight="normal" fill="#FFFFFF" text-anchor="middle">σ² (t, r, c): noise variance, counts²</text>
+<text x="815.0" y="740.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Heads start at 0: the untrained network predicts F0 = M.</text>
+<text x="815.0" y="756.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">Pointwise blocks start as the identity (α = 1, W₂ = 0; α is learned).</text>
+<text x="815.0" y="772.0" font-size="11" font-weight="normal" fill="#52606D" text-anchor="start">432,524 parameters (309,510 without the pointwise blocks).</text>
+<clipPath id="clip132"><rect x="1215" y="132" width="355" height="132"/></clipPath>
+<rect x="1215.0" y="132.0" width="355.0" height="132.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
+<g clip-path="url(#clip132)">
+<rect x="1215.0" y="165.7" width="171.4" height="64.6" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
+<rect x="1398.6" y="165.7" width="171.4" height="64.6" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
+<rect x="1371.6" y="167.1" width="41.8" height="23.9" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
+<rect x="1371.6" y="205.0" width="41.8" height="23.9" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
+<rect x="1390.5" y="132.0" width="4.7" height="59.0" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
+<rect x="1390.5" y="205.0" width="4.7" height="59.0" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
+<rect x="1215.7" y="197.3" width="170.8" height="2.2" fill="#6B44A0"/>
+<rect x="1398.6" y="197.3" width="170.8" height="2.2" fill="#6B44A0"/>
 </g>
-<rect x="1387.1" y="184.4" width="10.8" height="11.2" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
-<circle cx="1392.5" cy="190.0" r="2.6" fill="#1F2933"/>
-<line x1="1215.0" y1="256.0" x2="1215.0" y2="260.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1215.0" y="272.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t−263</text>
-<line x1="1306.1" y1="256.0" x2="1306.1" y2="260.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1306.1" y="272.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−128</text>
-<line x1="1392.5" y1="256.0" x2="1392.5" y2="260.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1392.5" y="272.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t</text>
-<line x1="1478.9" y1="256.0" x2="1478.9" y2="260.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1478.9" y="272.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+128</text>
-<line x1="1570.0" y1="256.0" x2="1570.0" y2="260.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1570.0" y="272.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t+263</text>
-<line x1="1211.0" y1="124.0" x2="1215.0" y2="124.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="127.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">47</text>
-<line x1="1211.0" y1="157.7" x2="1215.0" y2="157.7" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="161.2" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">23</text>
-<line x1="1211.0" y1="190.0" x2="1215.0" y2="190.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="193.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">0</text>
-<line x1="1211.0" y1="222.3" x2="1215.0" y2="222.3" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="225.8" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−23</text>
-<line x1="1211.0" y1="256.0" x2="1215.0" y2="256.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="259.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−47</text>
-<text x="1215.0" y="116.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">a  Time × row through the output's column: the whole window</text>
-<text x="1179.0" y="190.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 1179 190.0)">row offset (px)</text>
-<text x="1392.5" y="290.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">frames</text>
-<clipPath id="clip326"><rect x="1215" y="326" width="355" height="178"/></clipPath>
-<rect x="1215.0" y="326.0" width="355.0" height="178.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
-<g clip-path="url(#clip326)">
-<rect x="225.4" y="336.3" width="1127.1" height="157.5" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
-<rect x="1432.4" y="336.3" width="1127.1" height="157.5" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
-<rect x="1254.9" y="339.7" width="275.1" height="58.2" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
-<rect x="1254.9" y="432.1" width="275.1" height="58.2" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
-<rect x="1379.2" y="254.1" width="31.1" height="143.8" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
-<rect x="1379.2" y="432.1" width="31.1" height="143.8" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
-<rect x="229.9" y="413.3" width="1122.7" height="3.4" fill="#6B44A0"/>
-<rect x="1432.4" y="413.3" width="1122.7" height="3.4" fill="#6B44A0"/>
+<rect x="1387.1" y="192.4" width="10.8" height="11.2" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
+<circle cx="1392.5" cy="198.0" r="2.6" fill="#1F2933"/>
+<line x1="1215.0" y1="264.0" x2="1215.0" y2="268.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1215.0" y="280.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t−263</text>
+<line x1="1306.1" y1="264.0" x2="1306.1" y2="268.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1306.1" y="280.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−128</text>
+<line x1="1392.5" y1="264.0" x2="1392.5" y2="268.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1392.5" y="280.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t</text>
+<line x1="1478.9" y1="264.0" x2="1478.9" y2="268.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1478.9" y="280.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+128</text>
+<line x1="1570.0" y1="264.0" x2="1570.0" y2="268.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1570.0" y="280.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t+263</text>
+<line x1="1211.0" y1="132.0" x2="1215.0" y2="132.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="135.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">47</text>
+<line x1="1211.0" y1="165.7" x2="1215.0" y2="165.7" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="169.2" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">23</text>
+<line x1="1211.0" y1="198.0" x2="1215.0" y2="198.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="201.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">0</text>
+<line x1="1211.0" y1="230.3" x2="1215.0" y2="230.3" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="233.8" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−23</text>
+<line x1="1211.0" y1="264.0" x2="1215.0" y2="264.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="267.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−47</text>
+<text x="1215.0" y="124.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">a  Time × row through the output's column: the whole window</text>
+<text x="1179.0" y="198.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 1179 198.0)">row offset (px)</text>
+<text x="1392.5" y="298.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">frames</text>
+<clipPath id="clip334"><rect x="1215" y="334" width="355" height="178"/></clipPath>
+<rect x="1215.0" y="334.0" width="355.0" height="178.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
+<g clip-path="url(#clip334)">
+<rect x="225.4" y="344.3" width="1127.1" height="157.5" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
+<rect x="1432.4" y="344.3" width="1127.1" height="157.5" rx="0" fill="#DCE8F7" fill-opacity="1.0" stroke="#2F5F9E" stroke-width="0.9"/>
+<rect x="1254.9" y="347.7" width="275.1" height="58.2" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
+<rect x="1254.9" y="440.1" width="275.1" height="58.2" rx="0" fill="#DDF1E4" fill-opacity="0.92" stroke="#2C7A4B" stroke-width="0.9"/>
+<rect x="1379.2" y="262.1" width="31.1" height="143.8" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
+<rect x="1379.2" y="440.1" width="31.1" height="143.8" rx="0" fill="#FBE6CF" fill-opacity="1.0" stroke="#B5651D" stroke-width="0.9"/>
+<rect x="229.9" y="421.3" width="1122.7" height="3.4" fill="#6B44A0"/>
+<rect x="1432.4" y="421.3" width="1122.7" height="3.4" fill="#6B44A0"/>
 </g>
-<rect x="1357.0" y="401.3" width="71.0" height="27.4" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
-<circle cx="1392.5" cy="415.0" r="2.6" fill="#1F2933"/>
-<line x1="1215.0" y1="504.0" x2="1215.0" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1215.0" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−40</text>
-<line x1="1254.9" y1="504.0" x2="1254.9" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1254.9" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−31</text>
-<line x1="1352.6" y1="504.0" x2="1352.6" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1352.6" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−9</text>
-<line x1="1392.5" y1="504.0" x2="1392.5" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1392.5" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t</text>
-<line x1="1432.4" y1="504.0" x2="1432.4" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1432.4" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+9</text>
-<line x1="1530.1" y1="504.0" x2="1530.1" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1530.1" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+31</text>
-<line x1="1570.0" y1="504.0" x2="1570.0" y2="508.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1570.0" y="520.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+40</text>
-<line x1="1211.0" y1="339.7" x2="1215.0" y2="339.7" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="343.2" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">22</text>
-<line x1="1211.0" y1="397.9" x2="1215.0" y2="397.9" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="401.4" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">5</text>
-<line x1="1211.0" y1="415.0" x2="1215.0" y2="415.0" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="418.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">0</text>
-<line x1="1211.0" y1="432.1" x2="1215.0" y2="432.1" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="435.6" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−5</text>
-<line x1="1211.0" y1="490.3" x2="1215.0" y2="490.3" stroke="#8A94A0" stroke-width="1"/>
-<text x="1208.0" y="493.8" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−22</text>
-<text x="1215.0" y="318.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">b  Zoom on the output: frames t−40 … t+40, rows ±26</text>
-<text x="1179.0" y="415.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 1179 415.0)">row offset (px)</text>
-<text x="1392.5" y="538.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">frames</text>
-<rect x="1235.0" y="354.3" width="120.0" height="32.0" rx="3" fill="#FFFFFF" fill-opacity="0.9" stroke="#FFFFFF" stroke-width="0"/>
-<text x="1353.0" y="367.3" font-size="10.4" font-weight="bold" fill="#B03A2E" text-anchor="end">hidden box</text>
-<text x="1353.0" y="380.3" font-size="10.2" font-weight="normal" fill="#B03A2E" text-anchor="end">|dt| ≤ 8, |dr|, |dc| ≤ 4</text>
-<line x1="1355.0" y1="383.3" x2="1370.3" y2="400.3" stroke="#B03A2E" stroke-width="1"/>
-<text x="1215.0" y="576.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">c  Rows × columns in frame t (no past or future branch here)</text>
-<rect x="1215.0" y="584.0" width="176.0" height="176.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
-<rect x="1261.8" y="630.8" width="82.4" height="82.4" rx="0" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1"/>
-<rect x="1288.0" y="657.0" width="30.0" height="30.0" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
-<rect x="1273.0" y="642.0" width="59.9" height="59.9" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
-<rect x="1243.1" y="612.1" width="119.8" height="119.8" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
-<rect x="1295.5" y="664.5" width="15.0" height="15.0" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
-<circle cx="1303.0" cy="672.0" r="2.4" fill="#1F2933"/>
-<text x="1303.0" y="646.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">↑</text>
-<text x="1303.0" y="706.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">↓</text>
-<text x="1273.0" y="676.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">←</text>
-<text x="1333.0" y="676.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">→</text>
-<text x="1405.0" y="614.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">four half-plane views ↑ ↓ ← →</text>
-<text x="1405.0" y="630.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">together: every pixel outside</text>
-<text x="1405.0" y="646.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">the box, up to 22 px away</text>
-<text x="1405.0" y="670.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">dashed: pool squares of half-</text>
-<text x="1405.0" y="686.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">width 8, 16, 32 px; also the</text>
-<text x="1405.0" y="702.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">whole window, minus the box</text>
-<rect x="1215.0" y="774.0" width="14.0" height="11.0" rx="0" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.1"/>
-<text x="1235.0" y="784.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">past and future branches</text>
-<rect x="1405.0" y="774.0" width="14.0" height="11.0" rx="0" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1.1"/>
-<text x="1425.0" y="784.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">half-plane branches</text>
-<rect x="1215.0" y="793.0" width="14.0" height="11.0" rx="0" fill="#FBE6CF" stroke="#B5651D" stroke-width="1.1"/>
-<text x="1235.0" y="803.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">pooled features</text>
-<rect x="1405.0" y="793.0" width="14.0" height="11.0" rx="0" fill="#ECE4F6" stroke="#6B44A0" stroke-width="1.1"/>
-<text x="1425.0" y="803.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">the pixel's own long window</text>
-<rect x="1215.0" y="812.0" width="14.0" height="11.0" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.1"/>
-<text x="1235.0" y="822.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">hidden: never seen</text>
-<rect x="20.0" y="858.0" width="1560.0" height="134.0" rx="8" fill="#FAFBFC" stroke="#B8C0CA" stroke-width="1.1"/>
-<text x="36.0" y="882.0" font-size="14" font-weight="bold" fill="#1F2933" text-anchor="start">Training</text>
-<text x="36.0" y="904.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Mean loss: Σ w (y − F0)² / photon variance at M. It is minimized by the conditional mean, so the baseline is unbiased at any brightness (a robust likelihood on skewed low counts is not).</text>
-<text x="36.0" y="925.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Noise loss: 0.1 × Gaussian negative log-likelihood of movie − activity around F0 (held fixed), so σ² learns the actual spread around the baseline.</text>
-<text x="36.0" y="946.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Targets: simulated windows (real trials as templates, with fast brightness changes, realistic low counts; v10 adds motion, focus and local warps) → the true baseline; real windows → movie − GIAnT's activity.</text>
-<text x="36.0" y="967.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">v9: pretrained 3000 steps on simulations from v6r, then fine-tuned 1700 steps on half real, half simulated windows; up/down flips only; half of the windows end or start at a trial edge.</text>
+<rect x="1357.0" y="409.3" width="71.0" height="27.4" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
+<circle cx="1392.5" cy="423.0" r="2.6" fill="#1F2933"/>
+<line x1="1215.0" y1="512.0" x2="1215.0" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1215.0" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−40</text>
+<line x1="1254.9" y1="512.0" x2="1254.9" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1254.9" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−31</text>
+<line x1="1352.6" y1="512.0" x2="1352.6" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1352.6" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">−9</text>
+<line x1="1392.5" y1="512.0" x2="1392.5" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1392.5" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">t</text>
+<line x1="1432.4" y1="512.0" x2="1432.4" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1432.4" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+9</text>
+<line x1="1530.1" y1="512.0" x2="1530.1" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1530.1" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+31</text>
+<line x1="1570.0" y1="512.0" x2="1570.0" y2="516.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1570.0" y="528.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">+40</text>
+<line x1="1211.0" y1="347.7" x2="1215.0" y2="347.7" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="351.2" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">22</text>
+<line x1="1211.0" y1="405.9" x2="1215.0" y2="405.9" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="409.4" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">5</text>
+<line x1="1211.0" y1="423.0" x2="1215.0" y2="423.0" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="426.5" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">0</text>
+<line x1="1211.0" y1="440.1" x2="1215.0" y2="440.1" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="443.6" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−5</text>
+<line x1="1211.0" y1="498.3" x2="1215.0" y2="498.3" stroke="#8A94A0" stroke-width="1"/>
+<text x="1208.0" y="501.8" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="end">−22</text>
+<text x="1215.0" y="326.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">b  Zoom on the output: frames t−40 … t+40, rows ±26</text>
+<text x="1179.0" y="423.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle" transform="rotate(-90 1179 423.0)">row offset (px)</text>
+<text x="1392.5" y="546.0" font-size="10.2" font-weight="normal" fill="#52606D" text-anchor="middle">frames</text>
+<rect x="1235.0" y="362.3" width="120.0" height="32.0" rx="3" fill="#FFFFFF" fill-opacity="0.9" stroke="#FFFFFF" stroke-width="0"/>
+<text x="1353.0" y="375.3" font-size="10.4" font-weight="bold" fill="#B03A2E" text-anchor="end">hidden box</text>
+<text x="1353.0" y="388.3" font-size="10.2" font-weight="normal" fill="#B03A2E" text-anchor="end">|dt| ≤ 8, |dr|, |dc| ≤ 4</text>
+<line x1="1355.0" y1="391.3" x2="1370.3" y2="408.3" stroke="#B03A2E" stroke-width="1"/>
+<text x="1215.0" y="584.0" font-size="12" font-weight="bold" fill="#1F2933" text-anchor="start">c  Rows × columns in frame t (no past or future branch here)</text>
+<rect x="1215.0" y="592.0" width="176.0" height="176.0" rx="0" fill="#F7F8FA" stroke="#B8C0CA" stroke-width="1"/>
+<rect x="1261.8" y="638.8" width="82.4" height="82.4" rx="0" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1"/>
+<rect x="1288.0" y="665.0" width="30.0" height="30.0" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
+<rect x="1273.0" y="650.0" width="59.9" height="59.9" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
+<rect x="1243.1" y="620.1" width="119.8" height="119.8" rx="0" fill="none" stroke="#B5651D" stroke-width="1.3" stroke-dasharray="4 3"/>
+<rect x="1295.5" y="672.5" width="15.0" height="15.0" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.4"/>
+<circle cx="1303.0" cy="680.0" r="2.4" fill="#1F2933"/>
+<text x="1303.0" y="654.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">↑</text>
+<text x="1303.0" y="714.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">↓</text>
+<text x="1273.0" y="684.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">←</text>
+<text x="1333.0" y="684.0" font-size="13" font-weight="bold" fill="#2C7A4B" text-anchor="middle">→</text>
+<text x="1405.0" y="622.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">four half-plane views ↑ ↓ ← →</text>
+<text x="1405.0" y="638.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">together: every pixel outside</text>
+<text x="1405.0" y="654.0" font-size="10.4" font-weight="normal" fill="#2C7A4B" text-anchor="start">the box, up to 22 px away</text>
+<text x="1405.0" y="678.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">dashed: pool squares of half-</text>
+<text x="1405.0" y="694.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">width 8, 16, 32 px; also the</text>
+<text x="1405.0" y="710.0" font-size="10.4" font-weight="normal" fill="#B5651D" text-anchor="start">whole window, minus the box</text>
+<rect x="1215.0" y="782.0" width="14.0" height="11.0" rx="0" fill="#DCE8F7" stroke="#2F5F9E" stroke-width="1.1"/>
+<text x="1235.0" y="792.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">past and future branches</text>
+<rect x="1405.0" y="782.0" width="14.0" height="11.0" rx="0" fill="#DDF1E4" stroke="#2C7A4B" stroke-width="1.1"/>
+<text x="1425.0" y="792.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">half-plane branches</text>
+<rect x="1215.0" y="801.0" width="14.0" height="11.0" rx="0" fill="#FBE6CF" stroke="#B5651D" stroke-width="1.1"/>
+<text x="1235.0" y="811.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">pooled features</text>
+<rect x="1405.0" y="801.0" width="14.0" height="11.0" rx="0" fill="#ECE4F6" stroke="#6B44A0" stroke-width="1.1"/>
+<text x="1425.0" y="811.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">the pixel's own long window</text>
+<rect x="1215.0" y="820.0" width="14.0" height="11.0" rx="0" fill="url(#hatch)" stroke="#B03A2E" stroke-width="1.1"/>
+<text x="1235.0" y="830.0" font-size="10.8" font-weight="normal" fill="#1F2933" text-anchor="start">hidden: never seen</text>
+<rect x="20.0" y="866.0" width="1560.0" height="156.0" rx="8" fill="#FAFBFC" stroke="#B8C0CA" stroke-width="1.1"/>
+<text x="36.0" y="890.0" font-size="14" font-weight="bold" fill="#1F2933" text-anchor="start">Training</text>
+<text x="36.0" y="912.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Mean loss: Σ w (y − F0)² / photon variance at M. It is minimized by the conditional mean, so the baseline is unbiased at any brightness (a robust likelihood on skewed low counts is not).</text>
+<text x="36.0" y="933.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Noise loss: 0.1 × Gaussian negative log-likelihood of movie − activity around F0 (held fixed), so σ² learns the actual spread around the baseline.</text>
+<text x="36.0" y="954.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Targets: simulated windows (real trials as templates, with fast brightness changes and realistic low counts) → the true baseline; real windows → movie − GIAnT's activity, no loss within 2 s of a trial's ends (to be re-exported: GIAnT under-fits activity, GIAnT-MATLAB#56).</text>
+<text x="36.0" y="975.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Deep arm (S4): from v6r, pretrained 3000 steps on simulations, then fine-tuned 1700 steps on half real, half simulated windows (event mask 0.5); up/down flips only; half of the simulated windows end or start at a trial edge.</text>
+<text x="36.0" y="996.0" font-size="11.6" font-weight="normal" fill="#1F2933" text-anchor="start">Shipped weights: WiSE-FT 0.5, the mean of the pretrained weights (step 0) and the average of fine-tuning steps 800–1700. On held-out mice it beats the control on every simulated kind; real data are re-tested after the re-export.</text>
 </svg>
