@@ -70,10 +70,10 @@ def diff(a, b, kinds_=("real", "fast", "free", "sim", "fastdim", "freedim")):
     print(f"  {a} - {b}: " + "; ".join(out))
 
 print("\nPaired differences (points of the ratio x100, 95% hierarchical bootstrap: mice, then windows)")
-for arm in ("seed1", "lowcount", "edge", "deep"):
+for arm in ("seed1", "lowcount", "edge", "deep", "deep2"):
     for t in ("wise", "ft"):
         if f"{arm}_{t}" in cks: diff(f"{arm}_{t}", f"ctrl_{t}")
-for arm in ("ctrl", "seed1", "lowcount", "edge", "deep"):
+for arm in ("ctrl", "seed1", "lowcount", "edge", "deep", "deep2"):
     if f"{arm}_wise" in cks:
         diff(f"{arm}_wise", f"{arm}_ft"); diff(f"{arm}_soup", f"{arm}_ft")
 if "S3_ft" in cks:

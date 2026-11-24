@@ -2708,3 +2708,33 @@ The first 16 frames pooled, and edge − control on the same draws:
 This replaces "no re-export yet" above. The per-trial maps of the next version (and the session-level activity map) can be written in the same pass.
 
 **What this means for the models so far.** Every network so far was trained on targets that still hold part of the activity at footprints. Those pixels' loss pulled the baseline up during events, which the event mask and the activity-subtracted inputs only partly offset. Results on real-data targets (the held-out evaluations) are measured against the same biased targets, so they need re-running after the re-export.
+
+## Deep arm rerun (S4_deep2): consistent gains on simulations, none measurable on real data (2026-11-24)
+
+**The run.** It is the S4 deep arm (`--fuse_blocks 4 --branch_mlp 1`, same reach) with `--pointwise_init zero_out` (#15). The new pointwise blocks start with their output layer at zero instead of a zero ReZero scale, so they learn (the first deep run's blocks never switched on). The evaluation used the same 8 held-out sessions, sidecars, kinds and 96 windows per mouse as S4; `tools/s4_eval.py` now includes `deep2`.
+
+**Balanced score on the test mice** (% vs the reference; lower is better):
+
+| checkpoint | real | fast | free | sim | fastdim | freedim |
+|---|---|---|---|---|---|---|
+| ctrl_pre | −3.34 | +26.1 | −16.7 | +64.0 | +37.4 | +1.6 |
+| deep2_pre | −3.36 | +24.8 | −18.9 | +62.4 | +36.4 | −4.4 |
+| ctrl_wise | −3.45 | +28.1 | −21.6 | +67.6 | +35.8 | −6.7 |
+| deep2_wise | −3.48 | +26.0 | −22.9 | +64.6 | +34.4 | −10.5 |
+| deep2_ft | −3.59 | +28.7 | −21.8 | +67.9 | +35.8 | −10.1 |
+
+**deep2_wise − ctrl_wise** (points, 95% hierarchical bootstrap):
+
+| real | fast | free | sim | fastdim | freedim |
+|---|---|---|---|---|---|
+| −0.03 [−0.10, +0.02] | −2.10 [−4.30, −0.11] | −1.25 [−2.38, −0.56] | −2.97 [−6.06, −0.25] | −1.40 [−2.49, −0.27] | −3.84 [−5.09, −2.86] |
+
+- **Simulations: better on every kind.** The gain is already there before fine-tuning (pretrained: fast −1.3, freedim −6.0 points from the table).
+- **Fine-tuning costs less simulation accuracy.**
+  - deep2_ft − ctrl_ft: free −12.3 [−25.3, −3.2], freedim −16.5 [−32.3, −5.8].
+  - WiSE-FT adds little on top: deep2_wise − deep2_ft is free −1.1, freedim −0.4.
+  - The extra nonlinear processing seems to let real-data fine-tuning fit without unlearning the simulations.
+- **Real data: no measurable difference.** The real targets still hold part of the activity at footprints (see "Activity under-fit in the training targets" above), so this comparison may not resolve the difference. Re-run it after the re-export.
+- **Cost:** 7.2 h per run against 5.3 h for the control (`--no_compile`, with checkpointing).
+
+**Recommendation:** keep the deep architecture (`--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out`) as the candidate for the next version, with the per-trial maps. Confirm it on real data after the re-export. Until then, the delivered model stays ctrl WiSE-FT 0.5.
