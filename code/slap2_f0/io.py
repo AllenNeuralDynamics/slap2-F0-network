@@ -174,26 +174,34 @@ def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: i
             a = {k: _scalar(h.attrs[k]) for k in ("label", "path", "trial", "peakR") if k in h.attrs}
         digits = f.stem[len("trial_"):]
         trial = int(a["trial"]) if "trial" in a else (int(digits) if digits.isdigit() else 0)
-        info.append((f, str(a.get("label", f.parent.parent.name)), _path_id(a.get("path"), f.parent.name), trial,
+        info.append((str(a.get("label", f.parent.parent.name)), _path_id(a.get("path"), f.parent.name), trial,
                      float(a["peakR"]) if "peakR" in a else float("nan")))
-    report, failed = [], set()
+    reasons, report = filter_records(info, min_peak_r, min_path_trials)
+    return [f for f, why in zip(files, reasons) if why is None], report
+
+
+def filter_records(records, min_peak_r: float = 0.3, min_path_trials: int = 4) -> tuple[list[str | None], list[str]]:
+    """The rules of ``filter_trials`` on (session label, path, trial, peak r)
+    records, e.g. from an export's ``export_summary.json``: why each record
+    is left out (None: kept), and the report lines."""
+    report, reasons = [], [None] * len(records)
     if min_peak_r > 0:
-        for f, s, p, t, r in info:
+        for i, (s, p, t, r) in enumerate(records):
             if r < min_peak_r:  # NaN (no attribute) compares False and is kept
-                failed.add(f)
-                report.append(f"{s} path {p} trial {t}: calibration failed (peak r {r:.2f} < {min_peak_r:g})")
-    dropped_paths = set()
+                reasons[i] = f"calibration failed (peak r {r:.2f} < {min_peak_r:g})"
+                report.append(f"{s} path {p} trial {t}: {reasons[i]}")
     if min_path_trials > 0:
         kept: dict[tuple, int] = {}
         calibrated: set[tuple] = set()
-        for f, s, p, _, r in info:
-            kept[(s, p)] = kept.get((s, p), 0) + (f not in failed)
+        for i, (s, p, _, r) in enumerate(records):
+            kept[(s, p)] = kept.get((s, p), 0) + (reasons[i] is None)
             if r == r:  # has peakR
                 calibrated.add((s, p))
         for key in sorted(calibrated, key=str):
             if kept[key] < min_path_trials:
-                dropped_paths.add(key)
                 report.append(f"{key[0]} path {key[1]}: left out whole, {kept[key]} usable trials "
                               f"(< {min_path_trials})")
-    out = [f for f, s, p, _, _ in info if f not in failed and (s, p) not in dropped_paths]
-    return out, report
+                for i, (s, p, _, _) in enumerate(records):
+                    if (s, p) == key and reasons[i] is None:
+                        reasons[i] = f"path left out whole: {kept[key]} usable trials (< {min_path_trials})"
+    return reasons, report
