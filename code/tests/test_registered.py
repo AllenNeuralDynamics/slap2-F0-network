@@ -8,7 +8,8 @@ import torch
 
 from slap2_f0.io import TrialFile
 from slap2_f0.predict import predict_trial, valid_index
-from slap2_f0.registered import ArrayTrial, _close, _dilate, _medfilt1_zeropad, discard_frames, movie_stats
+from slap2_f0.registered import (ArrayTrial, _close, _dilate, _medfilt1_zeropad, discard_frames, load_registered,
+                                 movie_stats, registered_movies)
 from test_predict import _model
 
 
@@ -67,3 +68,64 @@ def test_array_trial_predicts_as_the_file(tmp_path):
     mu_a, var_a = predict_trial(model, wcfg, tr_a, st, cpu, out_frames=64, out_px=8, rows=valid_index(tr_a)[0],
                                 cols=valid_index(tr_a)[1])
     assert np.allclose(mu_a, mu_f, rtol=1e-6, atol=1e-6) and np.allclose(var_a, var_f, rtol=1e-6, atol=1e-6)
+
+
+def _write_registered(moco, stem, act, other, fmt):
+    """A registered movie as GIAnT writes it: pages (MATLAB col, row), two
+    channels interleaved by frame; TIFF one page at a time (GIAnT-Python) or
+    HDF5 /data (pages, col, row) chunked by page."""
+    pages = np.empty((2 * act.shape[0], act.shape[2], act.shape[1]), np.float32)
+    pages[0::2] = act.transpose(0, 2, 1)
+    pages[1::2] = other.transpose(0, 2, 1)
+    path = moco / f"{stem}_REGISTERED_DOWNSAMPLED-80Hz.{fmt}"
+    if fmt == "tif":
+        tifffile = pytest.importorskip("tifffile")
+        with tifffile.TiffWriter(path, bigtiff=True) as tw:
+            for page in pages:
+                tw.write(page, photometric="minisblack")
+    else:
+        with h5py.File(path, "w") as f:
+            f.create_dataset("data", data=pages, chunks=(1,) + pages.shape[1:], compression="gzip",
+                             compression_opts=1)
+    return path
+
+
+@pytest.mark.parametrize("fmt", ["tif", "h5"])
+def test_load_registered_reads_tif_and_h5(tmp_path, fmt):
+    rng = np.random.default_rng(2)
+    T, R, C = 400, 7, 10  # MATLAB rows x cols; T > the 4 s median of the discards
+    act = rng.poisson(5.0, (T, R, C)).astype(np.float32)
+    act[:, 0, 0] = np.nan  # a pixel never imaged
+    other = np.full((T, R, C), 100, np.float32)
+    path = _write_registered(tmp_path, "E1T1DMD1", act, other, fmt)
+    rne = -0.5 + 0.001 * rng.standard_normal(T)
+    rne[200:202] += 0.05
+    vf = rng.uniform(1, 2, (T, C, R)).astype(np.float32)  # h5py order of MATLAB rows x cols x frames
+    adata = tmp_path / "E1T1DMD1_ALIGNMENTDATA.h5"
+    with h5py.File(adata, "w") as f:
+        f["numChannels"] = np.array([[2.0]])
+        f["alignHz"] = np.array([[80.0]])
+        f["recNegErr"] = rne[None]
+        f["slap2/varFacDS"] = vf
+    movie, valid, discard, varfac, hz = load_registered(path, adata)
+    assert movie.shape == (T, R, C) and hz == 80.0
+    assert discard[200:202].all() and not valid[0, 0] and valid.sum() == R * C - 1
+    keep = ~discard
+    np.testing.assert_array_equal(movie[keep][:, valid], act[keep][:, valid])
+    assert np.isnan(movie[discard]).all()
+    np.testing.assert_allclose(varfac, np.nanmean(vf, axis=0).T)
+    assert np.allclose(load_registered(path, adata, channel=1)[0][keep][:, valid], 100)
+
+
+def test_registered_movies_takes_one_movie_per_trial(tmp_path):
+    import os
+
+    act = np.ones((4, 3, 5), np.float32)
+    for stem, fmts in (("E1T1DMD1", ["h5"]), ("E1T2DMD1", ["tif"]), ("E1T3DMD1", ["tif", "h5"]),
+                       ("E1T4DMD1", ["h5", "tif"])):
+        for age, fmt in zip((200, 100), fmts):  # the second listed is newer
+            path = _write_registered(tmp_path, stem, act, act, fmt)
+            os.utime(path, (1e9 - age, 1e9 - age))
+    names = [p.name for p in registered_movies(tmp_path)]
+    assert names == ["E1T1DMD1_REGISTERED_DOWNSAMPLED-80Hz.h5", "E1T2DMD1_REGISTERED_DOWNSAMPLED-80Hz.tif",
+                     "E1T3DMD1_REGISTERED_DOWNSAMPLED-80Hz.h5", "E1T4DMD1_REGISTERED_DOWNSAMPLED-80Hz.tif"]
