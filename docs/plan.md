@@ -2648,6 +2648,16 @@ The first 16 frames pooled, and edge − control on the same draws:
 - **Where they come from.** They can be computed during alignment from the registered movie, so they do not depend on GIAnT's fits. They are also useful QC data.
 - **Overlap with the trial stats.** The trial stats (`stats.trial_stats`) hold per-pixel variance maps of the residual (movie − activity) for 8- and 64-frame means (`var8_res`, `var64_res`). `skew` and `F64` are single trial-level values over background pixels, and `skew` is of single frames. So the per-pixel fast skewness, the slow and fast standard deviations of the movie, and the SVD weights would be new maps, independent of GIAnT's fits.
 - **Fit with the blind spot.** Whole-trial statistics can include a pixel's own hidden frames. The existing whole-trial maps (mean image, variance) are used the same way, and their leak is negligible at trial length. That needs checking for the fast-timescale skewness and the SVD weights, which weight sparse events more.
+- **A session-level activity map (the user, 2026-11-24; from the trial-end bias work).** This is planned for the same architecture update.
+  - **Why:** the mid-trial low bias is the network subtracting activity it cannot see. Below about 1 photon per frame an event is no bigger than photon noise, so one trial's window cannot show whether a pixel is active. The network then subtracts the activity it expects for a pixel of that brightness.
+  - **Measured:**
+    - simulations: 4–11% low in dim mice, 1–3% in bright ones;
+    - real background of 878030: about 7% below the mean image;
+    - the S4 control's training-like windows, loss-weighted: −3.9% mid-trial (background −3.3%, footprints +0.5%).
+  - **The map:** per pixel, pooled over all trials of the session, for example the event rate or the variance excess over photon noise. Pooled over thousands of frames, even sub-photon activity shows which pixels are ever active.
+  - **Leak check:** the map includes the output frames' own activity, though over a session their share is far smaller than in the whole-trial maps the network already takes. Train with and without the hidden trial's contribution and compare event leakage.
+  - **Data side:** a per-session pass in the export or stats to compute and store the map, and a matching map for the simulator's virtual trials.
+  - **Meanwhile:** the trial-end bias session is testing a bias term in the loss and activity-free trials alone (`--silent_trial`); its results go in its own plan.md PR.
 
 **Proposed next step:** one re-export with GIAnT main, writing the new per-trial maps too. That gives one pass for both.
 - **Quantify first:** re-export 3–4 diverse sessions (e.g. 780125, 803121, 804730, 885233) and compare their activity and targets with the current exports.
