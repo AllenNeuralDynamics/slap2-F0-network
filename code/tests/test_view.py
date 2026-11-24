@@ -203,8 +203,9 @@ class _FakeCodeOcean(CodeOcean):
         if path == "/data_assets/search":
             return {"results": [{"id": "A1", "name": "slap2-F0 export phase 1 S1", "mount": "f0p1_S1"},
                                 {"id": "B9", "name": "something else", "mount": "x"}], "has_more": False}
-        if path.endswith("/files"):
-            return {"items": [{"path": "S1", "type": "folder"}, {"path": "logs", "type": "folder"}]}
+        if path.endswith("/files"):  # a session folder per summary, and the logs
+            return {"items": [{"path": k.split("/")[0], "type": "folder"} for k in self.blobs
+                              if k.endswith("/export_summary.json")] + [{"path": "logs", "type": "folder"}]}
         if "download_url" in path:
             return {"url": "mem://" + urllib.parse.unquote(path.split("path=", 1)[1])}
         raise AssertionError(path)
@@ -242,7 +243,7 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
     recs = co.trials()
     assert [r["key"] for r in recs] == [f"S1/Path1/trial_00{t}" for t in range(1, 6)]
     assert recs[0]["remote"] == {"asset": "A1", "rel": "S1/Path1/trial_001.h5", "mount": "f0p1_S1"}
-    assert (cache / "_summaries" / "A1.json").exists()
+    assert (cache / "_summaries" / "A1_all.json").exists()
     n = len(co.calls)
     co.trials()  # the summary comes from the cache now
     assert not any("download_url" in c for c in co.calls[n:])
@@ -285,11 +286,13 @@ def test_codeocean_small_cache_and_key_collisions(tmp_path, monkeypatch):
                         "n_frames": T, "n_rows": R, "n_cols": C})
         h["rows"] = np.zeros(1, np.int32)
     mine = _trial(tmp_path / "cache", "S9", 1, 1)  # a trial of the user's own in the cache folder
+    blobs["S2/export_summary.json"] = json.dumps({"label": "S2", "trials": [  # a second session in the asset
+        {**a, "label": "S2", "file": "/root/capsule/results/S2/Path1/trial_001.h5"}]}).encode()
     co = _FakeCodeOcean(tmp_path / "cache", blobs, monkeypatch, cache_gb=1e-9)
     store = Store(pred, remote=co, roles={}, cache_trials=1)
     keys = [m["key"] for m in store.meta]
-    assert keys == ["S1/Path1/trial_001", "S1/Path1/trial_001 (f0p1_S1)"]
-    assert [m["kind"] for m in store.meta] == ["predict", "export"]
+    assert keys == ["S1/Path1/trial_001", "S1/Path1/trial_001 (f0p1_S1)", "S2/Path1/trial_001"]
+    assert [m["kind"] for m in store.meta] == ["predict", "export", "export"]
     tr = store.trial("S1/Path1/trial_001 (f0p1_S1)")
     assert isinstance(tr, ExportTrial) and tr.file.exists()  # not evicted before or after loading
     assert co._held == {tr.file: 1}

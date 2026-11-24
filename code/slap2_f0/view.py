@@ -357,7 +357,7 @@ class CodeOcean:
 
     The assets are found by a search (``query``, names starting with
     ``name_prefix``), so no asset IDs live in this public code; each asset's
-    ``export_summary.json`` lists its trials (cached in
+    session folders' ``export_summary.json`` list its trials (cached in
     ``cache_dir``/_summaries, as assets do not change). Trials download into
     ``cache_dir``/slap2_f0_downloads/<asset mount>/<session>/Path<N>/ in parallel
     ranges; the least recently used ones are deleted when the downloads pass
@@ -400,32 +400,33 @@ class CodeOcean:
             if not r.get("has_more") or not res:
                 return sorted(out, key=lambda a: a["name"])
 
-    def _summary(self, asset: dict) -> dict:
-        p = self.cache_dir / "_summaries" / f"{asset['id']}.json"
+    def _summaries(self, asset: dict) -> list[dict]:
+        """The ``export_summary.json`` of every session folder in the asset."""
+        p = self.cache_dir / "_summaries" / f"{asset['id']}_all.json"
         if p.exists():
             return json.loads(p.read_text(encoding="utf-8"))
         folders = [i for i in self._api(f"/data_assets/{asset['id']}/files", {"path": ""}).get("items", [])
                    if i.get("type") == "folder" and i.get("path") != "logs"]
+        out = []
         for fo in folders:
             rel = f"{fo['path']}/export_summary.json"
             try:
                 url = self._api(f"/data_assets/{asset['id']}/files/download_url?path={urllib.parse.quote(rel)}")["url"]
-                summ = self._get_json(url)
-            except urllib.error.HTTPError:
+                out.append(self._get_json(url))
+            except urllib.error.HTTPError:  # not a session folder
                 continue
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(summ), encoding="utf-8")
-            return summ
-        return {}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out), encoding="utf-8")
+        return out
 
     def trials(self) -> list[dict]:
         """One record per trial of every asset: its listing entry (see
         ``_export_record``) plus where it lives remotely."""
         assets = self.assets()
         with ThreadPoolExecutor(8) as ex:
-            summaries = list(ex.map(self._summary, assets))
+            summaries = list(ex.map(self._summaries, assets))
         out = []
-        for asset, summ in zip(assets, summaries):
+        for asset, summ in ((asset, summ) for asset, sums in zip(assets, summaries) for summ in sums):
             for a in summ.get("trials", []):
                 if a.get("error"):  # a failed export: no file
                     continue
