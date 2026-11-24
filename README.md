@@ -71,19 +71,23 @@ One HDF5 file per trial and imaging path, `<session>/Path<k>/trial_<NNN>.h5`. Sh
 | `sources/peak_row`, `sources/peak_col` | (source,) | 0-based, in the crop |
 
 Root attributes hold provenance (session, path, trial, GIAnT commit, crop origin), the mapping that was used, and QC:
-- `shiftRC`, `blurSigma`, `activityGain`: the footprint offset, blur and gain applied to the activity;
-- `peakSlope`, `peakR`: movie on activity at source peak pixels, high-passed, after the gain (near 1 when the activity lines up);
+- `shiftRC`, `blurSigma`, `activityGain`: the footprint offset, blur and gain applied to the activity. It is 1 in exports that have `activitySlope`. Older exports multiplied the activity by a fitted slope; divide by `activityGain` to get GIAnT's activity back;
+- `blurShapeRatio`: at the chosen blur, the movie-on-activity slope of the flux in each source's core (≤ 1.5 px) over that of the flux 1.5–3.5 px out (median over sources; near 1);
+- `activitySlope`: movie on activity for the flux in a 4 px disk, high-passed, at blur 0 (median over sources). This is the slope that older exports applied as `activityGain`, clamped to 0.5–1.5. It is a QC number, not a scale: a least-squares slope sits near the movie–activity correlation;
+- `peakSlope`, `peakR`: movie on activity at source peak pixels, high-passed, for the activity as written (after `activityGain`);
 - `diskSlope`, `diskR`: the same for the flux in a 4 px disk;
-- `eventResidualFraction`: the residual's event-triggered peak relative to the movie's (near 0 when the activity is removed).
+- `eventResidualFraction`: the residual's event-triggered peak relative to the movie's, with events picked on the activity (near 0 when the activity is removed);
+- `eventRatioCore`, `eventRatio2px`: activity / movie event amplitude at ≤ 1.5 px and 1.5–2.5 px from each source. Events are picked on the movie 3–5 px away, so neither the core's noise nor the activity's selects them; sources touching GIAnT fit artifacts are left out. Both are near 1 when the activity has the movie's size. The selection favours spatially broad events. `eventRatioSources`, `eventRatioEvents` and `eventRatioArtifactSources` count what went in (`code/matlab/ringEventRatios.m`).
 
 ### How the activity is put on the movie's grid
 
-GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export maps H·X onto each trial's 80 Hz movie in four steps:
+GIAnT fits footprints H and traces at 200 Hz on its consensus canvas. The export maps H·X onto each trial's 80 Hz movie in three steps, and does not change its scale:
 
 - **Time.** It uses the same kernel that made the movie: SLAP2 `getImages` weights the samples within max(3·dt, linesPerCycle) lines of a frame by exp(−|Δline|/dt), with dt = ceil(line rate / alignHz).
 - **Space.** It applies the sub-pixel trial offset that best aligns the movie with the activity.
-- **Gain.** It scales the activity by the movie-on-activity slope of the flux in a 4 px disk around each source, which barely depends on blur or offset.
-- **Blur.** It applies the small Gaussian blur (typically 0.5–1 px) that makes the slope at source peak pixels match that gain. The 80 Hz frames are slightly blurrier than the 200 Hz data the footprints were fitted to.
+- **Blur.** It applies the Gaussian blur (from `blurSigmas`) for which the movie-on-activity slope of the flux in each source's core (≤ 1.5 px) equals that of the flux 1.5–3.5 px out. Scaling the activity scales both slopes, so the choice depends only on the shape of the activity, not on its size. The 80 Hz frames are slightly blurrier than the 200 Hz data the footprints were fitted to.
+
+Older exports (without `activitySlope`) also scaled the activity by the disk-flux slope (`activityGain`, median 0.63), and chose the blur that made the peak-pixel slope match it. A least-squares slope of the movie on a noisy activity sits near their correlation, so that gain removed about half of GIAnT's activity (`docs/plan.md`, "Activity in the training targets").
 
 ## Training
 

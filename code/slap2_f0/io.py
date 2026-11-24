@@ -155,8 +155,10 @@ def filter_trials(files: list[Path], min_peak_r: float = 0.3, min_path_trials: i
     left with too few trials. Returns the kept files, in the order given,
     and one report line per trial or path left out.
 
-    - Calibration: the exporter scales GIAnT's activity to the movie and
-      records how well its peaks match (attribute ``peakR``). Below
+    - Calibration: the exporter aligns GIAnT's activity with the movie
+      (offset and blur; older exports also scaled it) and
+      records how well its peaks match (attribute ``peakR``, a correlation,
+      so the scale does not enter). Below
       ``min_peak_r`` the fit does not describe the movie: in the 2025-2026
       exports 34 of 3,026 trials scored 0.03-0.27, with the gain and blur
       pinned at their bounds, against 0.30 or more for the rest (median

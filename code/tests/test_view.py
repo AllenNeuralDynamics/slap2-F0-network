@@ -52,6 +52,12 @@ def _trial(root, session, path, trial, peak_r=0.5, sources=True, seed=0, summary
         f.attrs["nSources"] = np.array([float(sources)])
         if not sources:  # as source-free exports write them
             f.attrs["eventResidualFraction"] = np.array([np.nan])
+            f.attrs["eventRatioCore"] = np.array([np.nan])
+        else:  # the QC of exports without a gain
+            f.attrs["activityGain"] = np.array([1.0])
+            f.attrs["eventRatioCore"] = np.array([1.25])
+            f.attrs["eventRatio2px"] = np.array([0.9])
+            f.attrs["eventRatioSources"] = np.array([3.0])
         f.attrs["alignHz"] = np.array([HZ])
         f.attrs["path"] = np.array([float(path)])
         f.attrs["trial"] = np.array([float(trial)])
@@ -89,6 +95,9 @@ def test_export_trials(tmp_path):
         assert b"NaN" not in body  # the browser's JSON.parse rejects it
         meta = {t["key"]: t for t in json.loads(body)["trials"]}
         assert meta["S2/Path1/trial_001"]["qc"]["eventResidualFraction"] is None
+        assert meta["S2/Path1/trial_001"]["qc"]["eventRatioCore"] is None
+        q1 = meta["S1/Path1/trial_001"]["qc"]
+        assert (q1["activityGain"], q1["eventRatioCore"], q1["eventRatio2px"], q1["eventRatioSources"]) == (1.0, 1.25, 0.9, 3.0)
         assert sorted(meta) == [f"S1/Path1/trial_00{t}" for t in range(1, 6)] + \
             [f"S1/Path2/trial_00{t}" for t in range(1, 4)] + ["S2/Path1/trial_001"]
         assert all(m["kind"] == "export" and m["models"] == [] for m in meta.values())

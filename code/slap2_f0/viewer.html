@@ -262,8 +262,12 @@ function showQC() {
   else if (tr.role) chip = `<span class="chip" title="sessions/export_phase*.csv">${tr.role}</span>`;
   else chip = `<span class="chip" title="not in sessions/export_phase*.csv">? not in the session lists</span>`;
   const cnt = [0, 0, 0]; for (let n = 0; n < S.N; n++) cnt[S.loss[n]]++;
+  const gain = q.activityGain == null || +q.activityGain === 1 ? "activity unscaled"
+    : `<span title="Older exports multiplied GIAnT's activity by this least-squares slope; the activity shown includes it">activity × ${fmtQC(q.activityGain, 2)} (old export)</span>`;
+  const ring = q.eventRatioCore == null ? null
+    : `<span title="Activity / movie event amplitude, events picked on the movie 3–5 px from each source (${q.eventRatioSources} sources, ${q.eventRatioEvents} events; ${q.eventRatioArtifactSources} sources at GIAnT fit artifacts left out). Near 1 when the activity has the movie's size; the selection favours broad events.">ring events: activity/movie ${fmtQC(q.eventRatioCore, 2)} at the core, ${fmtQC(q.eventRatio2px, 2)} at 2 px</span>`;
   const parts = [chip,
-    `peak r ${fmtQC(q.peakR, 2)}`, `activity gain ${fmtQC(q.activityGain, 2)}`, `blur σ ${fmtQC(q.blurSigma, 2)} px`,
+    `peak r ${fmtQC(q.peakR, 2)}`, gain, `blur σ ${fmtQC(q.blurSigma, 2)} px`, ...(ring ? [ring] : []),
     `event residual ${fmtQC(q.eventResidualFraction, 2)}`, `${tr.n_sources} sources`, `${q.nEvents != null ? q.nEvents : "–"} events`,
     `loss on ${cnt[0].toLocaleString()} of ${S.N.toLocaleString()} px (${cnt[1].toLocaleString()} labeled outside footprints, ${cnt[2].toLocaleString()} fit artifacts)`,
     `${S.edge} frames at each end`];
