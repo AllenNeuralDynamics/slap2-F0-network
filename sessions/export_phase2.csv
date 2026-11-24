@@ -2,7 +2,7 @@ prefix,subject_id,role,cap_s_per_path,recording_s,export_path_s,acquisition_styl
 787725_2025-02-26_13-55-24,787725,train,900,1237,1800,triggered,jRGECO1a,new mouse
 796630_2025-04-22_09-47-56,796630,train,900,1444,1800,triggered,RCaMP3,new mouse
 796630_2025-09-26_10-48-22,796630,train,900,3874,1800,triggered,RCaMP3,new mouse
-801381_2025-05-29_15-41-38,801381,train,900,3349,1800,"continuous,",RCaMP3,new mouse
+801381_2025-05-29_15-41-38,801381,train,900,3349,1800,continuous,RCaMP3,new mouse
 801381_2025-09-26_14-17-56,801381,train,900,3876,1800,triggered,RCaMP3,new mouse
 804733_2025-07-25_15-17-00,804733,train,900,1740,1800,continuous,None,new mouse
 804733_2025-07-31_13-29-01,804733,train,900,1740,1800,continuous,None,new mouse
