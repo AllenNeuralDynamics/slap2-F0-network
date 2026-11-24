@@ -1,8 +1,9 @@
 """Network baselines for GIAnT's registered 80 Hz movies (the localization input).
 
 ``slap2-f0 predict-registered MOCO_DIR --ckpt PATH --out DIR`` reads each
-``*_REGISTERED_DOWNSAMPLED-80Hz.tif`` (channels interleaved by frame) and its
-``*_ALIGNMENTDATA.h5`` in GIAnT's motion-correction folder, prepares the trial
+registered movie, ``*_REGISTERED_DOWNSAMPLED-80Hz.tif`` or ``.h5`` (channels
+interleaved by frame), and its ``*_ALIGNMENTDATA.h5`` in GIAnT's
+motion-correction folder, prepares the trial
 the way SiLo's ``loadAndProcessTrialAsync`` and ``localizeSources_vIM`` do
 (motion-discarded frames from recNegErr, pixels imaged in at least 1 -
 nanThresh of the frames), runs the network over it (``predict.predict_trial``)
@@ -15,7 +16,10 @@ and writes DIR/<stem>_BASELINE-80Hz.h5:
     attrs      checkpoint, step, gain, scale, n_discarded, seconds, ...
 
 The network sees the trial in the orientation of the training exports
-(MATLAB's rows and columns), so the TIFF pages are transposed. Without GIAnT's
+(MATLAB's rows and columns), so the movie's pages are transposed: TIFF pages,
+and the ``/data`` pages of an HDF5 movie (MATLAB ``[rows cols pages]``), read
+as (MATLAB col, row). GIAnT-Python writes HDF5 movies by default, MATLAB
+TIFF. Without GIAnT's
 activity, the gain (variance/mean in counts) comes from the movie alone
 (``predict.movie_gain``). The movie, mean image and variance factor are as in
 the exporter (``code/matlab/exportF0TrainingData.m``) except that the exporter
@@ -116,20 +120,46 @@ def movie_stats(movie: np.ndarray, valid: np.ndarray, discard: np.ndarray, block
     return st
 
 
-def load_registered(tif: Path, adata: Path, channel: int = 0, nan_thresh: float = 0.33, motion_thresh: float = 2.0,
-                    discard_initial_s: float = 0.0):
-    """The activity channel of a registered movie in training orientation
-    (frame, MATLAB row, MATLAB col), with SiLo's discards and valid pixels."""
+def _read_channel(path: Path, n_ch: int, channel: int) -> np.ndarray:
+    """One channel's pages of a registered TIFF or HDF5 movie, as stored:
+    (frame, MATLAB col, MATLAB row)."""
+    if path.suffix == ".h5":
+        with h5py.File(path, "r") as f:
+            data = f[next(iter(f.keys()))]  # /data: pages x MATLAB col x row
+            n = data.shape[0] // n_ch
+            return data[channel:n * n_ch:n_ch].astype(np.float32, copy=False)
     import tifffile
 
+    with tifffile.TiffFile(path) as t:
+        n = len(t.pages) // n_ch
+        return t.asarray(key=range(channel, n * n_ch, n_ch)).astype(np.float32, copy=False)
+
+
+def registered_movies(moco: Path) -> list[Path]:
+    """The registered movies of a motion-correction folder, one per trial:
+    ``.tif`` or ``.h5``, the newer file where a trial has both."""
+    by_stem: dict[str, Path] = {}
+    for path in sorted(moco.glob("*_REGISTERED_DOWNSAMPLED-80Hz.tif")) + sorted(
+            moco.glob("*_REGISTERED_DOWNSAMPLED-80Hz.h5")):
+        stem = path.name[: path.name.index("_REGISTERED")]
+        old = by_stem.get(stem)
+        if old is None or path.stat().st_mtime > old.stat().st_mtime:
+            by_stem[stem] = path
+    return [by_stem[k] for k in sorted(by_stem)]
+
+
+def load_registered(movie_path: Path, adata: Path, channel: int = 0, nan_thresh: float = 0.33,
+                    motion_thresh: float = 2.0, discard_initial_s: float = 0.0):
+    """The activity channel of a registered movie (TIFF or HDF5) in training
+    orientation (frame, MATLAB row, MATLAB col), with SiLo's discards and
+    valid pixels."""
     with h5py.File(adata, "r") as f:
         n_ch = int(np.asarray(f["numChannels"]).ravel()[0])
         align_hz = float(np.asarray(f["alignHz"]).ravel()[0])
         rne = np.asarray(f["recNegErr"]).ravel()
         vf = np.nanmean(f["slap2/varFacDS"][:], axis=0) if "slap2/varFacDS" in f else None
-    with tifffile.TiffFile(tif) as t:
-        n = len(t.pages) // n_ch
-        movie = t.asarray(key=range(channel, n * n_ch, n_ch)).astype(np.float32, copy=False)
+    movie = _read_channel(Path(movie_path), n_ch, channel)
+    n = movie.shape[0]
     movie = np.ascontiguousarray(movie.transpose(0, 2, 1))  # pages are (MATLAB col, row)
     discard = discard_frames(rne[:n], align_hz, motion_thresh, discard_initial_s)
     movie[discard] = np.nan
@@ -141,12 +171,12 @@ def load_registered(tif: Path, adata: Path, channel: int = 0, nan_thresh: float 
 
 def run(args: argparse.Namespace) -> None:
     moco, out = Path(args.moco_dir), Path(args.out)
-    tifs = sorted(moco.glob("*_REGISTERED_DOWNSAMPLED-80Hz.tif"))
+    movies = registered_movies(moco)
     if args.files:
         keys = [k.strip() for k in args.files.split(",") if k.strip()]
-        tifs = [t for t in tifs if any(k in t.name for k in keys)]
-    if not tifs:
-        raise SystemExit(f"no *_REGISTERED_DOWNSAMPLED-80Hz.tif in {moco}")
+        movies = [m for m in movies if any(k in m.name for k in keys)]
+    if not movies:
+        raise SystemExit(f"no *_REGISTERED_DOWNSAMPLED-80Hz.tif or .h5 in {moco}")
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     model, wcfg, ck = load_checkpoint(args.ckpt, device)
     amp_dtype = prepare(model, device, args.precision)
@@ -154,14 +184,14 @@ def run(args: argparse.Namespace) -> None:
           f"on {device}, {next(model.parameters()).dtype}", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     t_all = time.time()
-    for tif in tifs:
-        stem = tif.name[: tif.name.index("_REGISTERED")]
+    for movie_path in movies:
+        stem = movie_path.name[: movie_path.name.index("_REGISTERED")]
         dest = out / f"{stem}_BASELINE-80Hz.h5"
         if dest.exists() and not args.overwrite:
             print(f"{dest.name} exists, skipped", flush=True)
             continue
         t0 = time.time()
-        movie, valid, discard, varfac, hz = load_registered(tif, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1,
+        movie, valid, discard, varfac, hz = load_registered(movie_path, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1,
                                                             args.nan_thresh, args.motion_thresh, args.discard_initial_s)
         t1 = time.time()
         tr = ArrayTrial(movie, valid, discard, varfac)
@@ -184,7 +214,7 @@ def run(args: argparse.Namespace) -> None:
             f.attrs.update({"checkpoint": str(args.ckpt), "step": int(ck.get("step") or 0),
                             "box_radius": int(model.cfg.box_radius), "gain": float(st["gain"]), "scale": tr.scale,
                             "align_hz": hz, "n_frames": T, "n_valid": int(valid.sum()), "n_discarded": int(discard.sum()),
-                            "source": tif.name, "precision": str(next(model.parameters()).dtype),
+                            "source": movie_path.name, "precision": str(next(model.parameters()).dtype),
                             "seconds_load": t1 - t0, "seconds_stats": t2 - t1, "seconds_network": t3 - t2})
         tmp.replace(dest)
         print(f"{stem}: {T} frames, {R}x{C}, {int(valid.sum())} valid px, {int(discard.sum())} discarded; "
@@ -197,7 +227,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("moco_dir", help="GIAnT motion_correction folder")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--files", default="", help="comma-separated substrings of the TIFF names to include")
+    p.add_argument("--files", default="", help="comma-separated substrings of the movie names to include")
     p.add_argument("--channel", type=int, default=1, help="activity channel, 1-based (SiLo's activityChannel)")
     p.add_argument("--nan_thresh", type=float, default=0.33)
     p.add_argument("--motion_thresh", type=float, default=2.0)
