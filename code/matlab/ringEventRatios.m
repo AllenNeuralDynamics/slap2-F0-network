@@ -72,6 +72,9 @@ for s = 1:numel(pr)
     mr = double(Y(idx(ring), :));
     sel = mean(mr, 1);
     sel(any(isnan(mr), 1)) = NaN;
+    if all(isnan(sel)) % every frame misses a ring pixel: no events (ring_eta.py's threshold is NaN)
+        continue
+    end
     filled = sel;
     filled(isnan(filled)) = median(sel, 'omitnan');
     sel = sel - medianNearest(filled, 81);
@@ -117,6 +120,10 @@ function v = percentileLinear(x, p)
 %percentile with linear interpolation between order statistics (numpy's default)
 x = sort(x(:));
 n = numel(x);
+if n == 0
+    v = NaN;
+    return
+end
 pos = (n - 1) * p / 100 + 1;
 lo = floor(pos); hi = min(lo + 1, n);
 v = x(lo) + (pos - lo) * (x(hi) - x(lo));
