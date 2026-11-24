@@ -2648,7 +2648,39 @@ The first 16 frames pooled, and edge − control on the same draws:
 - **Where they come from.** They can be computed during alignment from the registered movie, so they do not depend on GIAnT's fits. They are also useful QC data.
 - **Overlap with the trial stats.** The trial stats (`stats.trial_stats`) hold per-pixel variance maps of the residual (movie − activity) for 8- and 64-frame means (`var8_res`, `var64_res`). `skew` and `F64` are single trial-level values over background pixels, and `skew` is of single frames. So the per-pixel fast skewness, the slow and fast standard deviations of the movie, and the SVD weights would be new maps, independent of GIAnT's fits.
 - **Fit with the blind spot.** Whole-trial statistics can include a pixel's own hidden frames. The existing whole-trial maps (mean image, variance) are used the same way, and their leak is negligible at trial length. That needs checking for the fast-timescale skewness and the SVD weights, which weight sparse events more.
+- **A session-level activity map (the user, 2026-11-24; from the trial-end bias work).** This is planned for the same architecture update.
+  - **Why:** the mid-trial low bias is the network subtracting activity it cannot see. Below about 1 photon per frame an event is no bigger than photon noise, so one trial's window cannot show whether a pixel is active. The network then subtracts the activity it expects for a pixel of that brightness.
+  - **Measured:**
+    - simulations: 4–11% low in dim mice, 1–3% in bright ones;
+    - real background of 878030: about 7% below the mean image;
+    - the S4 control's training-like windows, loss-weighted: −3.9% mid-trial (background −3.3%, footprints +0.5%).
+  - **The map:** per pixel, pooled over all trials of the session, for example the event rate or the variance excess over photon noise. Pooled over thousands of frames, even sub-photon activity shows which pixels are ever active.
+  - **Leak check:** the map includes the output frames' own activity, though over a session their share is far smaller than in the whole-trial maps the network already takes. Train with and without the hidden trial's contribution and compare event leakage.
+  - **Data side:** a per-session pass in the export or stats to compute and store the map, and a matching map for the simulator's virtual trials.
+  - **Meanwhile:** the trial-end bias session is testing a bias term in the loss and activity-free trials alone (`--silent_trial`); its results go in its own plan.md PR.
 
 **Proposed next step:** one re-export with GIAnT main, writing the new per-trial maps too. That gives one pass for both.
 - **Quantify first:** re-export 3–4 diverse sessions (e.g. 780125, 803121, 804730, 885233) and compare their activity and targets with the current exports.
 - **Cost:** a full re-export of the 40 sessions is about 5–7 h each on the data capsule.
+
+**Decision (the user, 2026-11-24): no re-export yet.**
+- **The leak is negligible.** The skewness and SVD maps would come from the aligned movie. Training targets the activity-subtracted movie and sees only a window of it, never the whole time series, so what these statistics reveal about a pixel's hidden frames is minuscule.
+- **GIAnT changes.** Of the changes merged since 9695d27, only the fast-source filter (#50) matters for the targets, and it may be fine as it is. The training-data viewer (below) is for judging that on the exported trials themselves.
+
+**Training-data viewer** (`slap2-f0 view`, README "Viewing the training data and baselines"). It shows any exported trial frame by frame, with the same zoom, playback and pixel traces as the baseline viewer:
+- **Panels:**
+  - the registered movie;
+  - GIAnT's fit (its activity);
+  - the training target, movie − activity;
+  - the target minus its trial mean, which shows what changes over time: noise, slow drift, and any activity GIAnT left in.
+- **Loss mask.** The target panels can blank what training's loss ignores:
+  - labeled pixels outside every footprint;
+  - GIAnT fit artifacts, by `stats.unfit_pixels`;
+  - the first and last 2 s of the trial;
+  - discarded frames.
+  On 804730 path 2 trial 27, the artifact mask matches the one training computes from its stats, pixel for pixel. Trial 33 of that path shows the #52 artifacts: up to 1.5 × 10⁵ counts of activity at the field's edge, where the movie has no data (148 pixels, all masked).
+- **QC and trial status.** Each trial shows its calibration QC (peak r, gain, blur, event residual, sources, events) and whether training uses it: training, validation, test mouse, or left out by the trial filter, with the reason.
+- **Sources:**
+  - `--codeocean` lists the 40 export assets (3,265 trials, 34 left out) and downloads trials on demand, at about 60 MB/s, to a cache on D: (`--cache_dir`, 50 GB by default, least recently used trials deleted first);
+  - a local export folder works as well.
+  A trial takes 13–18 s to open, download included. The session's next trial loads in the background, so stepping through a session takes about 0.2 s per trial.
