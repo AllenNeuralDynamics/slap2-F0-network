@@ -2627,14 +2627,14 @@ The first 16 frames pooled, and edge − control on the same draws:
 - **Session-list fixes:**
   - `slap2_iglusnfr4f_multiroi.csv` now records the role and exported length of all 40 exported sessions (before: 4);
   - one acquisition style read `continuous,`.
-- **Reserve:** 100 more iGluSnFR4f multi-ROI sessions of already-used mice are unexported.
+- **Reserve:** 100 iGluSnFR4f multi-ROI sessions are unexported. 51 belong to training mice; 34 belong to held-out mice (19 validation, 15 test), so they cannot be used for training; and 15 belong to the four excluded mice.
 
 **The targets come from GIAnT 9695d27.** GIAnT-MATLAB changes merged since then:
 
 | PR | change | effect on the training data |
 |---|---|---|
-| #52 | invalid SLAP2 samples left out of extraction frames | removes edge sources with 1e4–1e7 counts (seen on 803121 and 804730 path 2). Training masks these pixels (`stats.unfit`, #1's growth rule), but the masks may not catch every case |
-| #50 | removes sources faster than the indicator (SLAP2 cutoff 0.2) | changes the activity, and so the target, wherever such sources were fitted. On 780125 that is 57 and 182 of 326 and 353 sources per path; fewer in 803121, 878030 and 885233 |
+| #52 | invalid SLAP2 samples left out of extraction frames | corrects the fitted activity of edge sources that reached 1e4–1e7 counts (seen on 803121 and 804730 path 2); the sources stay (803121: 94 and 113 sources, as before). Training masks these pixels (`stats.unfit`, #1's growth rule), but the masks may not catch every case |
+| #50 | removes sources faster than the indicator (SLAP2 cutoff 0.2) | changes the activity, and so the target, wherever such sources were fitted. In #50's 180 s integration runs, WMF seeding as in the exports removed 77 and 108 of 236 and 219 sources on 780125's two paths (57 and 182 of 326 and 353 with `getActImPeaks`); fewer in 803121, 878030 and 885233. The 900 s exports were not measured |
 | #55 | annotation trial chosen by movie length, not file size | the exports wrote HDF5 movies, so some paths may have annotated ROIs on a shorter or noisier trial |
 | #48 | SLAP2 peak thresholds of 3 by default | none: the exports set the WMF threshold to 3 explicitly; only sessions with fewer than 4 trials differ |
 | #51, #54 | SILo localization memory | none (identical outputs); exports no longer need hand-tuned `--n_workers` |
@@ -2646,7 +2646,7 @@ The first 16 frames pooled, and edge − control on the same draws:
   - the skewness at the fast timescale;
   - possibly each pixel's weights on the trial's top 3 SVD components.
 - **Where they come from.** They can be computed during alignment from the registered movie, so they do not depend on GIAnT's fits. They are also useful QC data.
-- **Overlap with the trial stats.** The trial stats (`stats.trial_stats`) already hold related maps, but of the residual (movie − activity): `var8_res`, `var64_res`, `skew`, `F64`. These would be movie-based instead.
+- **Overlap with the trial stats.** The trial stats (`stats.trial_stats`) hold per-pixel variance maps of the residual (movie − activity) for 8- and 64-frame means (`var8_res`, `var64_res`). `skew` and `F64` are single trial-level values over background pixels, and `skew` is of single frames. So the per-pixel fast skewness, the slow and fast standard deviations of the movie, and the SVD weights would be new maps, independent of GIAnT's fits.
 - **Fit with the blind spot.** Whole-trial statistics can include a pixel's own hidden frames. The existing whole-trial maps (mean image, variance) are used the same way, and their leak is negligible at trial length. That needs checking for the fast-timescale skewness and the SVD weights, which weight sparse events more.
 
 **Proposed next step:** one re-export with GIAnT main, writing the new per-trial maps too. That gives one pass for both.
