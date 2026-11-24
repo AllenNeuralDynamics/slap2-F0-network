@@ -2684,3 +2684,27 @@ The first 16 frames pooled, and edge − control on the same draws:
   - `--codeocean` lists the 40 export assets (3,265 trials, 34 left out) and downloads trials on demand, at about 60 MB/s, to a cache on D: (`--cache_dir`, 50 GB by default, least recently used trials deleted first);
   - a local export folder works as well.
   A trial takes 13–18 s to open, download included. The session's next trial loads in the background, so stepping through a session takes about 0.2 s per trial.
+
+## Activity under-fit in the training targets: re-export after a GIAnT fix (2026-11-24)
+
+**Found with the training-data viewer.** At source footprints the target (movie − activity) keeps a large share of each event: GIAnT's fitted activity does not explain all of it. The user's view of 776266_2025-01-09 path 1 trial 1 shows it plainly in the traces. That makes the targets wrong, and GIAnT's own F0, ΔF/F0 and spine brightness estimates biased. **Decision (the user): fix it in GIAnT-MATLAB, then re-export the training data.** Plan: [GIAnT-MATLAB#56](https://github.com/AllenNeuralDynamics/GIAnT-MATLAB/issues/56). Integration tests that measure the fit's under- and over-fit: [slap2-dev#64](https://github.com/AllenNeuralDynamics/slap2-dev/issues/64).
+
+**Two causes, one of them ours.**
+- **The exporter scaled the activity down.** `exportF0TrainingData.m` multiplies GIAnT's `dF_denoised` by `activityGain`, the least-squares slope of the movie on the activity (disk flux, clamped to 0.5–1.5). Any error in the activity pulls that slope toward 0.
+  - Over the 3,265 exported trials: median 0.63 (5–95%: 0.51–0.83), never above 1, correlating 0.79 with `peakR`. That is regression dilution, not a units correction.
+  - Every export therefore subtracts only about 0.5–0.8 of GIAnT's activity.
+  - At the ROI the user viewed, the export removes 39–44% of the movie's event amplitude where GIAnT's fit alone removes 77–86%.
+- **GIAnT under-fits too** (`extractTrial.m`):
+  - Footprints are narrower than the events in the 80 Hz movie. For a source's own events, the activity/movie ratio falls from 1.05 at 4 px to 0.72 at 5–6 px (776266 trial 1).
+  - Events below the debias threshold (S < 0.1) are dropped.
+  - The baseline is fitted against the activity minus its floor and noise, so it absorbs part of the activity.
+  - Some sessions over-fit instead: on 804730 path 2 the activity at GIAnT's own events is several times the movie's.
+
+**For the re-export:**
+- export from the fixed GIAnT;
+- stop scaling the activity in the exporter (gain 1, or an estimator that errors in the activity do not bias), and pick the blur by a criterion that does not lean on that gain;
+- check the result in the viewer and with slap2-dev#64's residual metrics before training on it.
+
+This replaces "no re-export yet" above. The per-trial maps of the next version (and the session-level activity map) can be written in the same pass.
+
+**What this means for the models so far.** Every network so far was trained on targets that still hold part of the activity at footprints. Those pixels' loss pulled the baseline up during events, which the event mask and the activity-subtracted inputs only partly offset. Results on real-data targets (the held-out evaluations) are measured against the same biased targets, so they need re-running after the re-export.
