@@ -2612,3 +2612,46 @@ The first 16 frames pooled, and edge − control on the same draws:
 **Tools.**
 - `edge_windows.py`: the `lw` class, with the other classes computed as before.
 - `edge_pieces.py`: saves after every trial and checkpoint, and `--resume` runs only what is missing. On the local 4060 Ti a checkpoint takes 4–27 min per viewer trial (803121's scattered pixels need many tiles), and the results used to be saved only at the end.
+
+## Trial edges under the loss's own weights (2026-11-24)
+
+**Question** (item 1 of "Next" in "Edge features (S4): the trial-edge effect stays"): does training's loss see the edge effect? Or is the effect at footprint pixels what the loss asks for, given one-sided information?
+
+**Method.** `tools/edge_windows.py` as on 2026-11-23: 48 draws of fastpz with the current draw, the four viewer trials as templates, the six S4 checkpoints. Two things differ:
+- **Window placement:** windows are placed as in training (`--support_frac 0`: centred on any valid pixel, where the 2026-11-23 run centred 75% of them on footprints).
+- **Weights:** the `lw` class covers all valid pixels, weighted 1 / (gain × max(mean image, 1e-3 × scale) + 1) in counts, as `train._ref_var` weighs them.
+
+For the conditional mean, the paired effect (truncated − whole) under these weights averages to 0. The weights depend only on inputs both predictions share, and the truncated window holds a subset of the whole window's data.
+
+**Result: the loss sees it.** First 16 frames, edge − whole in % of the truth, ± SE over draws:
+
+| | lw, end | lw, start | support, end | background, end |
+|---|---|---|---|---|
+| control, pre | +1.15 ± 0.19 | +0.82 ± 0.14 | +1.25 ± 0.30 | +1.29 ± 0.20 |
+| edge, pre | +0.90 ± 0.17 | +1.10 ± 0.14 | +1.17 ± 0.28 | +0.99 ± 0.18 |
+| control, best | +1.43 ± 0.17 | −0.02 ± 0.11 | +1.71 ± 0.31 | +1.39 ± 0.17 |
+| edge, best | +1.56 ± 0.15 | −1.05 ± 0.11 | +1.82 ± 0.30 | +1.45 ± 0.16 |
+| control, wise | +0.75 ± 0.17 | +0.24 ± 0.12 | +1.16 ± 0.28 | +0.77 ± 0.17 |
+| edge, wise | +0.35 ± 0.16 | +0.11 ± 0.11 | +0.98 ± 0.25 | +0.31 ± 0.16 |
+| edge − control, wise (same draws) | −0.40 ± 0.03 | −0.14 ± 0.02 | −0.18 ± 0.04 | −0.46 ± 0.03 |
+
+- **The network falls short of its own optimum at trial ends.** Under the loss's weights, on windows placed as in training, the baseline still rises when the future is cut:
+  - +0.75 ± 0.17% for the shipped control (about 4 SE);
+  - +1.4 to +1.6% for best.pt.
+  
+  So the effect is not just the right answer to less information.
+- **It is smaller than at footprint-centred windows.** At support pixels it is +1.2% (control wise), against +2.0% in the support-centred windows of 2026-11-23. It grows with the activity around a pixel, as expected if it comes from the future branch's activity evidence.
+- **The edge arm's WiSE comes closest at ends** (+0.35 ± 0.16), but its best.pt overshoots at starts (−1.05 ± 0.11).
+- **The larger error under the loss's weights is mid-trial.** Whole windows (all 128 frames) against the truth:
+  - lw: −3.9 ± 0.4% for control wise, −3.7 ± 0.4% for edge wise, −4.4 to −4.5% for pre and best;
+  - background −3.3%, support +0.5%.
+  
+  This is the low-count bias of "Low photon counts: the baseline sits low (2026-11-21)", which the S4 low-count arm targets. At true trial ends the lw bias is −0.7 ± 1.8% (unpaired): there, the end effect partly offsets it.
+
+**What this changes.**
+- **An edge-weighted loss is back on the list.** The 2026-11-22 section ruled it out as "the same lever" as more edge windows. That holds for the share of edge windows (v9: twice as many did nothing), but not for frame weights.
+  - The effect sits in the last ~16 of 192 loss frames, a few per cent of the loss voxels even with `--edge_frac 0.5`.
+  - A weight on the frames near an edge raises their share without changing the windows.
+  - The loss's optimum there is still the conditional mean, so such a weight changes what training attends to, not what it aims at.
+- **If the edge effect is to be fixed in training,** the next arm is a loss weight on frames within ~32 of a trial edge (for example ×4). Judge it as here (lw and support, both ends, paired against its control) and on held-out mid-trial scores.
+- **The mid-trial low bias comes first:** −3.9% under the loss's weights, against +0.75% at ends. Judge edge arms after the low-count arm's result, on the paired effect, which the overall bias does not affect.
