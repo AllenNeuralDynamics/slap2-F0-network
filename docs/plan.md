@@ -2739,4 +2739,4 @@ This replaces "no re-export yet" above. The per-trial maps of the next version (
 
 **Recommendation:** keep the deep architecture (`--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out`) as the candidate for the next version, with the per-trial maps. Confirm it on real data after the re-export. Until then, the delivered model stays ctrl WiSE-FT 0.5.
 
-**Decision (the user, 2026-11-24): use the deep architecture.** It is the default for new training and the next version; its current weights are deep2 WiSE-FT 0.5. `docs/figures/network_architecture.svg` (from `tools/architecture_figure.py`) now shows it, with the new pointwise blocks in bold.
+**Decision (the user, 2026-11-24): use the deep architecture** for new training and the next version; its current weights are deep2 WiSE-FT 0.5. `train.py` still defaults to the shallow model, so for now pass `--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out` for both pretraining and fine-tuning (a checkpoint's own config is used when it is evaluated or run). `docs/figures/network_architecture.svg` (from `tools/architecture_figure.py`) now shows it, with the new pointwise blocks in bold.

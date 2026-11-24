@@ -129,7 +129,7 @@ boxes = [
      ["1×1×1 conv 5 → 32, then 7 residual (ReZero) blocks, each:",
       "per-frame 3×3 conv, dilation 1, 1, 1, 1, 2, 2, 4 (blocks 3–7 at ½ res)",
       "and a causal temporal conv, kernel 3, dilation 1, 2, 4, …, 64",
-      "+ then a pointwise block: x + W₂ GELU(W₁ x), 32 → 64 → 32",
+      "+ then a pointwise block: x + α · W₂ GELU(W₁ x), 32 → 64 → 32",
       "then shifted by 9 frames: sees frames t−263 … t−9, ±23 px"], None),
     (241, 44, "blue", "Future branch: the same on reversed time (t+9 … t+263)", "32 ch", [], None),
     (295, 134, "green", "Half-plane branches ×4 (one trunk per direction)", "4 × 24 ch",
@@ -168,7 +168,7 @@ box(fx0, 202, fw, 76, "slate", "Pointwise fusion",
     ["1×1×1 conv 174 → 64, GELU", "1×1×1 conv 64 → 32, GELU"])
 line(fx0 + fw / 2, 278, fx0 + fw / 2, 298, arrow=True)
 box(fx0, 300, fw, 100, "slate", "4 pointwise residual blocks",
-    ["+ each x + W₂ GELU(W₁ x), 1×1×1, 32 → 64 → 32",
+    ["+ each x + α · W₂ GELU(W₁ x), 1×1×1, 32 → 64 → 32",
      "combine the branches, window statistics and",
      "same-frame context nonlinearly: 10 pointwise",
      "layers after the concatenation instead of 2"], "new")
@@ -193,7 +193,7 @@ text(fx0 + fw / 2, 662, "Outputs at every pixel and frame", 13.5, "bold", "#FFFF
 text(fx0 + fw / 2, 683, "F0 (t, r, c): baseline, counts", 12.4, fill="#FFFFFF", anchor="middle")
 text(fx0 + fw / 2, 702, "σ² (t, r, c): noise variance, counts²", 12.4, fill="#FFFFFF", anchor="middle")
 text(fx0, 740, "Heads start at 0: the untrained network predicts F0 = M.", 11, fill=C["muted"])
-text(fx0, 756, "Pointwise blocks start as the identity (W₂ = 0).", 11, fill=C["muted"])
+text(fx0, 756, "Pointwise blocks start as the identity (α = 1, W₂ = 0; α is learned).", 11, fill=C["muted"])
 text(fx0, 772, "432,524 parameters (309,510 without the pointwise blocks).", 11, fill=C["muted"])
 
 # ---------------------------------------------------------------- 4 what the output sees
