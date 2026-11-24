@@ -132,7 +132,7 @@ slap2-f0 view <export folder>                 # exported trials on disk
   - **Panels:** the movie; GIAnT's fit (its activity); the training target (movie − activity); and the target minus its trial mean.
   - **Loss mask:** "Blank what the loss ignores" blanks, in the target panels, the pixels and frames that real windows give no loss. These are labeled pixels outside every footprint (`--w_unfitted`), GIAnT fit artifacts (`stats.unfit_pixels`, computed while the trial loads), the first and last `--edge_s` seconds, and discarded frames. Traces shade those frames.
   - **QC line:** calibration QC, and whether training uses the trial. The trial filter (`--min_peak_r`, `--min_path_trials`) is applied over the session's `export_summary.json` when there is one; the session's role comes from `sessions/export_phase*.csv`.
-  - **Code Ocean:** `--codeocean` finds the assets by search (`--co_query`, `--co_name`), so no asset IDs are needed. Trials download in parallel ranges to `--cache_dir` (default `$SLAP2_F0_TRIAL_CACHE` or `D:/f0_trial_cache`); beyond `--cache_gb` the least recently used are deleted.
+  - **Code Ocean:** `--codeocean` finds the assets by search (`--co_query`, `--co_name`), so no asset IDs are needed. Trials download in parallel ranges into `--cache_dir`/slap2_f0_downloads (default `$SLAP2_F0_TRIAL_CACHE` or `D:/f0_trial_cache`). Beyond `--cache_gb` the least recently used are deleted, but only from that folder.
   - **Navigation:** pick a session and a trial; Page Up and Page Down step through trials. The session's next trial loads in the background.
 
 `slap2-f0 predict` runs saved checkpoints over whole trials and adds SiLo's baseline; `slap2-f0 view` shows the result.

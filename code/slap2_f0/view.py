@@ -340,12 +340,15 @@ class CodeOcean:
     ``name_prefix``), so no asset IDs live in this public code; each asset's
     ``export_summary.json`` lists its trials (cached in
     ``cache_dir``/_summaries, as assets do not change). Trials download into
-    ``cache_dir``/<asset mount>/<session>/Path<N>/ in parallel ranges; the
-    least recently used ones are deleted when the cache passes ``cache_gb``.
+    ``cache_dir``/slap2_f0_downloads/<asset mount>/<session>/Path<N>/ in parallel
+    ranges; the least recently used ones are deleted when the downloads pass
+    ``cache_gb``. Only files in that folder, which only downloads write, are
+    ever deleted, so a ``cache_dir`` that holds other trials loses none.
     The API token comes from the CODEOCEAN_API_TOKEN environment variable and
     the server from CODEOCEAN_DOMAIN (default the Allen Institute's)."""
 
     PART = 16 << 20
+    DOWNLOADS = "slap2_f0_downloads"
 
     def __init__(self, cache_dir: str | Path, query: str = "tag:slap2-F0", name_prefix: str = "slap2-F0 export phase",
                  cache_gb: float = 50.0, workers: int = 4):
@@ -417,7 +420,7 @@ class CodeOcean:
         return out
 
     def local_path(self, rec: dict) -> Path:
-        return self.cache_dir / rec["remote"]["mount"] / rec["remote"]["rel"]
+        return self.cache_dir / self.DOWNLOADS / rec["remote"]["mount"] / rec["remote"]["rel"]
 
     def cached(self, rec: dict) -> bool:
         return self.local_path(rec).exists()
@@ -506,17 +509,23 @@ class CodeOcean:
             os.replace(part, dst)
 
     def _evict(self, keep=()):
+        # under the lock that hold() takes: one pass at a time, and no file is held between the
+        # snapshot of the held files and its deletion
         with self._locks_lock:
             protected = set(self._held) | set(keep)
-        files = [p for p in self.cache_dir.rglob("trial_*.h5") if p.is_file()]
-        total = sum(p.stat().st_size for p in files)
-        for p in sorted(files, key=lambda p: p.stat().st_mtime):
-            if total <= self.cache_gb * 1e9:
-                break
-            if p in protected:
-                continue
-            total -= p.stat().st_size
-            p.unlink()
+            root = self.cache_dir / self.DOWNLOADS
+            files = [(p, p.stat()) for p in root.rglob("trial_*.h5") if p.is_file()] if root.exists() else []
+            total = sum(st.st_size for _, st in files)
+            for p, st in sorted(files, key=lambda x: x[1].st_mtime):
+                if total <= self.cache_gb * 1e9:
+                    break
+                if p in protected:
+                    continue
+                try:
+                    p.unlink()
+                except OSError:  # open elsewhere: keep it
+                    continue
+                total -= st.st_size
 
 
 class Store:
@@ -718,6 +727,20 @@ class Store:
         threading.Thread(target=run, daemon=True).start()
 
 
+def _json_safe(o):
+    """``o`` with non-finite floats as None: source-free exports have NaN QC
+    values, and the browser rejects JSON with NaN in it."""
+    if isinstance(o, float):
+        return o if np.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    if isinstance(o, np.generic):
+        return _json_safe(o.item())
+    return o
+
+
 def make_handler(store: Store):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet
@@ -734,7 +757,7 @@ def make_handler(store: Store):
             self.wfile.write(body)
 
         def _json(self, obj, code: int = 200):
-            self._send(code, json.dumps(obj).encode(), "application/json")
+            self._send(code, json.dumps(_json_safe(obj), allow_nan=False).encode(), "application/json")
 
         def do_GET(self):
             u = urlparse(self.path)

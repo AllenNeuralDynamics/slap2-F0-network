@@ -50,6 +50,8 @@ def _trial(root, session, path, trial, peak_r=0.5, sources=True, seed=0, summary
         f["mask/footprint_support"] = sup
         f["frame/discard"] = discard
         f.attrs["nSources"] = np.array([float(sources)])
+        if not sources:  # as source-free exports write them
+            f.attrs["eventResidualFraction"] = np.array([np.nan])
         f.attrs["alignHz"] = np.array([HZ])
         f.attrs["path"] = np.array([float(path)])
         f.attrs["trial"] = np.array([float(trial)])
@@ -83,7 +85,10 @@ def test_export_trials(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}"
-        meta = {t["key"]: t for t in json.loads(_get(base + "/api/meta")[0])["trials"]}
+        body = _get(base + "/api/meta")[0]
+        assert b"NaN" not in body  # the browser's JSON.parse rejects it
+        meta = {t["key"]: t for t in json.loads(body)["trials"]}
+        assert meta["S2/Path1/trial_001"]["qc"]["eventResidualFraction"] is None
         assert sorted(meta) == [f"S1/Path1/trial_00{t}" for t in range(1, 6)] + \
             [f"S1/Path2/trial_00{t}" for t in range(1, 4)] + ["S2/Path1/trial_001"]
         assert all(m["kind"] == "export" and m["models"] == [] for m in meta.values())
@@ -233,7 +238,7 @@ def test_codeocean_listing_download_and_cache(tmp_path, monkeypatch):
     msgs = []
     store.progress = type("P", (dict,), {"__setitem__": lambda s, k, v: (msgs.append(v), dict.__setitem__(s, k, v))})()
     tr = store.trial("S1/Path1/trial_001")
-    got = cache / "f0p1_S1" / "S1" / "Path1" / "trial_001.h5"
+    got = cache / "slap2_f0_downloads" / "f0p1_S1" / "S1" / "Path1" / "trial_001.h5"
     assert got.read_bytes() == blobs["S1/Path1/trial_001.h5"]  # assembled from many ranges
     assert any(s.startswith("downloading") for s in msgs) and any(s.startswith("reading") for s in msgs)
     assert m["S1/Path1/trial_001"]["cached"] and isinstance(tr, ExportTrial) and tr.T == T
@@ -262,6 +267,7 @@ def test_codeocean_small_cache_and_key_collisions(tmp_path, monkeypatch):
         h.attrs.update({"slap2_f0_predictions": 1, "session": "S1", "path": "Path1", "trial": "trial_001",
                         "n_frames": T, "n_rows": R, "n_cols": C})
         h["rows"] = np.zeros(1, np.int32)
+    mine = _trial(tmp_path / "cache", "S9", 1, 1)  # a trial of the user's own in the cache folder
     co = _FakeCodeOcean(tmp_path / "cache", blobs, monkeypatch, cache_gb=1e-9)
     store = Store(pred, remote=co, roles={}, cache_trials=1)
     keys = [m["key"] for m in store.meta]
@@ -273,3 +279,4 @@ def test_codeocean_small_cache_and_key_collisions(tmp_path, monkeypatch):
     co.release(tr.file)
     co._evict()
     assert not tr.file.exists()  # released: the over-full cache lets it go
+    assert mine.exists()  # never a download: never deleted
