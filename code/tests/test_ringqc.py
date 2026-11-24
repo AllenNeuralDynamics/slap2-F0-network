@@ -3,6 +3,8 @@ exporter's ringEventRatios.m) on a synthetic trial with known answers."""
 import h5py
 import numpy as np
 
+import pytest
+
 from slap2_f0.ringqc import main, ring_event_ratios, trial_ring_event_ratios
 
 T, R, C = 2000, 40, 60
@@ -76,6 +78,30 @@ def test_trial_file_divides_by_the_applied_gain(tmp_path):
         f.attrs["activityGain"] = np.array([0.6])
     q = trial_ring_event_ratios(fn)
     assert np.isclose(q.core, 1.5, rtol=1e-5) and np.isclose(q.near, 0.8, rtol=1e-5)
+
+
+def test_trial_file_uses_the_activity_channel(tmp_path):
+    """A two-channel export written with channels [2 1]: the activity channel
+    (1) is the file's second array, and the ratios come from it."""
+    movie, act, valid, pr, pc, disc = _trial()
+    other = np.full_like(movie, 50.0)  # a structural channel with no events
+    fn = tmp_path / "trial_001.h5"
+    with h5py.File(fn, "w") as f:
+        f["movie"] = np.stack([other, movie]).astype(np.float32)
+        f["activity"] = np.stack([np.zeros_like(act), act]).astype(np.float32)
+        f["mask/valid"] = valid.astype(np.uint8)
+        f["frame/discard"] = disc.astype(np.uint8)
+        f["sources/peak_row"] = pr.astype(np.int32)
+        f["sources/peak_col"] = pc.astype(np.int32)
+        f.attrs["channels"] = np.array([2.0, 1.0])
+        f.attrs["activityChannel"] = np.array([1.0])
+    q = trial_ring_event_ratios(fn)
+    assert q.n_sources == 2 and np.isclose(q.core, 1.5) and np.isclose(q.near, 0.8)
+    assert trial_ring_event_ratios(fn, channel=0).n_sources == 0  # the other channel, on request
+    with h5py.File(fn, "a") as f:
+        f.attrs["channels"] = np.array([2.0, 3.0])
+    with pytest.raises(ValueError, match="not the activity channel"):
+        trial_ring_event_ratios(fn)
 
 
 def test_folder_scan_skips_other_hdf5_files(tmp_path, capsys):

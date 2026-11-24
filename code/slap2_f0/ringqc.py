@@ -123,10 +123,28 @@ def ring_event_ratios(movie: np.ndarray, activity: np.ndarray, valid: np.ndarray
     return out
 
 
-def trial_ring_event_ratios(path: str | Path, channel: int = 0) -> RingEventRatios:
+def activity_channel_index(attrs) -> int:
+    """The index, in an export's movie and activity arrays, of GIAnT's
+    activity channel: the exporter writes the channels listed in its
+    ``channels`` attribute (MATLAB numbers), in that order, and runs the QC
+    on ``activityChannel``. Exports without these attributes hold one
+    channel, the activity channel."""
+    chans = np.ravel(attrs.get("channels", [1])).astype(int)
+    act = int(np.ravel(attrs.get("activityChannel", chans[0]))[0])
+    idx = np.flatnonzero(chans == act)
+    if not len(idx):
+        raise ValueError(f"the export holds channels {chans.tolist()}, not the activity channel {act}")
+    return int(idx[0])
+
+
+def trial_ring_event_ratios(path: str | Path, channel: int | None = None) -> RingEventRatios:
     """The ratios of an exported trial, with its activity divided by its
-    ``activityGain`` (GIAnT's activity, whatever the export applied)."""
+    ``activityGain`` (GIAnT's activity, whatever the export applied). By
+    default on the activity channel, as the exporter's attributes are;
+    ``channel`` picks an index into the file's arrays instead."""
     with h5py.File(path, "r") as f:
+        if channel is None:
+            channel = activity_channel_index(f.attrs)
         valid = f["mask/valid"][:].astype(bool)
         discard = f["frame/discard"][:].astype(bool)
         if "sources" not in f:
@@ -145,7 +163,11 @@ def main(argv=None) -> None:
         p = Path(a)
         files += list_trials(p) if p.is_dir() else [p]  # folders: exported trials only (not trial_table.h5)
     for fn in files:
-        q = trial_ring_event_ratios(fn)
+        try:
+            q = trial_ring_event_ratios(fn)
+        except ValueError as e:
+            print(f"{fn}: {e}")
+            continue
         print(f"{fn}: activity/movie {q.core:.4f} at <= 1.5 px, {q.near:.4f} at 1.5-2.5 px "
               f"({q.n_sources} sources, {q.n_events} ring events, {q.n_artifact_sources} at fit artifacts left out)")
 
