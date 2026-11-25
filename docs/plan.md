@@ -2790,7 +2790,11 @@ They are **15.5% of the valid pixels** (median; 2.7–21.8%), so the real loss c
 
 **Evaluation.** `evaluate --w_unfitted` (default 1) sets the weight for every checkpoint, so checkpoints that trained with 0 (all of them so far) and new ones are scored on the same pixels. `--w_unfitted 0` reproduces evaluations made before; a negative value uses each checkpoint's own.
 - **Change meaning** on real windows of sensor sessions: the all-pixel numbers (`mse_*`, `mse8_*`, `bias_*`, `mean_target`), `loss`, `var_loss`, the calibration (`z_mean`, `z_var`, `within_2`, `r8`) and `mix`. `lab_*` becomes finite there; before, it was NaN. Training's `--select mse8` and `--select loss` on real windows change with them.
-- **Keep their meaning:** `sup_*`, `bg_*` and `sup_leak_*`; every number on simulated windows; and so the balanced scores, which use only support and background: training's `--select balanced` and `balanced_free`, `tools/s4_eval.py` and `tools/heldout_eval.py`.
-- **Windows:** a draw whose loss region has under 5% weighted pixels is drawn again, so the weights could change which windows are scored. On 192 real windows of 804730 none changed.
+- **Keep their definition:** `sup_*`, `bg_*` and `sup_leak_*` count the same pixels, and simulated windows weigh every valid pixel 1 either way. So the balanced scores keep theirs too:
+  - `tools/s4_eval.py`, `tools/heldout_eval.py` and training's `--select balanced` average support and background;
+  - `balanced_free` adds the labeled pixels of the activity-free simulation, which are simulated.
+- **Two exceptions:**
+  - When a validation set has neither support nor background pixels, both balanced selectors fall back to the all-pixel ratio, which does change.
+  - Unchanged definitions give identical numbers only on identical windows. A draw whose loss region has under 5% weighted pixels is drawn again, so the weights can change which windows are scored. On 192 real windows of 804730, none changed.
 
 **Viewer.** `slap2-f0 view --w_unfitted` defaults to 1, so the target panels no longer blank these pixels. The QC line counts them and says whether they are in the loss, and hovering a pixel says so too. `--w_unfitted 0` shows what training up to S4 saw.
