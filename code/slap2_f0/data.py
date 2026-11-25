@@ -8,13 +8,17 @@ which teaches the model the trial edges.
 
 Real windows (``sim=None``): the target is the residual movie - activity.
 Loss weights (see docs/plan.md): valid pixels and frames only; footprint-
-support pixels and unlabeled (off-dendrite) pixels weight 1; labeled pixels
-outside every footprint weight ``w_unfitted`` (default 0), because their
-residual still holds activity GIAnT did not fit. In a trial without sources
-(``nSources`` 0, e.g. a GFP control without an activity sensor) the activity
-is known to be zero, so every valid pixel weighs 1. Frames within ``real_edge_s``
-(2 s) of a trial's first or last frame weigh 0: GIAnT's baseline is biased there, and
-with it the activity and the target. With ``event_mask`` > 0,
+support pixels and unlabeled (off-dendrite) pixels weight 1, and so do
+labeled pixels outside every footprint (``w_unfitted``, default 1): GIAnT
+fits no activity there, so their target is the movie itself. Runs up to S4
+used ``w_unfitted`` 0 ("Labeled pixels outside footprints get full loss" in
+docs/plan.md), on the view that their residual still holds activity GIAnT
+did not fit; that left every bright pixel in the loss carrying activity. In
+a trial without sources (``nSources`` 0, e.g. a GFP control without an
+activity sensor) every valid pixel weighs 1 whatever ``w_unfitted`` is.
+Frames within ``real_edge_s`` (2 s) of a trial's first or last frame weigh
+0: GIAnT's baseline is biased there, and with it the activity and the
+target. With ``event_mask`` > 0,
 voxels where GIAnT's activity exceeds event_mask times the pixel's activity
 RMS over the trial, and ``event_margin`` frames around them, weigh 0: there
 the target still holds the part of the events GIAnT did not fit (up to ~20%),
@@ -37,9 +41,10 @@ Activity-subtracted real windows (``subtract_frac``): with this
 probability a real window's input is movie - activity too, with the
 whole-trial inputs of that residual (its mean and variance maps), so bright
 dendrites show their real noise and excess but no fitted events; the target
-is unchanged. In sensor sessions every bright pixel in the loss carries
-activity, and a network fine-tuned on them alone learned to set the baseline
-of bright dendrites low even without events (v4 run, GFP control).
+is unchanged. With ``w_unfitted`` 0, every bright pixel in the loss of a
+sensor session carried activity, and a network fine-tuned on them alone
+learned to set the baseline of bright dendrites low even without events (v4
+run, GFP control).
 
 Trial edges (``edge_frac``): with this probability a window's loss region
 starts at the trial's first frame or ends at its last (within
@@ -79,7 +84,8 @@ class WindowConfig:
     out_px: int = 32
     t_reach: int = 0  # set from the model: gap + 1 + temporal_reach
     s_reach: int = 0  # set from the model: spatial_reach
-    w_unfitted: float = 0.0
+    # real windows: loss weight of labeled pixels outside every footprint (1 since 2026-11-25; S0-S4 used 0)
+    w_unfitted: float = 1.0
     min_valid_fraction: float = 0.05  # of loss pixels
     event_mask: float = 0.0  # real windows: no loss where activity > event_mask x its RMS (0 = off)
     event_margin: int = 8  # frames around those voxels that weigh 0 too

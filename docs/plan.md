@@ -2770,3 +2770,31 @@ This replaces the section merged in #20 ("Activity under-fit in the training tar
 **Recommendation:** keep the deep architecture (`--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out`) as the candidate for the next version, with the per-trial maps. Confirm it on real data after the re-export. Until then, the delivered model stays ctrl WiSE-FT 0.5.
 
 **Decision (the user, 2026-11-24): use the deep architecture** for new training and the next version; its current weights are deep2 WiSE-FT 0.5. `slap2-f0 train` defaults to it (`--fuse_blocks 4 --branch_mlp 1 --pointwise_init zero_out`, the user's decision, 2026-11-24); `--fuse_blocks 0 --branch_mlp 0` trains the shallow model. A shallow `--init` checkpoint gets the new blocks as identities. Evaluation and prediction use each checkpoint's own config, and old checkpoints, whose configs lack these keys, stay shallow. `docs/figures/network_architecture.svg` (from `tools/architecture_figure.py`) now shows it, with the new pointwise blocks in bold.
+
+## Labeled pixels outside footprints get full loss (2026-11-25)
+
+**Decision (the user, after looking at the training data in the viewer).** "The training target where there is no source should be the movie itself (there is no activity to subtract)." So real windows now weigh labeled pixels outside every footprint 1, like every other valid pixel. This is `WindowConfig.w_unfitted` and `train --w_unfitted`, both defaulting to 1. 0 stays available and reproduces the old runs.
+
+**Why.** GIAnT's activity is exactly zero outside its footprints' support, so the target there is the movie. Weight 0 was chosen because these pixels' residual may hold activity GIAnT did not fit. But it left every bright pixel in the real loss carrying activity, and two biases trace back to that:
+- **v4's GFP bias** ("Where v4's GFP bias comes from", v5 section): a network fine-tuned on those windows set the baseline of bright dendrites low even without events.
+- **The low baseline at labeled pixels outside the support** in activity-free simulations ("Experiments 1 and 2", 2026-11-21): bias +0.15 to +0.28, and MSE 1.1–2.1× the mean image's, in 776270, 876767 and 878030. Low photon counts explain part of it ("Low photon counts: the baseline sits low"). This rule taught the network that labeled pixels are where activity is.
+
+**What it adds to the loss.** Labeled pixels outside every footprint, fit artifacts left out, measured on 21 trials:
+- 9 cached exports of 776266_2025-01-09, 780125_2025-03-18 and 804730_2025-07-25;
+- 4 local exports of 780125_2025-03-14;
+- 8 pilot trials, one per path of 780125_2025-03-14, 803121_2025-10-29, 804730_2025-07-25 and 885233_2026-10-02.
+
+They are **15.5% of the valid pixels** (median; 2.7–21.8%), so the real loss covers **18.3% more pixels** (median; 2.8–27.9%). GIAnT fit artifacts, the 2 s at each trial end and discarded frames still have no loss. Trials without sources (GFP controls) already weighed every valid pixel 1.
+
+**Runs so far.** S0–S4, and every earlier run with real windows, trained with weight 0. The next full training run uses weight 1. The GPU capsule gets the change when that run is launched.
+
+**Evaluation.** `evaluate --w_unfitted` (default 1) sets the weight for every checkpoint, so checkpoints that trained with 0 (all of them so far) and new ones are scored on the same pixels. `--w_unfitted 0` reproduces evaluations made before; a negative value uses each checkpoint's own.
+- **Change meaning** on real windows of sensor sessions: the all-pixel numbers (`mse_*`, `mse8_*`, `bias_*`, `mean_target`), `loss`, `var_loss`, the calibration (`z_mean`, `z_var`, `within_2`, `r8`) and `mix`. `lab_*` becomes finite there; before, it was NaN. Training's `--select mse8` and `--select loss` on real windows change with them.
+- **Keep their definition:** `sup_*`, `bg_*` and `sup_leak_*` count the same pixels, and simulated windows weigh every valid pixel 1 either way. So the balanced scores keep theirs too:
+  - `tools/s4_eval.py`, `tools/heldout_eval.py` and training's `--select balanced` average support and background;
+  - `balanced_free` adds the labeled pixels of the activity-free simulation, which are simulated.
+- **Two exceptions:**
+  - When a validation set has neither support nor background pixels, both balanced selectors fall back to the all-pixel ratio, which does change.
+  - Unchanged definitions give identical numbers only on identical windows. A draw whose loss region has under 5% weighted pixels is drawn again, so the weights can change which windows are scored. On 192 real windows of 804730, none changed.
+
+**Viewer.** `slap2-f0 view --w_unfitted` defaults to 1, so the target panels no longer blank these pixels. The QC line counts them and says whether they are in the loss, and hovering a pixel says so too. `--w_unfitted 0` shows what training up to S4 saw.

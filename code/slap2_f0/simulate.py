@@ -37,8 +37,9 @@ geometry, brightness, events and noise statistics:
   trial. Bright labeled pixels then vary (the excess) without any events, as
   in a GFP control, so the template's footprint geometry no longer says which
   pixels are active and only the events themselves do. Without them, a
-  network fine-tuned on sensor sessions (where every bright pixel in the loss
-  has activity) set the baseline of GFP dendrites too low (v4 run);
+  network fine-tuned on sensor sessions (where, with ``w_unfitted`` 0 as up
+  to S4, every bright pixel in the loss had activity) set the baseline of GFP
+  dendrites too low (v4 run);
 * **realistic low counts** (optional, ``photon_zeros``): every voxel is drawn
   from a zero-inflated distribution with its mean and variance, exact zeros
   with probability exp(-mean / c), else a generalized gamma, a power of a

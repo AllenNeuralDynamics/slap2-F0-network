@@ -97,8 +97,9 @@ def test_evaluate_reproduces_validation(tmp_path):
 
 def test_evaluate_sourceless_session(tmp_path):
     """A session without sources (a GFP control) trains and scores; its
-    labeled pixels are scored (lab_), since its activity is known to be zero,
-    while labeled pixels outside footprints elsewhere keep weight 0."""
+    labeled pixels are scored (lab_), since its activity is known to be zero.
+    Labeled pixels outside footprints in sensor sessions are scored too by
+    default, and not with --w_unfitted 0 (evaluations up to S4)."""
     for k, label in enumerate(["sessA", "sessB", "sessC", "gfp"]):
         d = tmp_path / "data" / label / "Path1"
         d.mkdir(parents=True, exist_ok=True)
@@ -115,7 +116,13 @@ def test_evaluate_sourceless_session(tmp_path):
     for k in ("lab_mse8_net", "lab_mse8_mean_image", "lab_bias_net", "bg_mse8_net"):
         assert np.isfinite(float(g[k])), k
     assert not np.isfinite(float(g.get("sup_mse8_net") or "nan"))  # no support pixels
-    assert not np.isfinite(float(rows[("sessA", "real")].get("lab_mse8_net") or "nan"))  # w_unfitted 0
+    assert np.isfinite(float(rows[("sessA", "real")]["lab_mse8_net"]))  # w_unfitted 1, the default
+    ev0 = tmp_path / "eval0"
+    main(["evaluate", str(tmp_path / "data"), "--ckpt", str(out / "best.pt"), "--out", str(ev0),
+          "--windows", "4", "--workers", "0", "--stats_from", str(out / "stats"), "--w_unfitted", "0"])
+    rows0 = {(r["session"], r["kind"]): r for r in csv.DictReader(open(ev0 / "eval.csv"))}
+    assert not np.isfinite(float(rows0[("sessA", "real")].get("lab_mse8_net") or "nan"))  # the old definition
+    assert np.isfinite(float(rows0[("gfp", "real")]["lab_mse8_net"]))  # no sources: always scored
     ex = {r["session"]: r for r in csv.DictReader(open(ev / "excess.csv"))}
     assert np.isfinite(float(ex["gfp"]["lab_r1"])) and np.isfinite(float(ex["gfp"]["all_r1"]))
 

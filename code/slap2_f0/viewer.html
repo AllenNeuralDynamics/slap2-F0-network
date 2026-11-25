@@ -250,6 +250,15 @@ function stepTrial(d) {
 }
 
 function fmtQC(v, d) { return v == null || !Number.isFinite(+v) ? "–" : (+v).toFixed(d); }
+// where the loss is: labeled pixels outside every footprint are counted whether or not they are in it
+// (training's --w_unfitted: 1 since 2026-11-25, 0 in runs up to S4)
+function lossText(cnt) {
+  const lab = Number.isFinite(+S.st.labeled_outside) ? (+S.st.labeled_outside).toLocaleString() : "–";
+  const art = `${cnt[2].toLocaleString()} fit-artifact px left out`;
+  return S.st.labeled_outside_in_loss === false
+    ? `loss on ${cnt[0].toLocaleString()} of ${S.N.toLocaleString()} px (${lab} labeled px outside footprints left out, --w_unfitted 0; ${art})`
+    : `loss on ${cnt[0].toLocaleString()} of ${S.N.toLocaleString()} px (including ${lab} labeled px outside footprints, target = movie; ${art})`;
+}
 function showQC() {
   const el = $("qc"), tr = S.trial;
   if (S.kind !== "export") { el.innerHTML = ""; return; }
@@ -270,7 +279,7 @@ function showQC() {
   const parts = [chip,
     `peak r ${fmtQC(q.peakR, 2)}`, gain, `blur σ ${fmtQC(q.blurSigma, 2)} px`, ...(ring ? [ring] : []),
     `event residual ${fmtQC(q.eventResidualFraction, 2)}`, `${tr.n_sources} sources`, `${q.nEvents != null ? q.nEvents : "–"} events`,
-    `loss on ${cnt[0].toLocaleString()} of ${S.N.toLocaleString()} px (${cnt[1].toLocaleString()} labeled outside footprints, ${cnt[2].toLocaleString()} fit artifacts)`,
+    lossText(cnt),
     `${S.edge} frames at each end`];
   if (q.giantRef) parts.push(`GIAnT ${String(q.giantRef).slice(0, 7)}`);
   el.innerHTML = parts.map((p) => `<span>${p}</span>`).join("");
@@ -607,7 +616,9 @@ function updateReadout() {
   const F = S.frame, parts = [`row ${h.r}, col ${h.c}`, `data ${fmt(F.movie[n])}`, `activity ${fmt(F.activity[n])}`];
   if (S.kind === "export") {
     const tg = F.target[n];
-    parts.push(`target ${fmt(tg)}`, `target − trial mean ${fmt(tg - S.meanT[n])}`, NOLOSS[S.loss[n]]);
+    const outside = S.st.labeled[n] && !S.st.support[n];
+    parts.push(`target ${fmt(tg)}`, `target − trial mean ${fmt(tg - S.meanT[n])}`,
+      !S.loss[n] && outside ? "in the loss (labeled, outside every footprint: target = movie)" : NOLOSS[S.loss[n]]);
     const off = frameNoLoss(S.t); if (off && !S.loss[n]) parts[parts.length - 1] = `no loss in this frame (${off})`;
   }
   for (const m of S.models) if (S.shown.has(m)) {
