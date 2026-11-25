@@ -115,8 +115,14 @@ def test_export_trials(tmp_path):
         assert st["edge_frames"] == 20 and st["discard"] == [40]
         rows, cols, loss = np.array(st["rows"]), np.array(st["cols"]), np.array(st["loss"])
         at = {(r, c): v for r, c, v in zip(rows, cols, loss)}
-        assert at[(5, 5)] == 0 and at[(1, 8)] == 1  # in the footprint; labeled outside it
-        assert at[(9, 11)] == 2 and at[(10, 12)] == 2 and at[(1, 11)] == 1  # artifact and its neighbours
+        # in the footprint, and labeled outside every footprint: both in the loss (training's default)
+        assert at[(5, 5)] == 0 and at[(1, 8)] == 0 and at[(1, 11)] == 0
+        assert st["labeled_outside"] == 4 and st["labeled_outside_in_loss"] is True
+        assert at[(9, 11)] == 2 and at[(10, 12)] == 2  # artifact and its neighbours
+        old = ExportTrial(fn, w_unfitted=0.0).static()  # as training up to S4: no loss there
+        at0 = dict(zip(zip(old["rows"], old["cols"]), old["loss"]))
+        assert at0[(5, 5)] == 0 and at0[(1, 8)] == 1 and at0[(1, 11)] == 1 and at0[(9, 11)] == 2
+        assert old["labeled_outside"] == 4 and old["labeled_outside_in_loss"] is False
         unfit = load_stats([fn])[str(fn)]["unfit"]  # training's rule, from its own stats
         assert np.array_equal(loss == 2, unfit[rows, cols])
         with TrialFile(fn) as tf:

@@ -20,11 +20,12 @@ export data assets on Code Ocean (found by search, downloaded on demand into
 movie - activity, and the target minus its mean over the trial (what
 changes over time: noise, slow drift, and any activity GIAnT left in). What
 the training loss ignores (``data.WindowDataset``, real windows) can be
-blanked in the target: labeled pixels outside every footprint (weight
-``--w_unfitted``, 0 as in training, except in trials without sources), GIAnT
-fit artifacts (``stats.unfit_pixels``, computed from the trial while it
-loads), frames within ``--edge_s`` (2 s) of the trial's first and last
-frame, and discarded frames. Each trial shows its calibration QC and whether
+blanked in the target: GIAnT fit artifacts (``stats.unfit_pixels``, computed
+from the trial while it loads), frames within ``--edge_s`` (2 s) of the
+trial's first and last frame, and discarded frames; with ``--w_unfitted`` 0
+(training up to S4) also labeled pixels outside every footprint, except in
+trials without sources. Their weight is 1 by default, as in training, since
+GIAnT fits no activity there and the target is the movie itself. Each trial shows its calibration QC and whether
 training uses it: the rules of ``io.filter_trials`` (over the session's
 ``export_summary.json`` when there is one, else over the trials found), and
 the session's role (train or test) in ``sessions/export_phase*.csv``.
@@ -200,10 +201,13 @@ class ExportTrial(_Frames):
     valid pixels, as ``io.TrialFile.read`` gives them to training (the
     movie NaN outside the valid mask and on discarded frames), and where the
     training loss of real windows looks (``data.WindowDataset``): ``loss``
-    per pixel (0 in the loss; 1 labeled outside every footprint, weight
-    ``w_unfitted``, unless the trial has no sources; 2 GIAnT fit artifact,
-    ``stats.unfit_pixels`` on maps computed here as ``stats.trial_stats``
-    computes them) and ``edge`` frames at each end of the trial."""
+    per pixel (0 in the loss; 1 labeled outside every footprint when
+    ``w_unfitted`` is 0, unless the trial has no sources; 2 GIAnT fit
+    artifact, ``stats.unfit_pixels`` on maps computed here as
+    ``stats.trial_stats`` computes them) and ``edge`` frames at each end of
+    the trial. ``labeled_outside`` counts the labeled pixels outside every
+    footprint (fit artifacts not included) and ``labeled_outside_in_loss``
+    says whether they have loss weight."""
 
     # the target, movie - activity, is a layer of its own, averaged over the frames that have a
     # movie; the activity layer keeps GIAnT's fit everywhere, for its panel
@@ -212,7 +216,7 @@ class ExportTrial(_Frames):
     # in small enough pieces that the server keeps answering while a trial loads
     T_BLOCK, C_BLOCK = 256, 64
 
-    def __init__(self, fn: str | Path, edge_s: float = 2.0, w_unfitted: float = 0.0, channel: int = 0,
+    def __init__(self, fn: str | Path, edge_s: float = 2.0, w_unfitted: float = 1.0, channel: int = 0,
                  progress=None):
         with h5py.File(fn, "r") as f:
             _, T, R, C = f["movie"].shape
@@ -271,9 +275,12 @@ class ExportTrial(_Frames):
             st[name] = full
         self.unfit = unfit_pixels(st)
         self.loss = np.zeros(N, np.uint8)
-        if self.attrs.get("nSources", 1) and w_unfitted <= 0:
-            self.loss[self.labeled[self.rows, self.cols] & ~self.support[self.rows, self.cols]] = 1
+        outside = self.labeled[self.rows, self.cols] & ~self.support[self.rows, self.cols]
+        self.labeled_outside_in_loss = not (self.attrs.get("nSources", 1) and w_unfitted <= 0)
+        if not self.labeled_outside_in_loss:
+            self.loss[outside] = 1
         self.loss[self.unfit[self.rows, self.cols]] = 2
+        self.labeled_outside = int((outside & (self.loss != 2)).sum())
         self.edge = int(round(edge_s * float(self.attrs.get("alignHz", 80.0)))) if edge_s > 0 else 0
 
     def _arrays(self):
@@ -301,7 +308,8 @@ class ExportTrial(_Frames):
     def static(self) -> dict:
         mt = [None if not np.isfinite(v) else round(float(v), 3) for v in self.mean_target]
         return {**self._static(), "kind": "export", "loss": self.loss.tolist(), "edge_frames": self.edge,
-                "loss_reasons": list(LOSS_REASONS), "mean_target": mt}
+                "loss_reasons": list(LOSS_REASONS), "mean_target": mt, "labeled_outside": self.labeled_outside,
+                "labeled_outside_in_loss": self.labeled_outside_in_loss}
 
 
 class _quiet:
@@ -573,7 +581,7 @@ class Store:
 
     def __init__(self, root: str | Path | None, cache_trials: int = 2, order: list[str] | None = None,
                  data: str = "auto", remote: CodeOcean | None = None, edge_s: float = 2.0,
-                 w_unfitted: float = 0.0, roles: dict[str, str] | None = None,
+                 w_unfitted: float = 1.0, roles: dict[str, str] | None = None,
                  min_peak_r: float = 0.3, min_path_trials: int = 4):
         self.root = Path(root) if root else None
         self.order = order
@@ -858,8 +866,9 @@ def add_arguments(pv) -> None:
                     help="delete the least recently used downloaded trials beyond this size")
     pv.add_argument("--edge_s", type=float, default=2.0,
                     help="exported trials: seconds at each end of a trial without loss (training's --real_edge_s)")
-    pv.add_argument("--w_unfitted", type=float, default=0.0,
-                    help="exported trials: loss weight of labeled pixels outside every footprint (training's)")
+    pv.add_argument("--w_unfitted", type=float, default=1.0,
+                    help="exported trials: loss weight of labeled pixels outside every footprint (training's "
+                         "--w_unfitted; 0 shows them as training up to S4 did, without loss)")
     pv.add_argument("--min_peak_r", type=float, default=0.3, help="trial filter (training's --min_peak_r)")
     pv.add_argument("--min_path_trials", type=int, default=4, help="trial filter (training's --min_path_trials)")
     pv.add_argument("--port", type=int, default=8765)

@@ -414,9 +414,10 @@ def evaluate(model, loader, region, device, amp_dtype, args, per_window: list | 
     (mse_*) and on
     8-frame averages (mse8_*, what SiLo Z-scores), on all loss pixels and
     split into footprint support, unlabeled background and labeled pixels
-    outside every footprint (lab_; these have loss weight only with
-    w_unfitted > 0 or in a trial without sources, such as a GFP control). For
-    real targets
+    outside every footprint (lab_; in real windows of sensor sessions these
+    count only with w_unfitted > 0, the default since 2026-11-25; in trials
+    without sources, such as a GFP control, and in simulated windows they
+    always count). For real targets
     the photon noise adds the same amount to every MSE; for simulated ones the
     MSE is the baseline error itself. bias_* = mean(target - baseline);
     mean_target per class, so bias / mean_target is the bias as a share of the
@@ -1037,7 +1038,10 @@ def evaluate_checkpoints(args) -> None:
     kind in <out>/eval.csv. The windows depend only on the seed and the
     session's files, so every checkpoint is scored on the same ones; with the
     training seed, the first ``val_windows`` of a held-out session are the
-    ones its training validation used. With --per_window, windows.csv has
+    ones its training validation used, when --w_unfitted is the training's
+    (0 for runs up to S4: a window whose loss region has too few weighted
+    pixels is drawn again, so the weights can change which windows are
+    drawn). With --per_window, windows.csv has
     each window's error sums (see ``evaluate``)."""
     files = quality_files(list_trials(args.root), args)
     if not files:
@@ -1088,6 +1092,9 @@ def evaluate_checkpoints(args) -> None:
         wcfg = WindowConfig(**ck["window"])  # checkpoints from before real_edge_s get its default (2 s)
         if args.real_edge_s is not None:
             wcfg = replace(wcfg, real_edge_s=args.real_edge_s)
+        wu = getattr(args, "w_unfitted", 1.0)
+        if wu >= 0:  # the same pixels for every checkpoint, whatever it trained with
+            wcfg = replace(wcfg, w_unfitted=wu)
         cks.append({"name": name, "path": path, "step": ck.get("step"), "config": ck["config"], "state": ck["model"],
                     "wcfg": wcfg})
         print(f"{name}: {path} (step {ck.get('step')})", flush=True)
@@ -1212,6 +1219,11 @@ def add_eval_arguments(p) -> None:
     p.add_argument("--real_edge_s", type=float, default=None,
                    help="real windows: no loss within this many seconds of a trial edge (default: the checkpoint's, "
                         "2 s for checkpoints from before the option; 0 = keep the edges)")
+    p.add_argument("--w_unfitted", type=float, default=1.0,
+                   help="real windows: loss weight of labeled pixels outside every footprint, the same for every "
+                        "checkpoint (default 1). Checkpoints up to S4 store 0, and --w_unfitted 0 reproduces "
+                        "evaluations made before 2026-11-25 (their windows and numbers); a negative value uses each "
+                        "checkpoint's own")
     p.add_argument("--pz_legacy", action="store_true",
                    help="pz kinds (fastpz, motionpz, ...): draw the low counts as up to 2026-11-21, to compare with "
                         "evaluations made before (SimConfig.pz_legacy)")
@@ -1339,7 +1351,9 @@ def add_arguments(p) -> None:
                    help="variance-factor input relative to the trial's median (default) or the window's (v1-v6)")
     p.add_argument("--out_frames", type=int, default=64)
     p.add_argument("--out_px", type=int, default=32)
-    p.add_argument("--w_unfitted", type=float, default=0.0, help="loss weight of labeled pixels outside every footprint")
+    p.add_argument("--w_unfitted", type=float, default=1.0,
+                   help="real windows: loss weight of labeled pixels outside every footprint, where GIAnT fits no "
+                        "activity and the target is the movie (default 1; runs up to S4 used 0)")
     p.add_argument("--event_mask", type=float, default=0.0,
                    help="real training windows: no loss where GIAnT activity exceeds this times its RMS over the trial, "
                         "and --event_margin frames around (the target there holds unfitted activity; 0 = off)")

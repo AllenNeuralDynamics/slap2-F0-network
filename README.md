@@ -111,17 +111,21 @@ Older exports (without `activitySlope`) also scaled the activity by the disk-flu
 
   The fusion layers also get the blind window mean and variance at the output frame. The baseline is the mean image, plus a learned mix toward the window mean (bounded to ±1) and a learned correction (a factor of 0.5–2). Both start at zero, so the untrained network predicts the mean image.
 - **Loss.** For the baseline: squared error weighted by 1 / photon variance, which is minimized by the mean, so it is unbiased at any brightness. For the noise: a Gaussian likelihood around the detached baseline, weighted by `--w_var`.
+- **Where real windows have loss:** every valid pixel, labeled pixels outside every footprint included (`--w_unfitted`, default 1). GIAnT fits no activity there, so the target is the movie itself. Runs up to S4 used 0. No loss at GIAnT fit artifacts, in the first and last `--real_edge_s` seconds of a trial, or on discarded frames.
 - **Validation split:** whole sessions are held out when there are at least 3, otherwise whole trials.
 - **Every `--val_every` steps** it evaluates fixed windows: real (`real_*`) and simulated (`sim_*`) from the held-out files, and simulated or real from the training files (`tr_*`).
   - **Baselines compared:** the network, the mean image, the window mean and SiLo's moving median.
   - **Oracles,** which know the activity: the mean image minus the trial's mean activity (`oracle`, the best constant) and the blind window mean of movie − activity (`oracle_blind`).
   - **Scales:** per frame and on 8-frame averages (`mse8_*`, what SiLo Z-scores).
-  - **Pixel classes:** all, footprint support (`sup_`), background (`bg_`) and labeled pixels outside every footprint (`lab_`). The last only counts where it has loss weight: with `--w_unfitted` > 0, or in a session without sources.
+  - **Pixel classes:** all, footprint support (`sup_`), background (`bg_`) and labeled pixels outside every footprint (`lab_`). The last counts only where it has loss weight. That means with `--w_unfitted` > 0 (the default since 2026-11-25), in a session without sources, and in simulated windows.
   - **Noise calibration:** `z_*`, and `r8`, which converts per-frame σ to SiLo's.
 - **best.pt** is picked on held-out windows of the training data kind (`--select`). The default, `balanced`, is the network's 8-frame MSE relative to the mean image's, averaged over support and background pixels. The per-frame loss is too noisy to pick checkpoints on real data. The untrained network counts (score 1), so best.pt is never worse than the mean image.
 - **Outputs** in `--out`: `config.json`, `metrics.csv`, `best.pt`, `last.pt` and `stats/` (cached whole-trial statistics).
 - **Hardware:** on a GPU it uses mixed precision (bf16 where supported). A CPU manages about one step a minute even with a narrow model, so real training needs the GPU.
-- **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). It also reports each session's residual variance over photon noise (`excess.csv`). With the training seed, a held-out session gets the windows its training validation used.
+- **Per-session scores:** `slap2-f0 evaluate <folder> --ckpt name=best.pt ...` scores checkpoints on fixed real and simulated windows of every session (`eval.csv`, same metrics as validation). It also reports each session's residual variance over photon noise (`excess.csv`). With the training seed and the training's `--w_unfitted`, a held-out session gets the windows its training validation used.
+  - `--w_unfitted` (default 1) applies to every checkpoint, whatever it was trained with, so old and new checkpoints are scored on the same pixels.
+  - `--w_unfitted 0` reproduces evaluations made before 2026-11-25: their windows, and their all-pixel numbers on real windows (`mse*_*`, `bias_*`, `loss`, calibration). Checkpoints up to S4 store 0; a negative value uses each checkpoint's own.
+  - The support and background classes (`sup_`, `bg_`), and with them the balanced scores, count the same pixels either way.
 - **Controls without activity:** a session where SiLo finds no sources, such as a GFP mouse without a glutamate sensor, is exported with zero activity. All its valid pixels are exact targets with loss weight 1, so any bias on its labeled pixels (`lab_bias_*`) is spurious ΔF.
 - **Ceiling:** `slap2-f0 ceiling <folder> --smooth 8` measures how much any baseline could gain over the mean image, using oracle references.
 
@@ -136,7 +140,7 @@ slap2-f0 view <export folder>                 # exported trials on disk
 
 - **Training data** (a folder of exported trials without predict output, `--data export`, or `--codeocean`).
   - **Panels:** the movie; GIAnT's fit (its activity); the training target (movie − activity); and the target minus its trial mean.
-  - **Loss mask:** "Blank what the loss ignores" blanks, in the target panels, the pixels and frames that real windows give no loss. These are labeled pixels outside every footprint (`--w_unfitted`), GIAnT fit artifacts (`stats.unfit_pixels`, computed while the trial loads), the first and last `--edge_s` seconds, and discarded frames. Traces shade those frames.
+  - **Loss mask:** "Blank what the loss ignores" blanks, in the target panels, the pixels and frames that real windows give no loss. These are GIAnT fit artifacts (`stats.unfit_pixels`, computed while the trial loads), the first and last `--edge_s` seconds, and discarded frames. With `--w_unfitted 0`, as in training up to S4, they also include labeled pixels outside every footprint. Traces shade those frames. The QC line counts the labeled pixels outside every footprint and says whether they are in the loss.
   - **QC line:** calibration QC, and whether training uses the trial. The trial filter (`--min_peak_r`, `--min_path_trials`) is applied over the session's `export_summary.json` when there is one; the session's role comes from `sessions/export_phase*.csv`.
   - **Code Ocean:** `--codeocean` finds the assets by search (`--co_query`, `--co_name`), so no asset IDs are needed. Trials download in parallel ranges into `--cache_dir`/slap2_f0_downloads (default `$SLAP2_F0_TRIAL_CACHE` or `D:/f0_trial_cache`). Beyond `--cache_gb` the least recently used are deleted, but only from that folder.
   - **Navigation:** pick a session and a trial; Page Up and Page Down step through trials. The session's next trial loads in the background.
