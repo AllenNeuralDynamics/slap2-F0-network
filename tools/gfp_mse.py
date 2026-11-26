@@ -12,18 +12,19 @@ only where its center frame is kept.
   oracle                    the original's own mean image (the best constant) in place of a model
 
 usage: python tools/gfp_mse.py NAME=BASELINE_ROOT [...] --inj <injection dir> --cache <cache dir>
-                               [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig]
+                               [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig] [--max_copy_shift 0.05]
 
 Same folders as tools/gfp_check.py, which must have run first on the same movies with the same models (or a
 superset whose valid pixels these models cover): of its cache files made from these movies, the one with the most
 pixels valid in every model given is used.
 """
 import argparse
-import json
 from pathlib import Path
 
 import h5py
 import numpy as np
+
+from gfp_check import cache_source, peaks  # tools/ is on the path when this script runs
 
 SMOOTH = 8
 
@@ -56,11 +57,11 @@ def main():
     p.add_argument("--trial", default="E1T1", help="trial stem of the files (default E1T1)")
     p.add_argument("--copy", default="847983_inj", help="folder of the copy with injected events")
     p.add_argument("--orig", default="847983_orig", help="folder of the original")
+    p.add_argument("--max_copy_shift", type=float, default=0.05,
+                   help="largest shift (px) of the copy's registration from the original's that is accepted")
     a = p.parse_args()
     models = [m.split("=", 1) for m in a.models]
-    # tools/gfp_check.py tags each cache file with the movies it comes from (cache_source there)
-    src = json.dumps({"trial": a.trial, "copy": str((a.inj / a.copy).resolve()), "orig": str((a.inj / a.orig).resolve())},
-                     sort_keys=True)
+    src = cache_source(a)  # what tools/gfp_check.py tags each cache file with
     half = SMOOTH // 2  # smooth's output j is the mean of frames j..j+SMOOTH-1, centered on frame j + SMOOTH // 2
     rows = {}
     for dmd in (1, 2):
@@ -84,8 +85,7 @@ def main():
                              "run tools/gfp_check.py first")
         z = best
         idx, mi, mo, keep = z["idx"], z["m_inj"], z["m_orig"], z["keep"]
-        with h5py.File(a.inj / a.copy / "injection_truth.h5", "r") as f:
-            pk = f[f"path{dmd}/peak_pixel_rc"][:]
+        pk = peaks(a, dmd)  # in the selected trial's frame
         with h5py.File(Path(models[0][1]) / a.orig / f"{a.trial}DMD{dmd}_BASELINE-80Hz.h5", "r") as f:
             shape = f["baseline"].shape
         pa, pb = np.divmod(idx, shape[2])  # pa = MATLAB col, pb = MATLAB row

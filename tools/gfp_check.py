@@ -19,7 +19,7 @@ The first and last 2 s of the trial and frames discarded for motion in either mo
 mean counts only where its center frame is kept, as in the held-out evaluation.
 
 usage: python tools/gfp_check.py NAME=BASELINE_ROOT [...] --inj <injection dir> --cache <cache dir>
-                                 [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig]
+                                 [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig] [--max_copy_shift 0.05]
 
 <injection dir> holds the copy and the original (folders --copy and --orig), each with
 motion_correction/<trial>DMD{1,2}_ALIGNMENTDATA.h5 and <trial>DMD{1,2}_REGISTERED_DOWNSAMPLED-80Hz.h5; the
@@ -31,6 +31,7 @@ pixels valid in every model's baselines are cached in <cache dir>, tagged with t
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import h5py
@@ -109,9 +110,22 @@ def load_dmd(a, dmd, roots):
 
 
 def peaks(a, dmd):
-    """Zero-based MATLAB (row, col) of each injected source's peak pixel on this path."""
+    """Zero-based MATLAB (row, col) of each injected source's peak pixel on this path, in the selected trial's
+    registered frame. The truth file holds them in the path frame (the registered frame of the path's first injected
+    trial), and trial frame = path frame + trial_shift_rc. A trial whose copy is registered differently from the
+    original (copy_shift_rc above --max_copy_shift) is refused: copy - original would not be the injected activity."""
+    m = re.search(r"T(\d+)$", a.trial)
     with h5py.File(a.inj / a.copy / "injection_truth.h5", "r") as f:
-        return f[f"path{dmd}/peak_pixel_rc"][:]
+        g = f[f"path{dmd}"]
+        trials = [int(t) for t in g["trials"][:]]
+        if m is None or int(m.group(1)) not in trials:
+            raise SystemExit(f"--trial {a.trial}: not one of path {dmd}'s injected trials {trials}")
+        n = int(m.group(1))
+        cs = g[f"trials_detail/T{n}/copy_shift_rc"][:]
+        if np.abs(cs).max() > a.max_copy_shift:
+            raise SystemExit(f"--trial {a.trial}: on path {dmd} the copy's registration is shifted by {np.round(cs, 3)} px "
+                             f"from the original's (limit {a.max_copy_shift} px)")
+        return np.rint(g["peak_pixel_rc"][:] + g["trial_shift_rc"][trials.index(n)]).astype(int)
 
 
 def cores(a, dmd, d):
@@ -136,6 +150,8 @@ def main():
     p.add_argument("--trial", default="E1T1", help="trial stem of the files (default E1T1)")
     p.add_argument("--copy", default="847983_inj", help="folder of the copy with injected events")
     p.add_argument("--orig", default="847983_orig", help="folder of the original")
+    p.add_argument("--max_copy_shift", type=float, default=0.05,
+                   help="largest shift (px) of the copy's registration from the original's that is accepted")
     a = p.parse_args()
     models = [m.split("=", 1) for m in a.models]
     roots = [r for _, r in models]
