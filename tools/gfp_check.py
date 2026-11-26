@@ -3,8 +3,9 @@
 
 Two registered movies of the same trial: the original GFP recording (no activity), and a copy with injected
 events of known size (GIAnT-Python's injection tool, GIAnT-Python#22; for 847983: 60 sources per path, 1 Hz,
-sizes 0.25-8). Use a trial where the copy's registration equals the original's (trial 1 of 847983: within
-0.02 px), so copy - original is the injected activity at every pixel.
+sizes 0.25-8). Use a trial where the copy's registration matches the original's (trial 1 of 847983: grid within
+0.02 px, frame-wise motion within 0.02-0.03 px RMS), so copy - original is the injected activity at every pixel
+up to that residual (the rings beyond 8 px, where nothing is injected, measure it).
 
   no-activity bias   on the original: sum(movie - baseline) / sum(movie); positive = baseline below the movie
   leak               at the injected sources (peak pixel and neighbours within 1.5 px): the share of the injected
@@ -14,7 +15,8 @@ sizes 0.25-8). Use a trial where the copy's registration equals the original's (
   bias at sources    on the copy against the truth (the original movie): sum(M_orig - B_copy) / sum(M_orig)
   rings              the same quantities in rings around the source peaks (beyond 5 px nothing is injected)
 
-The first and last 2 s of the trial and frames discarded for motion in either movie are left out.
+The first and last 2 s of the trial and frames discarded for motion in either movie are left out; an 8-frame
+mean counts only where its center frame is kept, as in the held-out evaluation.
 
 usage: python tools/gfp_check.py NAME=BASELINE_ROOT [...] --inj <injection dir> --cache <cache dir>
                                  [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig]
@@ -23,9 +25,12 @@ usage: python tools/gfp_check.py NAME=BASELINE_ROOT [...] --inj <injection dir> 
 motion_correction/<trial>DMD{1,2}_ALIGNMENTDATA.h5 and <trial>DMD{1,2}_REGISTERED_DOWNSAMPLED-80Hz.h5; the
 copy also holds injection_truth.h5. Each BASELINE_ROOT holds `slap2-f0 predict-registered` outputs for both
 movies: BASELINE_ROOT/<copy>/<trial>DMD{1,2}_BASELINE-80Hz.h5, and the same under <orig>. The movies at the
-pixels valid in every model's baselines are cached in <cache dir> (tools/gfp_mse.py reads that cache).
+pixels valid in every model's baselines are cached in <cache dir>, tagged with the movies they come from
+(tools/gfp_mse.py reads that cache).
 """
 import argparse
+import hashlib
+import json
 from pathlib import Path
 
 import h5py
@@ -72,6 +77,12 @@ def baseline_at(root, trial, ds, dmd, idx=None):
     return out
 
 
+def cache_source(a):
+    """What a cache file's movies come from; tools/gfp_mse.py builds the same string."""
+    return json.dumps({"trial": a.trial, "copy": str((a.inj / a.copy).resolve()), "orig": str((a.inj / a.orig).resolve())},
+                      sort_keys=True)
+
+
 def load_dmd(a, dmd, roots):
     """Movies at the pixels valid in every model's baselines (cached), kept frames, source cores."""
     valid = None
@@ -80,11 +91,12 @@ def load_dmd(a, dmd, roots):
             v, shape = baseline_at(root, a.trial, ds, dmd)
             valid = v if valid is None else (valid & v)
     idx = np.flatnonzero(valid.ravel())
-    cf = a.cache / f"{a.trial}DMD{dmd}_{len(idx)}.npz"
+    src = cache_source(a)
+    cf = a.cache / f"{a.trial}DMD{dmd}_{len(idx)}_{hashlib.sha1(src.encode()).hexdigest()[:8]}.npz"
     if cf.exists():
         z = np.load(cf)
-        if np.array_equal(z["idx"], idx):
-            return {k: z[k] for k in z.files} | {"shape": shape}
+        if "source" in z.files and str(z["source"]) == src and np.array_equal(z["idx"], idx):
+            return {k: z[k] for k in z.files if k != "source"} | {"shape": shape}
     mi, di, hz = movie_at(a.inj, a.trial, a.copy, dmd, idx)
     mo, do, _ = movie_at(a.inj, a.trial, a.orig, dmd, idx)
     keep = ~(di | do)
@@ -92,7 +104,7 @@ def load_dmd(a, dmd, roots):
     keep[:e] = False
     keep[-e:] = False
     a.cache.mkdir(parents=True, exist_ok=True)
-    np.savez(cf, idx=idx, m_inj=mi, m_orig=mo, keep=keep, hz=hz)
+    np.savez(cf, idx=idx, m_inj=mi, m_orig=mo, keep=keep, hz=hz, source=src)
     return {"idx": idx, "m_inj": mi, "m_orig": mo, "keep": keep, "hz": hz, "shape": shape}
 
 
@@ -170,13 +182,13 @@ def main():
             t3 = np.array_split(order, 3)
             for lab, o in zip(("leak, least active third", "leak, middle third", "leak, most active third"), t3):
                 r[lab] = sum((bi_m[cs[j]] - bo_m[cs[j]]).sum() for j in o) / sum(inj[cs[j]].sum() for j in o)
-            # following: within-source temporal slope, 8-frame means
+            # following: within-source temporal slope, 8-frame means centered on kept frames
             num = den = 0.0
             for c in cs:
                 x = np.where(k, (mi[:, c] - mo[:, c]).mean(1), np.nan)
                 y = np.where(k, np.nanmean(bi[:, c] - bo[:, c], 1), np.nan)
                 xs, ys = smooth(x[:, None])[:, 0], smooth(y[:, None])[:, 0]
-                g = np.isfinite(xs) & np.isfinite(ys)
+                g = np.isfinite(xs) & np.isfinite(ys) & k
                 xs, ys = xs[g] - xs[g].mean(), ys[g] - ys[g].mean()
                 num += (xs * ys).sum()
                 den += (xs * xs).sum()

@@ -3,7 +3,8 @@ its cache; docs/plan.md, "S6", 2026-11-26).
 
 8-frame means of (truth - baseline), where the truth is the ORIGINAL movie (no activity; its photon noise is common
 to every model, so differences between models are meaningful). Reported against the trial mean image, as in the
-held-out evaluation: 100 * (mse8_model / mse8_mean_image - 1), lower is better.
+held-out evaluation: 100 * (mse8_model / mse8_mean_image - 1), lower is better; as there, an 8-frame mean counts
+only where its center frame is kept.
   original, all pixels      baseline of the original movie
   copy, source cores        baseline of the copy with injected events, at the injected sources' cores (peak pixel
                             and the valid pixels within 1.5 px); the mean image there is the copy's (it holds the
@@ -13,10 +14,12 @@ held-out evaluation: 100 * (mse8_model / mse8_mean_image - 1), lower is better.
 usage: python tools/gfp_mse.py NAME=BASELINE_ROOT [...] --inj <injection dir> --cache <cache dir>
                                [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig]
 
-Same folders as tools/gfp_check.py, which must have run first with the same models (or a superset whose valid
-pixels these models cover): of its cache files, the one with the most pixels valid in every model given is used.
+Same folders as tools/gfp_check.py, which must have run first on the same movies with the same models (or a
+superset whose valid pixels these models cover): of its cache files made from these movies, the one with the most
+pixels valid in every model given is used.
 """
 import argparse
+import json
 from pathlib import Path
 
 import h5py
@@ -55,12 +58,18 @@ def main():
     p.add_argument("--orig", default="847983_orig", help="folder of the original")
     a = p.parse_args()
     models = [m.split("=", 1) for m in a.models]
+    # tools/gfp_check.py tags each cache file with the movies it comes from (cache_source there)
+    src = json.dumps({"trial": a.trial, "copy": str((a.inj / a.copy).resolve()), "orig": str((a.inj / a.orig).resolve())},
+                     sort_keys=True)
+    half = SMOOTH // 2  # smooth's output j is the mean of frames j..j+SMOOTH-1, centered on frame j + SMOOTH // 2
     rows = {}
     for dmd in (1, 2):
-        # the cache whose pixels are valid in every model given (the largest that all models cover)
+        # the cache of these movies whose pixels are valid in every model given (the largest that all models cover)
         best = None
         for cf in sorted(a.cache.glob(f"{a.trial}DMD{dmd}_*.npz")):
             z = np.load(cf)
+            if "source" not in z.files or str(z["source"]) != src:
+                continue
             idx = z["idx"]
             good = True
             for _, root in models:
@@ -71,18 +80,21 @@ def main():
             if good and (best is None or len(idx) > len(best["idx"])):
                 best = {k: z[k] for k in z.files}
         if best is None:
-            raise SystemExit(f"no cache file in {a.cache} covers every model on DMD{dmd}: run tools/gfp_check.py first")
+            raise SystemExit(f"no cache file of these movies in {a.cache} covers every model on DMD{dmd}: "
+                             "run tools/gfp_check.py first")
         z = best
         idx, mi, mo, keep = z["idx"], z["m_inj"], z["m_orig"], z["keep"]
         with h5py.File(a.inj / a.copy / "injection_truth.h5", "r") as f:
             pk = f[f"path{dmd}/peak_pixel_rc"][:]
-        _, shape = baseline(models[0][1], a.trial, a.orig, dmd, idx[:1])
+        with h5py.File(Path(models[0][1]) / a.orig / f"{a.trial}DMD{dmd}_BASELINE-80Hz.h5", "r") as f:
+            shape = f["baseline"].shape
         pa, pb = np.divmod(idx, shape[2])  # pa = MATLAB col, pb = MATLAB row
         core = np.unique(np.concatenate([np.flatnonzero(np.hypot(pa - c, pb - r) <= 1.5) for r, c in pk]))
         mean_o, mean_i = np.nanmean(mo[keep], 0), np.nanmean(mi[keep], 0)
 
         def mse(base, px=slice(None)):
-            return float(np.nanmean(smooth((mo - base)[:, px], keep) ** 2))
+            s8 = smooth((mo - base)[:, px], keep)
+            return float(np.nanmean(s8[keep[half:half + len(s8)]] ** 2))
 
         ref_all, ref_core = mse(mean_o[None]), mse(mean_i[None], core)
         rows.setdefault("oracle (the original's mean image)", []).append((0.0, 100 * (mse(mean_o[None], core) / ref_core - 1)))

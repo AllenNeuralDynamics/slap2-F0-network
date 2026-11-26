@@ -2875,7 +2875,7 @@ So at footprints the real target (movie − GIAnT's activity) is in doubt. The s
 
 **GFP control with injected events.**
 
-**Method.** 847983 is a GFP session. Its copy has injected events (GIAnT-Python's injection tool, GIAnT-Python#22): 60 sources per path, 1 Hz, sizes 0.25–8 in the tool's units. The test uses trial 1 of both paths, where the copy's registration equals the original's within 0.02 px, so copy − original is the injected activity at every pixel, and the original movie is the true baseline plus noise. Each model's baseline comes from `predict-registered` on both movies. About 13,500 valid pixels per path; the first and last 2 s and discarded frames are left out. A source's core is its peak pixel and the valid pixels within 1.5 px.
+**Method.** 847983 is a GFP session. Its copy has injected events (GIAnT-Python's injection tool, GIAnT-Python#22): 60 sources per path, 1 Hz, sizes 0.25–8 in the tool's units. The test uses trial 1 of both paths, where the copy's registration grid matches the original's within 0.02 px and its frame-wise motion differs by 0.02–0.03 px RMS, so copy − original is the injected activity at every pixel up to that residual (8 px or more from any source, where nothing is injected, it averages 0.00% of the movie), and the original movie is the true baseline plus noise. Each model's baseline comes from `predict-registered` on both movies. About 13,500 valid pixels per path; the first and last 2 s and discarded frames are left out. A source's core is its peak pixel and the valid pixels within 1.5 px.
 
 | | s6_ft | s6_wise | deep2_wise | s6_pre |
 |---|---|---|---|---|
