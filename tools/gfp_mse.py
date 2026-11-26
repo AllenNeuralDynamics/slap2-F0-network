@@ -4,7 +4,7 @@ its cache; docs/plan.md, "S6", 2026-11-26).
 8-frame means of (truth - baseline), where the truth is the ORIGINAL movie (no activity; its photon noise is common
 to every model, so differences between models are meaningful). Reported against the trial mean image, as in the
 held-out evaluation: 100 * (mse8_model / mse8_mean_image - 1), lower is better; as there, an 8-frame mean counts
-only where its center frame is kept.
+only where its center sample is observed (a kept frame, and not a sample missing at that pixel).
   original, all pixels      baseline of the original movie
   copy, source cores        baseline of the copy with injected events, at the injected sources' cores (peak pixel
                             and the valid pixels within 1.5 px); the mean image there is the copy's (it holds the
@@ -93,8 +93,11 @@ def main():
         mean_o, mean_i = np.nanmean(mo[keep], 0), np.nanmean(mi[keep], 0)
 
         def mse(base, px=slice(None)):
-            s8 = smooth((mo - base)[:, px], keep)
-            return float(np.nanmean(s8[keep[half:half + len(s8)]] ** 2))
+            res = (mo - base)[:, px]
+            s8 = smooth(res, keep)
+            # count a window only where its center sample is observed: a kept frame and a finite residual there
+            center = keep[half:half + len(s8), None] & np.isfinite(res[half:half + len(s8)])
+            return float(np.nanmean(s8[center] ** 2))
 
         ref_all, ref_core = mse(mean_o[None]), mse(mean_i[None], core)
         rows.setdefault("oracle (the original's mean image)", []).append((0.0, 100 * (mse(mean_o[None], core) / ref_core - 1)))

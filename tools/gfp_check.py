@@ -15,8 +15,10 @@ up to that residual (the rings beyond 8 px, where nothing is injected, measure i
   bias at sources    on the copy against the truth (the original movie): sum(M_orig - B_copy) / sum(M_orig)
   rings              the same quantities in rings around the source peaks (beyond 5 px nothing is injected)
 
-The first and last 2 s of the trial and frames discarded for motion in either movie are left out; an 8-frame
-mean counts only where its center frame is kept, as in the held-out evaluation.
+The first and last 2 s of the trial and frames discarded for motion in either movie are left out, and so are
+single samples missing at a valid pixel in either movie: every per-pixel mean is over the samples observed in
+both movies and finite in both baselines. An 8-frame mean counts only where its center frame is observed, as in
+the held-out evaluation.
 
 usage: python tools/gfp_check.py NAME=BASELINE_ROOT [...] --inj <injection dir> --cache <cache dir>
                                  [--trial E1T1] [--copy 847983_inj] [--orig 847983_orig] [--max_copy_shift 0.05]
@@ -48,6 +50,12 @@ def smooth(x, n=SMOOTH):
     num = np.apply_along_axis(lambda v: np.convolve(v, k, mode="same"), 0, np.where(ok, x, 0.0))
     den = np.apply_along_axis(lambda v: np.convolve(v, k, mode="same"), 0, ok.astype(float))
     return np.where(den >= n / 2, num / np.maximum(den, 1), np.nan)
+
+
+def jmean(x, J):
+    """Per-pixel mean of x (frames, pixels) over the samples where J is true; NaN where there are none."""
+    n = J.sum(0)
+    return np.where(n > 0, np.where(J, x, 0.0).sum(0, dtype=np.float64) / np.maximum(n, 1), np.nan)
 
 
 def movie_at(inj, trial, ds, dmd, idx):
@@ -161,8 +169,10 @@ def main():
         k = d["keep"]
         mi, mo = d["m_inj"], d["m_orig"]
         cs = cores(a, dmd, d)
-        mean_o = np.nanmean(mo[k], 0)
-        inj = np.nanmean(mi[k], 0) - mean_o  # injected mean activity per pixel
+        # per-pixel means over the samples observed in both movies: valid pixels can miss single samples
+        fin = k[:, None] & np.isfinite(mo) & np.isfinite(mi)
+        mean_o = jmean(mo, fin)
+        inj = jmean(mi, fin) - mean_o  # injected mean activity per pixel
         bright = np.argsort(np.argsort(mean_o)) / len(mean_o)
         core_px = np.unique(np.concatenate(cs))
         src_act = np.array([inj[c].mean() for c in cs])
@@ -179,32 +189,39 @@ def main():
             bo = baseline_at(root, a.trial, a.orig, dmd, d["idx"])
             bi = baseline_at(root, a.trial, a.copy, dmd, d["idx"])
             r = {"dmd": dmd}
-            bo_m, bi_m = np.nanmean(bo[k], 0), np.nanmean(bi[k], 0)
-            ok = np.isfinite(bo_m) & np.isfinite(bi_m)
+            # every per-pixel mean over the same samples: observed in both movies, finite in both baselines
+            J = fin & np.isfinite(bo) & np.isfinite(bi)
+            mo_m, bo_m, bi_m = jmean(mo, J), jmean(bo, J), jmean(bi, J)
+            inj_m = jmean(mi, J) - mo_m
+            ok = np.isfinite(mo_m) & np.isfinite(bo_m) & np.isfinite(bi_m)
             for lab, m in (("all", ok), ("dim third", ok & (bright < 1 / 3)), ("mid third", ok & (bright >= 1 / 3) & (bright < 2 / 3)),
                            ("bright third", ok & (bright >= 2 / 3))):
-                r["bias " + lab] = 100 * (mean_o[m] - bo_m[m]).sum() / mean_o[m].sum()
+                r["bias " + lab] = 100 * (mo_m[m] - bo_m[m]).sum() / mo_m[m].sum()
             # control: the same quantities in rings around the source peaks (beyond 5 px nothing is injected)
             for lo, hi in ((0, 1.5), (1.5, 3), (3, 5), (5, 8), (8, 1e9)):
                 s_ = ok & (dist >= lo) & (dist < hi)
-                n_ = mean_o[s_].sum()
+                n_ = mo_m[s_].sum()
                 r[f"ring {lo:g}-{min(hi, 99):g} px: injected / B_orig - truth / B_copy - truth"] = (
-                    100 * inj[s_].sum() / n_, 100 * (bo_m - mean_o)[s_].sum() / n_, 100 * (bi_m - mean_o)[s_].sum() / n_)
+                    100 * inj_m[s_].sum() / n_, 100 * (bo_m - mo_m)[s_].sum() / n_, 100 * (bi_m - mo_m)[s_].sum() / n_)
             cp = core_px[ok[core_px]]
-            r["bias cores, original"] = 100 * (mean_o[cp] - bo_m[cp]).sum() / mean_o[cp].sum()
-            r["bias cores, copy vs truth"] = 100 * (mean_o[cp] - bi_m[cp]).sum() / mean_o[cp].sum()
-            r["leak"] = (bi_m[cp] - bo_m[cp]).sum() / inj[cp].sum()
+            r["bias cores, original"] = 100 * (mo_m[cp] - bo_m[cp]).sum() / mo_m[cp].sum()
+            r["bias cores, copy vs truth"] = 100 * (mo_m[cp] - bi_m[cp]).sum() / mo_m[cp].sum()
+            r["leak"] = (bi_m[cp] - bo_m[cp]).sum() / inj_m[cp].sum()
             order = np.argsort(src_rel)
             t3 = np.array_split(order, 3)
             for lab, o in zip(("leak, least active third", "leak, middle third", "leak, most active third"), t3):
-                r[lab] = sum((bi_m[cs[j]] - bo_m[cs[j]]).sum() for j in o) / sum(inj[cs[j]].sum() for j in o)
-            # following: within-source temporal slope, 8-frame means centered on kept frames
+                cc = [cs[j][ok[cs[j]]] for j in o]
+                r[lab] = sum((bi_m[c] - bo_m[c]).sum() for c in cc) / sum(inj_m[c].sum() for c in cc)
+            # following: within-source temporal slope, 8-frame means centered on observed kept frames; each frame's
+            # copy - original and baseline change are means over the same core samples
             num = den = 0.0
             for c in cs:
-                x = np.where(k, (mi[:, c] - mo[:, c]).mean(1), np.nan)
-                y = np.where(k, np.nanmean(bi[:, c] - bo[:, c], 1), np.nan)
+                Jc = J[:, c]
+                n = Jc.sum(1)
+                x = np.where(n > 0, np.where(Jc, mi[:, c] - mo[:, c], 0.0).sum(1) / np.maximum(n, 1), np.nan)
+                y = np.where(n > 0, np.where(Jc, bi[:, c] - bo[:, c], 0.0).sum(1) / np.maximum(n, 1), np.nan)
                 xs, ys = smooth(x[:, None])[:, 0], smooth(y[:, None])[:, 0]
-                g = np.isfinite(xs) & np.isfinite(ys) & k
+                g = np.isfinite(xs) & np.isfinite(ys) & (n > 0)
                 xs, ys = xs[g] - xs[g].mean(), ys[g] - ys[g].mean()
                 num += (xs * ys).sum()
                 den += (xs * xs).sum()
