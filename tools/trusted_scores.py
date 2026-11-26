@@ -7,7 +7,8 @@ labeled and background classes.
 usage: python tools/trusted_scores.py EVAL_DIR [--ckpts a,b,...] [--pairs a-b,...]
                                       [--val 878030,...] [--test 776270,...]
 
-EVAL_DIR holds eval.csv from `slap2-f0 evaluate` with the kinds real, free and freedim. The checkpoints are those
+EVAL_DIR holds eval.csv from `slap2-f0 evaluate` with the kinds real, free and freedim and one session per mouse
+(a file with two sessions of one mouse is refused). The checkpoints are those
 in eval.csv, in the order they first appear (--ckpts picks and orders them). --pairs lists the paired differences
 of the labeled-pixel score to print (default: each checkpoint against each later one). The split defaults to
 tools/heldout_eval.py's.
@@ -31,7 +32,13 @@ def main():
     with open(a.root / "eval.csv") as fh:
         rows = list(csv.DictReader(fh))
     test, val = a.test.split(","), a.val.split(",")
-    R = {(r["checkpoint"], r["session"].split("_")[0], r["kind"]): r for r in rows}
+    R = {}
+    for r in rows:
+        key = (r["checkpoint"], r["session"].split("_")[0], r["kind"])
+        if key in R:
+            raise SystemExit(f"eval.csv has more than one row for checkpoint {key[0]}, mouse {key[1]}, kind {key[2]}: "
+                             "scores are per mouse, so each mouse needs exactly one session")
+        R[key] = r
     cks = a.ckpts.split(",") if a.ckpts else list(dict.fromkeys(r["checkpoint"] for r in rows))
     pairs = [tuple(x.split("-", 1)) for x in a.pairs.split(",")] if a.pairs else list(combinations(cks, 2))
 
