@@ -1,7 +1,8 @@
 """Full-trial baselines from saved checkpoints, for viewing and comparison.
 
 ``slap2-f0 predict ROOT --ckpt name=path [name=path ...] --out DIR`` runs each
-checkpoint over whole trials and writes one HDF5 file per trial,
+checkpoint (or ``name=avg:SPEC;SPEC;...``, a weighted average of checkpoints
+made in memory, as in ``evaluate``) over whole trials and writes one HDF5 file per trial,
 DIR/<session>/<path>/<trial>.h5 (session as in training: the trial's label,
 else its grandparent folder), which ``slap2-f0 view`` displays.
 
@@ -60,14 +61,20 @@ from .data import WindowConfig
 from .io import TrialFile, list_trials
 from .model import SlabBlindSpotNet, config_from_dict, make_inputs
 from .stats import load_stats
-from .train import silo_baseline
+from .train import averaged_checkpoint, silo_baseline
 
 FORMAT_VERSION = 1
 FRAME_RATE = 80.0  # exported trials are on an 80 Hz grid (see io.py)
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> tuple[SlabBlindSpotNet, WindowConfig, dict]:
-    ck = torch.load(path, map_location=device, weights_only=False)
+    """A saved checkpoint, or ``avg:SPEC;SPEC;...``: a weighted average of
+    checkpoints made in memory (``train.averaged_checkpoint``, as in
+    ``evaluate``), e.g. a WiSE-FT blend of a fine-tuning run's kept steps."""
+    if str(path).startswith("avg:"):
+        ck = averaged_checkpoint(str(path)[4:])
+    else:
+        ck = torch.load(path, map_location=device, weights_only=False)
     model = SlabBlindSpotNet(config_from_dict(ck["config"])).to(device).eval()
     model.load_state_dict(ck["model"])
     return model, WindowConfig(**ck["window"]), ck
@@ -328,13 +335,23 @@ def run(args: argparse.Namespace) -> None:
         files = [f for f in files if any(k in f.relative_to(root).as_posix() for k in keys)]
     if not files:
         raise SystemExit(f"no trial files under {root}" + (f" matching {args.files}" if args.files else ""))
+    specs, n_avg = [], 0
+    for s in args.ckpt or []:
+        if s.startswith("avg:"):  # unnamed average (avg1, avg2, ...): its weights' "=" are not a name
+            n_avg += 1
+            specs.append((f"avg{n_avg}", s))
+        else:
+            specs.append(tuple(s.split("=", 1)) if "=" in s else (Path(s).stem, s))
+    names = [n for n, _ in specs] + ([] if args.no_silo else ["silo"])
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:  # each baseline is stored under its name: a second one would replace the first
+        raise SystemExit(f"--ckpt names must differ (and not be 'silo' without --no_silo): {', '.join(twice)} given twice")
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     precision = "fp32" if args.no_amp else args.precision
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     stats = load_stats(files, args.stats_cache or (out / "stats"), workers=args.workers)
     print(f"stats for {len(files)} trials in {time.time() - t0:.0f} s; device {device}", flush=True)
-    specs = [(s.split("=", 1) if "=" in s else (Path(s).stem, s)) for s in (args.ckpt or [])]
     models = []
     for name, path in specs:
         model, wcfg, ck = load_checkpoint(path, device)
@@ -399,7 +416,9 @@ def run(args: argparse.Namespace) -> None:
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("root", help="folder with exported trial files (any depth)")
-    p.add_argument("--ckpt", nargs="*", default=[], help="name=path of each checkpoint, best first")
+    p.add_argument("--ckpt", nargs="*", default=[],
+                   help="name=path of each checkpoint, best first; the path can be avg:SPEC;SPEC;... for a weighted "
+                        "average made in memory (SPEC: path, path=weight or a glob, as in evaluate)")
     p.add_argument("--out", required=True, help="output folder (one file per trial, same relative paths)")
     p.add_argument("--files", default="", help="comma-separated parts of trial paths to keep "
                                                "(e.g. 780125_2025-03-14_09-30-06/Path1/trial_002); default all")
