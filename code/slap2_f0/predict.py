@@ -335,12 +335,6 @@ def run(args: argparse.Namespace) -> None:
         files = [f for f in files if any(k in f.relative_to(root).as_posix() for k in keys)]
     if not files:
         raise SystemExit(f"no trial files under {root}" + (f" matching {args.files}" if args.files else ""))
-    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
-    precision = "fp32" if args.no_amp else args.precision
-    out.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    stats = load_stats(files, args.stats_cache or (out / "stats"), workers=args.workers)
-    print(f"stats for {len(files)} trials in {time.time() - t0:.0f} s; device {device}", flush=True)
     specs, n_avg = [], 0
     for s in args.ckpt or []:
         if s.startswith("avg:"):  # unnamed average (avg1, avg2, ...): its weights' "=" are not a name
@@ -348,6 +342,16 @@ def run(args: argparse.Namespace) -> None:
             specs.append((f"avg{n_avg}", s))
         else:
             specs.append(tuple(s.split("=", 1)) if "=" in s else (Path(s).stem, s))
+    names = [n for n, _ in specs] + ([] if args.no_silo else ["silo"])
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:  # each baseline is stored under its name: a second one would replace the first
+        raise SystemExit(f"--ckpt names must differ (and not be 'silo' without --no_silo): {', '.join(twice)} given twice")
+    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    precision = "fp32" if args.no_amp else args.precision
+    out.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    stats = load_stats(files, args.stats_cache or (out / "stats"), workers=args.workers)
+    print(f"stats for {len(files)} trials in {time.time() - t0:.0f} s; device {device}", flush=True)
     models = []
     for name, path in specs:
         model, wcfg, ck = load_checkpoint(path, device)

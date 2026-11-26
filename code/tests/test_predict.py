@@ -238,6 +238,11 @@ def test_predict_takes_averaged_checkpoints(tmp_path):
     ok = np.isfinite(b["saved"])
     assert ok.any() and np.array_equal(b["mix"][ok], b["saved"][ok]) and np.array_equal(b["avg1"][ok], b["saved"][ok])
     assert not np.allclose(b["mix"][ok], b["a"][ok], rtol=1e-3) and not np.allclose(b["mix"][ok], b["b"][ok], rtol=1e-3)
+    # two baselines under one name would overwrite each other: refused before any inference
+    for ckpt in ([f"avg1={cks[0]}", spec], [f"a={cks[0]}", f"a={cks[1]}"], [f"silo={cks[0]}"]):
+        with pytest.raises(SystemExit, match="names must differ"):
+            main(["predict", str(tmp_path / "data"), "--ckpt", *ckpt, "--out", str(tmp_path / "pred_dup")])
+    assert not (tmp_path / "pred_dup").exists()
 
 
 def test_out_of_memory_splits_tiles_in_time(tmp_path):
