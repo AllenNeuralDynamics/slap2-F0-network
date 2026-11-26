@@ -211,6 +211,35 @@ def test_predict_and_view(tmp_path):
         server.server_close()
 
 
+def test_predict_takes_averaged_checkpoints(tmp_path):
+    """predict --ckpt name=avg:...: the baseline is that of the saved average
+    (slap2-f0 average), named or not, and differs from either checkpoint's."""
+    d = tmp_path / "data" / "sessA" / "Path1"
+    d.mkdir(parents=True)
+    _trial(d / "trial_000.h5", 10)
+    model, wcfg = _model(box=True)
+    cks = []
+    for k in range(2):
+        with torch.no_grad():
+            for p in model.parameters():
+                p.add_(0.05 * k * torch.randn_like(p))
+        cks.append(tmp_path / f"ck{k}.pt")
+        torch.save({"model": model.state_dict(), "config": asdict(model.cfg), "window": asdict(wcfg), "step": k}, cks[k])
+    saved = tmp_path / "wise.pt"
+    main(["average", str(saved), f"{cks[0]}=0.25", f"{cks[1]}=0.75"])
+    out = tmp_path / "pred"
+    spec = f"avg:{cks[0]}=0.25;{cks[1]}=0.75"
+    main(["predict", str(tmp_path / "data"), "--ckpt", f"a={cks[0]}", f"b={cks[1]}", f"saved={saved}", f"mix={spec}", spec,
+          "--out", str(out), "--out_frames", "32", "--no_silo"])
+    with h5py.File(out / "sessA" / "Path1" / "trial_000.h5", "r") as f:
+        assert list(f.attrs["models"]) == ["a", "b", "saved", "mix", "avg1"]
+        b = {k: f[f"baseline/{k}"][:].astype(np.float32) for k in f.attrs["models"]}
+        assert f["baseline/mix"].attrs["checkpoint"] == spec and f["baseline/mix"].attrs["step"] == 0
+    ok = np.isfinite(b["saved"])
+    assert ok.any() and np.array_equal(b["mix"][ok], b["saved"][ok]) and np.array_equal(b["avg1"][ok], b["saved"][ok])
+    assert not np.allclose(b["mix"][ok], b["a"][ok], rtol=1e-3) and not np.allclose(b["mix"][ok], b["b"][ok], rtol=1e-3)
+
+
 def test_out_of_memory_splits_tiles_in_time(tmp_path):
     """A tile that runs out of GPU memory is split in two in time (a batch
     first into single tiles); the output is the same."""
