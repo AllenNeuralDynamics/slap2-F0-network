@@ -2798,3 +2798,128 @@ They are **15.5% of the valid pixels** (median; 2.7–21.8%), so the real loss c
   - Unchanged definitions give identical numbers only on identical windows. A draw whose loss region has under 5% weighted pixels is drawn again, so the weights can change which windows are scored. On 192 real windows of 804730, none changed.
 
 **Viewer.** `slap2-f0 view --w_unfitted` defaults to 1, so the target panels no longer blank these pixels. The QC line counts them and says whether they are in the loss, and hovering a pixel says so too. `--w_unfitted 0` shows what training up to S4 saw.
+
+## S6: full training on the re-exported data; the real targets are not ground truth; the fine-tuned model is locked in (2026-11-26)
+
+**In short.** The first run on the re-exported data (S6) gives no measurable gain on the real score, which cannot separate the models. Against the real targets the network seemed to leave activity in the baseline at active sources. The user judged the opposite from example traces: the network behaves well, and the targets are overfit there. Ground truth (a GFP control with injected events) agrees: every model's baseline is too low at sources, not too high. On the measures that do not rest on GIAnT's activity fit, the fine-tuned model is the best of the four, and it is locked in as the current model.
+
+**What the run was trained on.**
+
+- **GIAnT change A is in:** the debias refit holds the variance fixed, as GIAnT's default (GIAnT-MATLAB#58, #59; see "Activity in the training targets" above).
+- **The exporter writes the activity unscaled** (#25), with the blur chosen by shape and the ring-event QC attributes.
+- **Re-export:** a pilot of 5 sessions, then the other 35. Together 40 sessions, 80 session-paths, 3,265 trials and 19.2 h of path-time, with no trial errors.
+  - Ring-event QC, medians over the 80 session-paths: activity / movie event amplitude 1.16 at the core (10–90%: 1.02–1.40) and 0.73 at 1.5–2.5 px; movie-on-activity slope 1.00.
+- **Labeled pixels outside every footprint weigh 1** (the section above). S6 is the first full run with it.
+
+**The run (S6_full).**
+
+- **Recipe:** the deep architecture (the `train` defaults), pretraining on simulations and 1,700 fine-tuning steps on real and simulated windows, as S4_deep2. 32 sessions for training, 4 for validation (878030, 794237, 834788, 804730), 4 held out (776270, 810196, 829704, 876767), the split of S4. 7.2 h.
+- **Pretraining:** best `fast_balanced` 0.499 at step 2,500 (S4_deep2: 0.493 at step 3,000).
+- **Fine-tuning:** the selection score ((real + 0.1 × fast) / 1.1) was best at step 0 (0.9312; step 1,700: 0.9327), so the run's `best.pt` is the pretrained model. The real balanced score improved on all four validation sessions (mean 0.9744 → 0.9722); the fast-simulation score got worse (0.499 → 0.538).
+
+**Held-out evaluation.**
+
+Four checkpoints: s6_pre (S6 pretrained, fine-tuning step 0), s6_ft (fine-tuned, step 1,700), s6_wise (their WiSE-FT 0.5 average, the delivery rule so far) and deep2_wise (the current model, trained on the old exports). The same 8 sessions as S4, in their re-exports, 96 windows per session and kind. The windows differ from S4's, so the numbers are not paired with the S4 tables.
+
+**Balanced score on the test mice** (% vs the reference: the mean image for real windows, the oracle for simulated ones; lower is better):
+
+| checkpoint | real | sim | fast | free | fastdim | freedim |
+|---|---|---|---|---|---|---|
+| s6_pre | −3.30 | +39.4 | +11.7 | −17.8 | +21.8 | −5.9 |
+| s6_ft | −3.44 | +57.2 | +21.2 | −26.4 | +26.3 | −18.8 |
+| s6_wise | −3.36 | +49.7 | +16.6 | −26.4 | +22.8 | −17.6 |
+| deep2_wise | −3.41 | +46.0 | +14.4 | −21.8 | +23.9 | −11.4 |
+
+**Differences** (points, 95% hierarchical bootstrap):
+
+| | real | sim | fast | free | fastdim | freedim |
+|---|---|---|---|---|---|---|
+| s6_wise − deep2_wise | +0.05 [−0.04, +0.18] | +3.8 [−2.0, +10.7] | +2.2 [−1.6, +6.8] | −4.6 [−8.3, −2.1] | −1.1 [−3.3, +1.6] | −6.2 [−11.8, −2.7] |
+| s6_ft − s6_pre | −0.15 [−0.36, +0.08] | +17.7 [+8.4, +28.7] | +9.5 [+5.2, +15.0] | −8.6 [−11.6, −5.0] | +4.6 [+0.8, +9.8] | −12.9 [−16.7, −9.5] |
+
+- **The real score cannot separate the models.** The four are within 0.15 points. For scale: the oracle (the best constant, which knows GIAnT's activity) scores −4.70 and SiLo's own baseline −1.01.
+- **The new data change little for the same recipe.** s6_wise against deep2_wise: better on activity-free simulations, not measurably different elsewhere on the test mice. On the validation mice it is worse on simulations with activity (sim +5.8 [+1.6, +12.0], fast +6.4 [+1.7, +11.6]).
+- **Fine-tuning on real data** helps on activity-free simulations and costs on simulations with activity, as in every run so far.
+
+**Offsets against the target.**
+
+Target minus baseline as a share of the target, test mice (positive: the baseline is below the target):
+
+| pixels | kind | s6_pre | s6_ft | s6_wise | deep2_wise |
+|---|---|---|---|---|---|
+| footprints | real | −1.5 | −3.4 | −2.8 | −2.4 |
+| footprints | sim | −2.1 | −3.7 | −3.2 | −2.8 |
+| labeled, outside footprints | real | +3.4 | +1.8 | +2.8 | +2.9 |
+| background | real | +0.5 | −0.6 | −0.4 | +0.1 |
+| footprints | free | +3.6 | +2.3 | +2.7 | +3.1 |
+| footprints | freedim | +4.8 | +3.1 | +3.6 | +4.2 |
+
+- **Fine-tuning shifts the baseline up by 1.0–1.9% of the target** in every pixel class and kind.
+- **Without activity every model is low,** by 2–5%.
+- **At footprints with activity the baseline is above the target,** and it follows part of the activity: the slope of (baseline − target) on the activity, 8-frame means, is 0.18–0.23 on real and simulated windows alike (s6_pre 0.18, deep2_wise 0.21, s6_wise 0.22, s6_ft 0.23; the mean image 0.34–0.39).
+- **By activity level,** in 12 predicted trials, footprint pixels in thirds by fitted activity: s6_wise is 3.0% and 1.2% below the target in the two less active thirds and 12.9% above it in the most active third, where the mean activity is about 25% of the target. The other models are alike (deep2_wise +3.3 / +1.6 / −12.0, s6_pre +3.9 / +2.3 / −11.1).
+- **By source,** of the 8 most active sources in each of 4 held-out trials, 28 of 32 have a baseline more than 5% above the target (median 16%). Sources with large, well-separated events are within 5%. Sources with dense, small events keep a baseline near the mean image.
+
+**These offsets were first read as the network's error:** it would remove only about half of the mean activity at the most active pixels. That reading does not hold (next).
+
+**The targets are not ground truth.**
+
+**The user, after example traces at active sources (2026-11-26):** "From the figures, I think the network's behavior is good. The target derived from SiLO seems to have overfit activity to small fluctuations and shrunk the baseline in the dim sources. We shouldn't interpret these as absolute ground truth when evaluating the network. In the future, we will re-extract training data with activity inferred with the network."
+
+So at footprints the real target (movie − GIAnT's activity) is in doubt. The simulations with activity are in doubt too, though their baseline is known exactly: their activity is GIAnT's fitted activity, small fluctuations included, so they ask the network to do what the targets do.
+
+**What does not rest on the activity fit:**
+- a GFP control (no activity), and a copy of it with injected events of known size;
+- real labeled pixels outside every footprint, where the target is the movie itself;
+- activity-free simulations.
+
+**GFP control with injected events.**
+
+**Method.** 847983 is a GFP session. Its copy has injected events (GIAnT-Python's injection tool, GIAnT-Python#22): 60 sources per path, 1 Hz, sizes 0.25–8 in the tool's units. The test uses trial 1 of both paths, where the copy's registration equals the original's within 0.02 px, so copy − original is the injected activity at every pixel, and the original movie is the true baseline plus noise. Each model's baseline comes from `predict-registered` on both movies. About 13,500 valid pixels per path; the first and last 2 s and discarded frames are left out. A source's core is its peak pixel and the valid pixels within 1.5 px.
+
+| | s6_ft | s6_wise | deep2_wise | s6_pre |
+|---|---|---|---|---|
+| baseline below the movie, original (no activity), all pixels | 2.3% | 2.8% | 2.9% | 3.6% |
+| baseline below the truth at the cores, copy | 3.0% | 4.0% | 5.2% | 5.9% |
+| share of the injected mean activity removed at the cores (100% is right) | 112% | 118% | 135% | 134% |
+| 8-frame error vs the mean image, original, all pixels | −0.25% | +0.11% | +0.18% | +0.83% |
+| 8-frame error vs the mean image at the cores, copy | −2.2% | −1.5% | −0.2% | +0.4% |
+
+- **The injected mean activity is 6.9% of the movie at the cores.** A baseline that ignored it would stay where it is on the original. Instead every model's baseline drops: it removes more than the injected activity.
+- **The drop is confined to the cores.** Beyond 1.5 px of a source peak, the copy's baseline differs from the original's by at most 0.5% of the movie. For deep2_wise it is 2.8, 2.5, 2.4 and 3.0% below the movie at 1.5–3, 3–5, 5–8 and beyond 8 px, against 2.8–3.1% on the original. At 3–8 px, where almost nothing is injected, it is 0.3–0.5% higher than on the original, for every model.
+- **The baseline does not follow the events in time:** the within-source slope of the baseline's change on the injected activity, 8-frame means, is 0.00 for every model.
+- **The last row's best possible value is −3.7%** (the original's own mean image as the baseline).
+- **Limits:** one session, two trial-paths, 120 sources, and sparse events only. Dense, small activity, where the targets are most in doubt, is not tested.
+
+**The other measures without the activity fit.**
+
+Mean over the 8 evaluated mice (8-frame error vs the reference; lower is better):
+
+| | s6_ft | s6_wise | deep2_wise | s6_pre |
+|---|---|---|---|---|
+| real, labeled pixels outside footprints, vs the mean image | −5.0% | −3.0% | −2.7% | −2.3% |
+| baseline below the movie there | 1.8% | 2.6% | 2.8% | 3.3% |
+| activity-free simulations at footprints, vs the oracle | −28.5% | −26.0% | −21.7% | −13.1% |
+| baseline below the truth, activity-free simulations, all classes | 2.0% | 2.4% | 2.7% | 3.2% |
+
+- On the real labeled pixels s6_ft is the best model in 8 of 8 mice, by 0.2–8.3 points over deep2_wise. The largest gap is 776270, where the other three are 10% worse than the mean image and s6_ft is 1.4% worse.
+
+**Locked in: S6 fine-tuned.**
+
+**The user asked for this re-evaluation and for a model version to lock in for now. The pick is s6_ft: S6_full, fine-tuning step 1,700** (`finetune/last.pt` of the run). It replaces deep2 WiSE-FT 0.5 as the current weights.
+
+- **For it:** the best of the four on every measure above that does not rest on the activity fit, on ground truth and on real data.
+- **Against it:** simulations with activity, where the order is the reverse (s6_pre best, s6_ft worst). They carry GIAnT's fitted activity.
+- **Not `best.pt`:** the selection score picked step 0, the pretrained model, which is the worst of the four on these measures.
+- **Not the WiSE-FT average.** That rule ("Fine-tuning trade-off", 2026-11-21) weighed the real-data gain against accuracy on simulations with activity. With those simulations in doubt it is not applied here. The same doubt applies to the fine-tuning selection score. Both stay open until there are simulations whose activity does not come from GIAnT's fit.
+- **Known error of the locked model:** the baseline is about 2.3% low without activity and about 3% low at sources with sparse events.
+
+**What follows.**
+
+- **Re-extract the training data with activity inferred with the network** (the user's direction). Not designed yet.
+- **Every model is low, the pretrained ones most.** A possible reading: the simulations and the real targets hold more activity than the visible events account for, which teaches the network to subtract too much. Fine-tuning on real data reduces it (134% → 112% of the injected activity removed).
+- **Judge the next version on ground truth first:** the GFP control with and without injected events, real labeled pixels outside footprints, activity-free simulations. Scores at footprints against the real target, and simulations with activity, are secondary until the re-extraction.
+- **Dense activity needs a ground truth:** a GFP copy with dense, small events would give one. Not built.
+- **SiLo with the network baseline** (the localization tests) has not been rerun with the locked model.
+
+**Tools.** `tools/s4_eval.py` and `tools/heldout_eval.py` give the tables of the held-out evaluation. The GFP measures are `tools/gfp_check.py` (offsets, share removed, rings) and `tools/gfp_mse.py` (8-frame error); the scores without the activity fit are `tools/trusted_scores.py` (from an evaluation's `eval.csv`).
