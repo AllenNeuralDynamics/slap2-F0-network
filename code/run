@@ -71,7 +71,24 @@
 #   pure-Python dependencies (tifffile, tqdm, joblib) are fetched at the
 #   start, so the environment is unchanged. Results in results/register
 #   (see code/register_gpu.py); keep_registered 1 keeps the registered
-#   movies (about 3 GB per 18 s trial and path).
+#   movies (about 3 GB per 18 s trial and path). With keep_registered 1 and
+#   no ckpt, results/register is a registration asset for predict_registered
+#   (GIAnT-Python dev or later also writes the statistics sidecars).
+#
+# predict_registered: the network's baselines of registration assets. For
+# every registered session under /data (results/register of a register run,
+# attached as a data asset), GIAnT-Python's predict_baselines (what
+# `giant silo --f0-ckpt` runs) predicts every kept trial-path with SILo's
+# trial preparation; no MATLAB, no raw data.
+#   ./run --mode predict_registered --ckpt /root/capsule/data/<ckpt asset>/<file>.pt
+#         [--ckpt_label s6_ft] [--giant_python_ref dev] [--datasets all]
+#         [--trial_paths E1T1DMD1,...] [--out_frames 0] [--asset_ids mount=id,...]
+#   Results in results/baselines/<session>: <stem>_BASELINE-80Hz.h5 with
+#   giant silo's record (.json, with SHA-256 digests), predict_report.jsonl,
+#   run_info.json (see code/predict_registered.py); make the baseline asset
+#   from results/baselines and give it to `giant silo --baseline-dir`.
+#   out_frames 0 sizes the network's tiles to the free GPU memory.
+#   asset_ids only records which registration assets were attached.
 #
 # See README.md for the output formats.
 set -uo pipefail
@@ -97,6 +114,10 @@ predict_args=""
 giant_python_ref=slap2-trial-table
 ckpt=""
 keep_registered=0
+ckpt_label=""
+trial_paths=""
+out_frames=0
+asset_ids=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -105,7 +126,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args|giant_python_ref|ckpt|keep_registered) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args|giant_python_ref|ckpt|keep_registered|ckpt_label|trial_paths|out_frames|asset_ids) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -185,9 +206,9 @@ elif [[ "$mode" == "disktest" ]]; then
     rmdir "$RESULTS/_disktest"
     df -BG /root/capsule/results | tee -a "$RESULTS/logs/disktest.txt"
     exit 0
-elif [[ "$mode" == "register" ]]; then
+elif [[ "$mode" == "register" || "$mode" == "predict_registered" ]]; then
     nvidia-smi 2>&1 | tee "$RESULTS/logs/nvidia-smi.txt" || true
-    work="$SCRATCH/register_env"
+    work="$SCRATCH/${mode}_env"
     rm -rf "$work" && mkdir -p "$work"
     if ! git clone -q https://github.com/AllenNeuralDynamics/GIAnT-Python.git "$work/GIAnT-Python" \
         || ! git -C "$work/GIAnT-Python" checkout -q "$giant_python_ref"; then
@@ -214,15 +235,24 @@ elif [[ "$mode" == "register" ]]; then
         sleep 30
     done ) > "$RESULTS/logs/usage.txt" 2>&1 &
     monitor=$!
-    PYTHONPATH="$work/GIAnT-Python/src:$work/SLAP2_Utils:$work/pydeps:$CODE" python3 -u "$CODE/register_gpu.py" \
-        "$DATA" "$RESULTS/register" --datasets "$datasets" --max_duration_s "$max_duration_s" \
-        --compensate_online "$compensate_online" --ckpt "$ckpt" --predict_args "$predict_args" \
-        --keep_registered "$keep_registered" 2>&1 | tee "$RESULTS/logs/register.log"
-    status="${PIPESTATUS[0]}"
+    pypath="$work/GIAnT-Python/src:$work/SLAP2_Utils:$work/pydeps:$CODE"
+    if [[ "$mode" == "register" ]]; then
+        PYTHONPATH="$pypath" python3 -u "$CODE/register_gpu.py" \
+            "$DATA" "$RESULTS/register" --datasets "$datasets" --max_duration_s "$max_duration_s" \
+            --compensate_online "$compensate_online" --ckpt "$ckpt" --predict_args "$predict_args" \
+            --keep_registered "$keep_registered" 2>&1 | tee "$RESULTS/logs/register.log"
+        status="${PIPESTATUS[0]}"
+    else
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$pypath" python3 -u "$CODE/predict_registered.py" \
+            "$DATA" "$RESULTS/baselines" --ckpt "$ckpt" --ckpt_label "$ckpt_label" --sessions "$datasets" \
+            --trial_paths "$trial_paths" --out_frames "$out_frames" --asset_ids "$asset_ids" \
+            --scratch "$SCRATCH/predict_registered" 2>&1 | tee "$RESULTS/logs/predict_registered.log"
+        status="${PIPESTATUS[0]}"
+    fi
     kill "$monitor" 2>/dev/null
     exit "$status"
 elif [[ "$mode" != "export" ]]; then
-    echo "Unknown mode: $mode (use export, register, train, eval, predict, probe, bench, stats or disktest)"
+    echo "Unknown mode: $mode (use export, register, predict_registered, train, eval, predict, probe, bench, stats or disktest)"
     exit 2
 fi
 
