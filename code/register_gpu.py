@@ -84,15 +84,21 @@ def _stem(name: str) -> str:
 
 
 def _n_trials(table: Path):
-    """Trials (columns of ``filename``) of a trial table, or None."""
+    """Trials (columns of MATLAB's paths x trials ``filename``) of a trial
+    table, or None. A column-major file (``row_major`` 0 or absent, as MATLAB
+    and GIAnT-Python write it) stores it transposed: (trials, paths)."""
     import h5py
+    import numpy as np
 
     try:
         with h5py.File(table, "r") as f:
             shape = f["filename"].shape
+            row_major = "row_major" in f and bool(np.asarray(f["row_major"][()]).ravel()[0])
     except (OSError, KeyError):
         return None
-    return int(max(shape)) if len(shape) else 1
+    if len(shape) < 2:
+        return int(shape[0]) if shape else 1
+    return int(shape[1] if row_major else shape[0])
 
 
 def sidecars(moco: Path, fields: dict) -> dict:

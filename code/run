@@ -81,7 +81,7 @@
 # `giant silo --f0-ckpt` runs) predicts every kept trial-path with SILo's
 # trial preparation; no MATLAB, no raw data.
 #   ./run --mode predict_registered --ckpt /root/capsule/data/<ckpt asset>/<file>.pt
-#         [--ckpt_label s6_ft] [--giant_python_ref dev] [--datasets all]
+#         [--ckpt_label s6_ft] [--giant_python_ref <ref>] [--datasets all]
 #         [--trial_paths E1T1DMD1,...] [--out_frames 0] [--asset_ids mount=id,...]
 #   Results in results/baselines/<session>: <stem>_BASELINE-80Hz.h5 with
 #   giant silo's record (.json, with SHA-256 digests), predict_report.jsonl,
@@ -89,6 +89,8 @@
 #   from results/baselines and give it to `giant silo --baseline-dir`.
 #   out_frames 0 sizes the network's tiles to the free GPU memory.
 #   asset_ids only records which registration assets were attached.
+#   giant_python_ref defaults here to GIAnT-Python dev 346c9dc (#41: the
+#   records' SHA-256 digests); older refs lack the SILo modules it needs.
 #
 # See README.md for the output formats.
 set -uo pipefail
@@ -111,7 +113,7 @@ train_args=""
 finetune_args=""
 eval_args=""
 predict_args=""
-giant_python_ref=slap2-trial-table
+giant_python_ref=""  # default per mode, below
 ckpt=""
 keep_registered=0
 ckpt_label=""
@@ -130,6 +132,14 @@ while [[ $# -gt 0 ]]; do
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
+
+if [[ -z "$giant_python_ref" ]]; then
+    if [[ "$mode" == "predict_registered" ]]; then
+        giant_python_ref=346c9dcad758cf18bf8acbb576547c1f1ad8315f  # dev with #41
+    else
+        giant_python_ref=slap2-trial-table
+    fi
+fi
 
 DATA=/root/capsule/data
 RESULTS=/root/capsule/results

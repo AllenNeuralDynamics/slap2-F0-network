@@ -191,6 +191,22 @@ def test_predict_registered_end_to_end(tmp_path, ckpt):
     assert json.loads((sdir / "run_info.json").read_text())["predicted"] == []
     assert {p.name: p.stat().st_mtime_ns for p in sdir.glob("*_BASELINE-80Hz.h5")} == before
 
+    # an interrupted run (record without the file's identity) and a file without a record are
+    # predicted again, not taken as they are
+    rec2 = silo_baseline.record_path(sdir / names[1])
+    stale = json.loads(rec2.read_text())
+    stale["baseline"] = None
+    rec2.write_text(json.dumps(stale))
+    silo_baseline.record_path(sdir / names[2]).unlink()
+    assert pr.main([str(data), str(out), "--ckpt", str(ckpt), "--device", "cpu", "--out_frames", "64",
+                    "--scratch", str(tmp_path / "scratch")]) == 0
+    info = json.loads((sdir / "run_info.json").read_text())
+    assert sorted(info["removed_incomplete"]) == sorted(names[1:])
+    assert info["predicted"] == [[1, 2], [2, 1]]
+    for n in names:
+        assert pr._complete(json.loads(silo_baseline.record_path(sdir / n).read_text()))
+    assert (sdir / names[0]).stat().st_mtime_ns == before[names[0]]
+
 
 def test_predict_registered_options(tmp_path, ckpt):
     """A subset of sessions and trial-paths; settings other than SILo's

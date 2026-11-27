@@ -217,6 +217,55 @@ def select_units(session, stems: list) -> list:
     return units
 
 
+def _complete(record: dict | None) -> bool:
+    """Whether a record has the baseline, movie and alignment identities
+    with their SHA-256 (what a SILo run on the assets checks)."""
+    return bool(record) and all((record.get(k) or {}).get("sha256") for k in ("baseline", "movie", "alignment"))
+
+
+def clear_incomplete(session, out: Path, units: list) -> list:
+    """Remove the baselines of ``units`` whose record is missing or
+    incomplete (an interrupted run leaves the file with a record without its
+    identity; a file made elsewhere has none), so that they are predicted
+    again: hashing such a file now could not show where it came from."""
+    from giant_python.pipeline.silo_baseline import baseline_path, record_path
+
+    removed = []
+    for d, t in units:
+        base = baseline_path(out, session.movie(d, t))
+        rec = record_path(base)
+        if not base.exists():
+            continue
+        record = json.loads(rec.read_text()) if rec.exists() else None
+        if not _complete(record):
+            base.unlink()
+            if rec.exists():
+                rec.unlink()
+            removed.append(base.name)
+    return removed
+
+
+def check_records(session, out: Path, units: list) -> None:
+    """Every baseline of ``units`` has a complete record that describes it.
+
+    Raises
+    ------
+    RuntimeError
+        Otherwise.
+    """
+    from giant_python.pipeline.silo_baseline import baseline_path, record_path, same_file
+
+    bad = []
+    for d, t in units:
+        base = baseline_path(out, session.movie(d, t))
+        rec = record_path(base)
+        record = json.loads(rec.read_text()) if rec.exists() else None
+        if not base.exists() or not _complete(record) or not same_file(record["baseline"], base):
+            bad.append(base.name)
+    if bad:
+        raise RuntimeError("baselines without a complete record: " + ", ".join(bad))
+
+
 def run_session(name: str, folder: Path, args, env: dict, info: dict) -> None:
     """Predict one session's baselines into OUT/<name>; fills ``info``."""
     from giant_python.pipeline.silo_baseline import predict_baselines, prediction_settings
@@ -235,11 +284,13 @@ def run_session(name: str, folder: Path, args, env: dict, info: dict) -> None:
     units = select_units(session, stems)
     info["trial_paths"] = [{"path": d + 1, "trial": t + 1, "movie": session.movie(d, t).name} for d, t in units]
     out.mkdir(parents=True, exist_ok=True)
+    info["removed_incomplete"] = clear_incomplete(session, out, units)
     report = out / "predict_report.jsonl"
     exe = args.f0_command or str(write_wrapper(scratch / "bin", report))
     t0 = time.time()
     rec = predict_baselines(session, params, out, args.ckpt, units=units, device=args.device, command=exe,
                             verbose=True, out_frames=args.out_frames or None, digests=True)
+    check_records(session, out, units)
     info["total_s"] = time.time() - t0
     info["predict_s"] = rec["seconds"]
     info["records_s"] = info["total_s"] - rec["seconds"]  # checks and SHA-256 of the files
@@ -300,6 +351,12 @@ def main(argv=None) -> int:
 
     import giant_python
 
+    try:  # the records' digests (GIAnT-Python #41, dev 346c9dc)
+        from giant_python.pipeline.silo_baseline import same_file  # noqa: F401
+    except ImportError as e:
+        print(f"GIAnT-Python {os.environ.get('GIANT_PYTHON_REF', '')} lacks the baseline records with digests "
+              f"(GIAnT-Python #41; dev 346c9dc or later): {e}")
+        return 1
     env = {
         "giant_python_version": giant_python.__version__,
         "giant_python_commit": os.environ.get("GIANT_PYTHON_COMMIT", "") or _git_commit(

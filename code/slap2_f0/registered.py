@@ -195,6 +195,8 @@ def run(args: argparse.Namespace) -> None:
     if not movies:
         raise SystemExit(f"no *_REGISTERED_DOWNSAMPLED-80Hz.tif or .h5 in {moco}")
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cuda" and device.index is not None:
+        torch.cuda.set_device(device)  # tile sizing and the report query the current device
     model, wcfg, ck = load_checkpoint(args.ckpt, device)
     amp_dtype = prepare(model, device, args.precision)
     print(f"{args.ckpt} (step {ck.get('step')}, box radius {model.cfg.box_radius}, varfac {model.cfg.varfac_norm}) "
@@ -209,7 +211,7 @@ def run(args: argparse.Namespace) -> None:
             _report(args.report, {"stem": stem, "movie": movie_path.name, "skipped": True})
             continue
         if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_peak_memory_stats(device)
         t0 = time.time()
         movie, valid, discard, varfac, hz = load_registered(
             movie_path, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1, args.nan_thresh, args.motion_thresh,
@@ -249,8 +251,8 @@ def run(args: argparse.Namespace) -> None:
             "stem": stem, "movie": movie_path.name, "baseline": dest.name, "frames": T, "rows": R, "cols": C,
             "valid_px": int(valid.sum()), "discarded": int(discard.sum()), "out_frames": int(tile),
             "load_s": t1 - t0, "stats_s": t2 - t1, "network_s": t3 - t2, "write_s": t4 - t3,
-            "peak_gpu_gb": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None,
-            "peak_gpu_reserved_gb": torch.cuda.max_memory_reserved() / 2**30 if device.type == "cuda" else None,
+            "peak_gpu_gb": torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else None,
+            "peak_gpu_reserved_gb": torch.cuda.max_memory_reserved(device) / 2**30 if device.type == "cuda" else None,
             "peak_rss_gb_so_far": _peak_rss_gb(), "device": str(device)})
     print(f"done in {time.time() - t_all:.0f} s", flush=True)
 
