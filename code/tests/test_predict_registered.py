@@ -191,13 +191,13 @@ def test_predict_registered_end_to_end(tmp_path, ckpt):
     assert json.loads((sdir / "run_info.json").read_text())["predicted"] == []
     assert {p.name: p.stat().st_mtime_ns for p in sdir.glob("*_BASELINE-80Hz.h5")} == before
 
-    # an interrupted run (record without the file's identity) and a file without a record are
-    # predicted again, not taken as they are
+    # an interrupted run (record without the file's identity, or a truncated record) is
+    # predicted again, not taken as it is
     rec2 = silo_baseline.record_path(sdir / names[1])
     stale = json.loads(rec2.read_text())
     stale["baseline"] = None
     rec2.write_text(json.dumps(stale))
-    silo_baseline.record_path(sdir / names[2]).unlink()
+    silo_baseline.record_path(sdir / names[2]).write_text('{"format": "giant-silo-baseline-rec')  # truncated
     assert pr.main([str(data), str(out), "--ckpt", str(ckpt), "--device", "cpu", "--out_frames", "64",
                     "--scratch", str(tmp_path / "scratch")]) == 0
     info = json.loads((sdir / "run_info.json").read_text())
@@ -229,3 +229,15 @@ def test_predict_registered_options(tmp_path, ckpt):
     assert pr.main([str(data), str(out), "--ckpt", str(ckpt), "--sessions", "s1", "--trial_paths", "E1T5DMD1",
                     *common]) == 1
     assert "not kept" in json.loads((out / "s1" / "run_info.json").read_text())["error"]
+
+
+def test_unreadable_record_counts_as_missing(tmp_path):
+    rec = tmp_path / "x_BASELINE-80Hz.json"
+    assert pr._read_record(rec) is None
+    rec.write_text("")
+    assert pr._read_record(rec) is None
+    rec.write_text('{"baseline": {"sha256": "a"}')
+    assert pr._read_record(rec) is None
+    rec.write_text('{"baseline": {"sha256": "a"}}')
+    assert pr._read_record(rec) == {"baseline": {"sha256": "a"}}
+    assert not pr._complete(pr._read_record(rec))

@@ -217,6 +217,15 @@ def select_units(session, stems: list) -> list:
     return units
 
 
+def _read_record(path: Path) -> dict | None:
+    """A baseline record, or None when it is missing or unreadable (a write
+    interrupted part-way leaves empty or truncated JSON)."""
+    try:
+        return json.loads(path.read_text()) if path.exists() else None
+    except (ValueError, OSError):
+        return None
+
+
 def _complete(record: dict | None) -> bool:
     """Whether a record has the baseline, movie and alignment identities
     with their SHA-256 (what a SILo run on the assets checks)."""
@@ -236,7 +245,7 @@ def clear_incomplete(session, out: Path, units: list) -> list:
         rec = record_path(base)
         if not base.exists():
             continue
-        record = json.loads(rec.read_text()) if rec.exists() else None
+        record = _read_record(rec)
         if not _complete(record):
             base.unlink()
             if rec.exists():
@@ -259,7 +268,7 @@ def check_records(session, out: Path, units: list) -> None:
     for d, t in units:
         base = baseline_path(out, session.movie(d, t))
         rec = record_path(base)
-        record = json.loads(rec.read_text()) if rec.exists() else None
+        record = _read_record(rec)
         if not base.exists() or not _complete(record) or not same_file(record["baseline"], base):
             bad.append(base.name)
     if bad:
