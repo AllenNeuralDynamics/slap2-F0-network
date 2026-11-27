@@ -11,9 +11,18 @@ No MATLAB: for every attached SLAP2 session (``<asset>/slap2/dynamic_data``)
 
 Outputs per session in OUT/<session>: trial_table.h5 (with the
 motion_correction group), trial_table_untrimmed.h5, motion_correction/
-(alignment data; the registered movies are deleted unless
-``--keep_registered 1``), baselines/ and run_info.json (timings, GPU, peak
-memory). OUT/summary.json lists every session.
+(alignment data, the summary-statistics sidecars ``<stem>_REGSTATS-80Hz.h5``
+of GIAnT-Python versions that write them; the registered movies are deleted
+unless ``--keep_registered 1``), baselines/ and run_info.json (GIAnT-Python
+commit, trim, registration settings, timings, GPU, peak memory, sidecars).
+OUT/summary.json lists every session; OUT/stage_asset.json says what the
+folder is when it is made a data asset (``kind`` "registration").
+
+With ``--keep_registered 1`` and no ``--ckpt``, OUT is the registration
+asset of the staged Code Ocean path: ``code/run --mode predict_registered``
+predicts the network's baselines from it, and a SILo run (GIAnT-Python's
+``giant silo``) takes both. Make the asset from the computation's
+``register`` folder, so that its sessions are at its top level.
 
 Run by ``code/run --mode register`` with GIAnT-Python, SLAP2_Utils and
 GIAnT-Python's pure-Python dependencies on PYTHONPATH.
@@ -22,6 +31,7 @@ GIAnT-Python's pure-Python dependencies on PYTHONPATH.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import subprocess
@@ -29,6 +39,9 @@ import sys
 import time
 import traceback
 from pathlib import Path
+
+STAGE_FORMAT = 1
+"""Version of the registration asset's layout (stage_asset.json)."""
 
 
 def _sessions(data: Path, datasets: str):
@@ -65,6 +78,43 @@ def _dir_gb(path: Path, pattern: str) -> float:
     return sum(f.stat().st_size for f in path.glob(pattern)) / 2**30
 
 
+def _stem(name: str) -> str:
+    """A motion-correction file's trial stem (``E1T1DMD1``)."""
+    return name.split("_", 1)[0]
+
+
+def _n_trials(table: Path):
+    """Trials (columns of MATLAB's paths x trials ``filename``) of a trial
+    table, or None. A column-major file (``row_major`` 0 or absent, as MATLAB
+    and GIAnT-Python write it) stores it transposed: (trials, paths)."""
+    import h5py
+    import numpy as np
+
+    try:
+        with h5py.File(table, "r") as f:
+            shape = f["filename"].shape
+            row_major = "row_major" in f and bool(np.asarray(f["row_major"][()]).ravel()[0])
+    except (OSError, KeyError):
+        return None
+    if len(shape) < 2:
+        return int(shape[0]) if shape else 1
+    return int(shape[1] if row_major else shape[0])
+
+
+def sidecars(moco: Path, fields: dict) -> dict:
+    """The summary-statistics sidecars (``<stem>_REGSTATS-80Hz.h5``) of the
+    registered trial-paths: count, size, and the trial-paths without one."""
+    import numpy as np
+
+    have = {_stem(f.name) for f in moco.glob("*_REGSTATS-*Hz.h5")}
+    failed = np.asarray(fields["registration_failed"], bool)
+    names = np.asarray(fields["fn_adata"], dtype=object).reshape(failed.shape)
+    want = sorted(_stem(Path(str(n).replace("\\", "/")).name) for n, bad in zip(names.ravel(), failed.ravel())
+                  if str(n) and not bad)
+    return {"n": len(have), "gb": _dir_gb(moco, "*_REGSTATS-*Hz.h5"),
+            "missing": [s for s in want if s not in have]}
+
+
 def run_session(name: str, dyn: Path, out: Path, args, info: dict) -> None:
     """Trial table, registration and (optionally) baselines of one session.
 
@@ -78,17 +128,25 @@ def run_session(name: str, dyn: Path, out: Path, args, info: dict) -> None:
     )
     from giant_python.pipeline import build_trial_table_slap2, register_multiroi
 
-    info.update(dat_dir=str(dyn), status="failed")
+    info.update(dat_dir=str(dyn), status="failed", max_duration_s=args.max_duration_s,
+                compensate_online=bool(args.compensate_online), schedule=args.schedule,
+                keep_registered=bool(args.keep_registered))
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     build_trial_table_slap2(
         dyn, out, max_duration_s=args.max_duration_s or None
     )
     info["trial_table_s"] = time.time() - t0
+    info["n_trials"] = _n_trials(out / "trial_table.h5")
+    info["n_trials_untrimmed"] = _n_trials(out / "trial_table_untrimmed.h5")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    # GIAnT-Python writes the statistics sidecars by default since #37
+    # (80ba65a); older refs have no such option
+    stats = {"stats": True} if "stats" in inspect.signature(register_multiroi).parameters else {}
+    info["stats_requested"] = bool(stats)
     t0 = time.time()
     fields = register_multiroi(
         out / "trial_table.h5",
@@ -99,6 +157,7 @@ def run_session(name: str, dyn: Path, out: Path, args, info: dict) -> None:
         execution=ExecutionOptions(
             device=device, verbose=True, max_workers=os.cpu_count() or 1
         ),
+        **stats,
     )
     info["registration_s"] = time.time() - t0
     info["device"] = device
@@ -113,6 +172,9 @@ def run_session(name: str, dyn: Path, out: Path, args, info: dict) -> None:
     moco = out / "motion_correction"
     info["registered_movies_gb"] = _dir_gb(moco, "*_REGISTERED_*")
     info["alignment_data_gb"] = _dir_gb(moco, "*_ALIGNMENTDATA.h5")
+    info["regstats"] = sidecars(moco, fields)
+    if stats and info["regstats"]["missing"]:
+        print("no statistics sidecar for", ", ".join(info["regstats"]["missing"]), flush=True)
 
     if args.ckpt:
         t0 = time.time()
@@ -138,7 +200,27 @@ def run_session(name: str, dyn: Path, out: Path, args, info: dict) -> None:
     if not args.keep_registered:
         for f in moco.glob("*_REGISTERED_DOWNSAMPLED-*"):
             f.unlink()
+    info["kept_movies"] = sorted(f.name for f in moco.glob("*_REGISTERED_DOWNSAMPLED-*"))
     info["status"] = "ok"
+
+
+def stage_record(env: dict, args, results: list) -> dict:
+    """OUT/stage_asset.json: what the folder holds as a data asset."""
+    return {
+        "kind": "registration",
+        "format": STAGE_FORMAT,
+        "layout": "<session>/trial_table.h5, trial_table_untrimmed.h5, run_info.json, motion_correction/ "
+                  "(<stem>_ALIGNMENTDATA.h5, <stem>_REGISTERED_DOWNSAMPLED-80Hz.h5 when kept, "
+                  "<stem>_REGSTATS-80Hz.h5)",
+        "giant_python_commit": env["giant_python_commit"],
+        "giant_python_ref": env["giant_python_ref"],
+        "max_duration_s": args.max_duration_s,
+        "compensate_online": bool(args.compensate_online),
+        "schedule": args.schedule,
+        "keep_registered": bool(args.keep_registered),
+        "gpu": env["gpu"],
+        "sessions": {r["session"]: r["status"] for r in results},
+    }
 
 
 def main(argv=None) -> int:
@@ -183,13 +265,14 @@ def main(argv=None) -> int:
             info.update(status="failed", error=traceback.format_exc())
         info["total_s"] = time.time() - t0
         info["peak_rss_gb_so_far"] = _peak_rss_gb()
-        info.update({k: env[k] for k in ("giant_python_commit", "torch", "gpu")})
+        info.update({k: env[k] for k in ("giant_python_commit", "giant_python_ref", "torch", "gpu")})
         (args.out / name).mkdir(parents=True, exist_ok=True)
         (args.out / name / "run_info.json").write_text(json.dumps(info, indent=1))
         print(json.dumps({k: v for k, v in info.items() if k != "error"}, indent=1))
         results.append(info)
     summary = {"environment": env, "sessions": results}
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
+    (args.out / "stage_asset.json").write_text(json.dumps(stage_record(env, args, results), indent=1))
     if not results:
         print("No SLAP2 sessions found under", args.data)
         return 1

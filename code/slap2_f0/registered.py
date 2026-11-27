@@ -29,6 +29,7 @@ also discards frames where most of the 200 Hz samples were discarded.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -36,7 +37,7 @@ import h5py
 import numpy as np
 import torch
 
-from .predict import load_checkpoint, movie_gain, predict_trial, prepare, valid_index
+from .predict import load_checkpoint, movie_gain, predict_trial, prepare, tile_frames, valid_index
 
 
 def _medfilt1_zeropad(x: np.ndarray, n: int) -> np.ndarray:
@@ -169,6 +170,22 @@ def load_registered(movie_path: Path, adata: Path, channel: int = 0, nan_thresh:
     return movie, valid, discard, varfac, align_hz
 
 
+def _peak_rss_gb() -> float | None:
+    """Peak resident memory of this process so far (Linux), or None."""
+    try:
+        import resource
+    except ImportError:  # Windows
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
+
+
+def _report(path: str, entry: dict) -> None:
+    """Append one JSON line to the --report file."""
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
 def run(args: argparse.Namespace) -> None:
     moco, out = Path(args.moco_dir), Path(args.out)
     movies = registered_movies(moco)
@@ -178,6 +195,8 @@ def run(args: argparse.Namespace) -> None:
     if not movies:
         raise SystemExit(f"no *_REGISTERED_DOWNSAMPLED-80Hz.tif or .h5 in {moco}")
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cuda" and device.index is not None:
+        torch.cuda.set_device(device)  # tile sizing and the report query the current device
     model, wcfg, ck = load_checkpoint(args.ckpt, device)
     amp_dtype = prepare(model, device, args.precision)
     print(f"{args.ckpt} (step {ck.get('step')}, box radius {model.cfg.box_radius}, varfac {model.cfg.varfac_norm}) "
@@ -189,7 +208,10 @@ def run(args: argparse.Namespace) -> None:
         dest = out / f"{stem}_BASELINE-80Hz.h5"
         if dest.exists() and not args.overwrite:
             print(f"{dest.name} exists, skipped", flush=True)
+            _report(args.report, {"stem": stem, "movie": movie_path.name, "skipped": True})
             continue
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         t0 = time.time()
         movie, valid, discard, varfac, hz = load_registered(
             movie_path, moco / f"{stem}_ALIGNMENTDATA.h5", args.channel - 1, args.nan_thresh, args.motion_thresh,
@@ -199,7 +221,10 @@ def run(args: argparse.Namespace) -> None:
         st = movie_stats(movie, valid, discard)
         t2 = time.time()
         rows, cols = valid_index(tr)
-        mu, var = predict_trial(model, wcfg, tr, st, device, amp_dtype, args.out_frames, None, 1, rows, cols)
+        # the tile size predict_trial would choose, made explicit for the report
+        tile = args.out_frames if args.out_frames > 0 else tile_frames(
+            model, wcfg, movie.shape[0], device, amp_dtype, wcfg.out_px)
+        mu, var = predict_trial(model, wcfg, tr, st, device, amp_dtype, tile, None, 1, rows, cols)
         t3 = time.time()
         T, R, C = movie.shape
         del movie
@@ -218,9 +243,17 @@ def run(args: argparse.Namespace) -> None:
                             "source": movie_path.name, "precision": str(next(model.parameters()).dtype),
                             "seconds_load": t1 - t0, "seconds_stats": t2 - t1, "seconds_network": t3 - t2})
         tmp.replace(dest)
+        t4 = time.time()
         print(f"{stem}: {T} frames, {R}x{C}, {int(valid.sum())} valid px, {int(discard.sum())} discarded; "
-              f"load {t1 - t0:.0f} s, stats {t2 - t1:.0f} s, network {t3 - t2:.0f} s, write {time.time() - t3:.0f} s",
+              f"load {t1 - t0:.0f} s, stats {t2 - t1:.0f} s, network {t3 - t2:.0f} s, write {t4 - t3:.0f} s",
               flush=True)
+        _report(args.report, {
+            "stem": stem, "movie": movie_path.name, "baseline": dest.name, "frames": T, "rows": R, "cols": C,
+            "valid_px": int(valid.sum()), "discarded": int(discard.sum()), "out_frames": int(tile),
+            "load_s": t1 - t0, "stats_s": t2 - t1, "network_s": t3 - t2, "write_s": t4 - t3,
+            "peak_gpu_gb": torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else None,
+            "peak_gpu_reserved_gb": torch.cuda.max_memory_reserved(device) / 2**30 if device.type == "cuda" else None,
+            "peak_rss_gb_so_far": _peak_rss_gb(), "device": str(device)})
     print(f"done in {time.time() - t_all:.0f} s", flush=True)
 
 
@@ -238,3 +271,5 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sd", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--device", default="auto")
+    p.add_argument("--report", default="", help="append one JSON line per movie to this file: times per step "
+                                              "(load, stats, network, write), tile size, peak GPU and host memory")
