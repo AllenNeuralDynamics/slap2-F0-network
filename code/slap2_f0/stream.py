@@ -552,6 +552,27 @@ class StreamPredictor:
         tt = lambda q: torch.from_numpy(np.ascontiguousarray(q)).to(dev)  # noqa: E731
         mi, vf, vm = (tt(q[rr + pad, cc + pad])[None, :, None] for q in (mean_p, vf_p, var_p))
         B = max(1, self.pixel_block)
+        # the rectangle's movie on the GPU once when it fits; inputs are then sliced there
+        rmov = None
+        if dev.type == "cuda" and (T + 2 * tR) * rect.area * 4 < 0.15 * torch.cuda.mem_get_info()[0]:
+            rmov = tt(self._movie_rect(movie, -tR, T + tR, *rc))
+        rsl = (slice(rect.r0 + pad, rect.r1 + pad), slice(rect.c0 + pad, rect.c1 + pad))
+        rmaps = [tt(q[rsl]) for q in maps]
+
+        def xin(f0, f1, win=None):
+            """make_inputs of frames f0..f1-1 over the rectangle, or over the window
+            win = (r0, r1, c0, c1) of the trial grid inside it."""
+            mp = rmaps
+            if rmov is not None:
+                mv_ = rmov[f0 + tR:f1 + tR]
+                if win is not None:
+                    a0, a1, b0, b1 = win[0] - rect.r0, win[1] - rect.r0, win[2] - rect.c0, win[3] - rect.c0
+                    mv_, mp = mv_[:, a0:a1, b0:b1], [q[a0:a1, b0:b1] for q in rmaps]
+                return make_inputs(mv_[None], mp[0][None], mp[1][None], scale, mp[2][None], gain,
+                                   varfac_norm=cfg.varfac_norm)
+            w_ = win or rc
+            return self._x(self._movie_rect(movie, f0, f1, *w_), maps, w_, pad, scale, gain)
+
         # 0. per-pixel temporal statistics over the whole trial (window stats, edge features)
         t0 = time.time()
         span = cfg.gap + cfg.window_reach
@@ -596,7 +617,7 @@ class StreamPredictor:
                 wrc = (r0 - sR, r0 - sR + ns, c0 - sR, c0 - sR + ns)
                 for a in range(0, T, Lp):
                     b = min(a + Lp, T)
-                    x = self._x(self._movie_rect(movie, a - 3, b + 4, *wrc), maps, wrc, pad, scale, gain)
+                    x = xin(a - 3, b + 4, wrc)
                     region = torch.arange(sR, sR + op, device=dev)
                     feats = [pooled_features_at(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales, region, region)]
                     if cfg.motion_features:
@@ -614,7 +635,7 @@ class StreamPredictor:
         while hi > shift:
             lo = max(hi - L, shift)
             ti = time.time()
-            x = self._x(self._movie_rect(movie, lo, hi, *rc), maps, rc, pad, scale, gain)
+            x = xin(lo, hi)
             tim["inputs"] += time.time() - ti
             with self._autocast():
                 g = self._branch(fut, x, pr, pc, flip=True)
@@ -654,7 +675,7 @@ class StreamPredictor:
             if f_in < f_end:
                 fe = min(f_in + L, f_end)
                 ti = time.time()
-                x = self._x(self._movie_rect(movie, f_in, fe, *rc), maps, rc, pad, scale, gain)
+                x = xin(f_in, fe)
                 xc = x[0].permute(1, 2, 3, 0).contiguous()  # (frames, H, W, n_inputs)
                 del x
                 tim["inputs"] += time.time() - ti
