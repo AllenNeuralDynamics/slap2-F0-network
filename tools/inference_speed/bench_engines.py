@@ -74,7 +74,8 @@ def diff(a, b):
     """Largest and 99.9th-percentile absolute difference (counts) and relative."""
     d = np.abs(a - b)
     r = d / np.maximum(np.abs(b), 1e-6)
-    return {"max_abs": float(np.nanmax(d)), "p999_abs": float(np.nanpercentile(d, 99.9)),
+    return {"nan_mismatch": int((np.isnan(a) != np.isnan(b)).sum()),
+            "max_abs": float(np.nanmax(d)), "p999_abs": float(np.nanpercentile(d, 99.9)),
             "p99_abs": float(np.nanpercentile(d, 99)), "max_rel": float(np.nanmax(r)),
             "p999_rel": float(np.nanpercentile(r, 99.9)), "mean_signed": float(np.nanmean(a - b))}
 

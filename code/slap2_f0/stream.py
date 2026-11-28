@@ -533,7 +533,7 @@ class StreamPredictor:
                     tim["chunks"].append(Lr)
                     break
                 except (torch.OutOfMemoryError, RuntimeError) as e:
-                    if not _is_oom(e) or Lr <= 16:
+                    if not _is_oom(e) or (Lr <= 16 and self._shrink <= 1 / 64):  # nothing left to shrink
                         raise
                 # retry outside the except block, so the failed pass's tensors are freed
                 tim["oom_retries"] += 1
