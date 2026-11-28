@@ -89,11 +89,13 @@ def main():
     # module timing with CUDA events
     events = {}
 
+    npass = [0]  # forward passes so far (calls of a module are summed per pass)
+
     def pre(name):
         def f(mod, inp):
             e = torch.cuda.Event(enable_timing=True)
             e.record()
-            events.setdefault(name, []).append([e, None])
+            events.setdefault(name, []).append([e, None, npass[0]])
         return f
 
     def post(name):
@@ -106,15 +108,19 @@ def main():
     mods = {"past": model.past, "future": model.future, "fuse": model.fuse}
     for k, m in enumerate(model.hp_views or []):
         mods[f"hp{k}"] = m
-    for b in model.fuse_more or []:
-        mods.setdefault("fuse_more", b)
+    if model.hp is not None:  # one trunk for the four directions: four calls per forward pass
+        mods["hp_shared"] = model.hp
+    for k, b in enumerate(model.fuse_more or []):
+        mods[f"fuse_more{k}"] = b
     hooks = []
     for name, m in mods.items():
         hooks += [m.register_forward_pre_hook(pre(name)), m.register_forward_hook(post(name))]
     wall, fwd = [], []
     tt0 = min(nf, max(0, T - nf))  # a middle time tile
     with torch.no_grad():
-        for i, (r0, c0) in enumerate(tiles[:a.tiles + 1]):
+        run = tiles[:a.tiles + 1] if len(tiles) > 1 else tiles * 2  # one tile: warm-up and measure on it
+        for i, (r0, c0) in enumerate(run):
+            npass[0] = i
             torch.cuda.synchronize()
             w0 = time.time()
             x, sc, g = make(r0, c0, tt0)
@@ -135,14 +141,20 @@ def main():
     for h in hooks:
         h.remove()
     torch.cuda.synchronize()
-    per = {k: float(np.mean([a.elapsed_time(b) for a, b in v[1:]]) / 1000) for k, v in events.items()}
+    per = {}
+    for k, v in events.items():  # per forward pass (the first is warm-up), the module's calls summed
+        sums = {}
+        for a0, b0, p in v:
+            if p:
+                sums[p] = sums.get(p, 0.0) + a0.elapsed_time(b0) / 1000
+        per[k] = float(np.mean(list(sums.values())))
     rec.update(prep_s=float(np.mean([w[0] for w in wall])), fwd_wall_s=float(np.mean([w[1] for w in wall])),
                fwd_cuda_s=float(np.mean(fwd)), modules_s=per,
                peak_gb=torch.cuda.max_memory_allocated() / 2**30)
     rec["modules_s"]["rest"] = rec["fwd_cuda_s"] - sum(per.values())
     Path(a.out).write_text(json.dumps(rec, indent=1))
     from torch.profiler import ProfilerActivity, profile
-    x, sc, g = make(*tiles[1], tt0)
+    x, sc, g = make(*tiles[min(1, len(tiles) - 1)], tt0)
     with torch.no_grad(), profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         with torch.autocast("cuda", dtype=amp):
             mu, var = model(x, sc, g, region)

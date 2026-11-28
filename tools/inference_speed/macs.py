@@ -70,12 +70,16 @@ def main():
             m = ntile * ns * ns * (2 * frames * b["causal_per_voxel"] + 4 * hpf * b["hp_per_voxel"]) \
                 + ntile * op * op * T * b["fusion_per_output_voxel"]
             rec[name] = m / (N * T)
-        for L in (128, 256, 512):
-            frames = T + tR - (cfg.gap + 1)  # each branch from its trial edge to the far output
+        frames = T + tR - (cfg.gap + 1)  # each causal branch from its trial edge to the far output
+        for L in (128, 256, 512):  # --stream_layout ncdhw: half-planes per chunk with their reach as halo
             hpf = -(-T // L) * (L + 2 * max(R, 4))
             m = A * (2 * frames * b["causal_per_voxel"] + 4 * hpf * b["hp_per_voxel"]) \
                 + N * T * b["fusion_per_output_voxel"]
-            rec[f"stream_{L}"] = m / (N * T)
+            rec[f"stream_ncdhw_{L}"] = m / (N * T)
+        # --stream_layout cl (default): half-planes streamed once over frames -R .. T + R - 1, any chunk
+        m = A * (2 * frames * b["causal_per_voxel"] + 4 * (T + 2 * R) * b["hp_per_voxel"]) \
+            + N * T * b["fusion_per_output_voxel"]
+        rec["stream_cl"] = m / (N * T)
         # low-rate design, factor k in time after the first full-rate block of each branch, half-planes
         # and fusion at the low rate (output interpolated), streaming geometry, chunk 256
         for k in (2, 4):

@@ -98,13 +98,15 @@ def check_supported(cfg, wcfg) -> None:
     """Raise ValueError for checkpoints whose tiles the engine cannot reproduce:
     - the variance-factor input relative to the window's median (v6 and older);
     - spatial downsampling by more than 2: rectangles keep the windows' parity,
-      not their phase modulo a larger factor;
+      not their phase modulo a larger factor; odd tile sizes (odd rectangles);
     - half-plane branches reaching further in time than the window (their
       inputs would then be clipped at the window's edge, as the streams do not)."""
     if cfg.varfac_norm != "trial":
         raise ValueError("the stream engine needs a checkpoint with varfac_norm 'trial' (after v6)")
     if cfg.spatial_factor > 2:
         raise ValueError(f"the stream engine supports spatial downsampling by 1 or 2, not {cfg.spatial_factor}")
+    if wcfg.out_px % 2:
+        raise ValueError(f"the stream engine needs an even tile size, not out_px {wcfg.out_px}")
     if cfg.box and cfg.hp_temporal_reach > wcfg.t_reach:
         raise ValueError(f"the stream engine needs the half-planes' temporal reach ({cfg.hp_temporal_reach}) within "
                          f"the window's ({wcfg.t_reach})")
@@ -733,7 +735,7 @@ class StreamPredictor:
                 f_in = fe
             tim["past"] += time.time() - t0
             ready = min([got_p] + got_h + [T])
-            piece = max(L, 128)  # frames fused at a time
+            piece = max(L, int(128 * self._shrink), 16)  # frames fused at a time (smaller on retries)
             if ready - out_t < min(piece, T - out_t) and f_in < f_end:
                 continue
             t1 = min(ready, T, out_t + piece)

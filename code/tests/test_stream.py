@@ -144,3 +144,6 @@ def test_unsupported_checkpoints_are_refused():
         cfg = ModelConfig(**{**asdict(model.cfg), **change})
         with pytest.raises(ValueError, match=match):
             check_supported(cfg, wcfg)
+    from dataclasses import replace
+    with pytest.raises(ValueError, match="even tile"):
+        check_supported(model.cfg, replace(wcfg, out_px=7))

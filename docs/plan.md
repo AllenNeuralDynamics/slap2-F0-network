@@ -2956,13 +2956,14 @@ Convolution MACs per output voxel (valid pixel x frame) for s6_ft on 780125 E1T1
 |---|---|
 | tiles, 512 frames (the 8 GB card) | 3.42 M |
 | tiles, whole trial (L40S) | 2.14 M |
-| streaming, rectangles, 256-frame chunks | 1.52 M |
+| streaming, rectangles, `--stream_layout ncdhw` (half-planes with a halo per 256-frame chunk) | 1.52 M |
+| streaming, rectangles, `--stream_layout cl` (half-planes streamed once) | 1.39 M |
 | low-rate design, factor 2 (40 Hz), streaming | 0.82 M |
 | low-rate design, factor 4 (20 Hz), streaming | 0.54 M |
 
-In the streaming geometry:
-- The causal branches are about 52% of the MACs (2 x 54.4 k per input voxel).
-- The four half-plane branches are about 45% (4 x 21.3 k).
+In the channels-last streaming geometry:
+- The causal branches are about 57% of the MACs (2 x 54.4 k per input voxel).
+- The four half-plane branches are about 41% (4 x 21.3 k).
 - The fusion is 2% (29.7 k per output voxel).
 
 The rectangles hold 6.5 pixels per valid pixel. SLAP2 fields are sparse: 13% of the 780125 grid is valid. Dense convolutions pay for the empty part between ROIs and for the 23-pixel reach around each ROI.
@@ -2993,7 +2994,7 @@ The blind spot: the output at frame t never sees frames t - 8 to t + 8 at the pi
 
    The price: the network loses 4 frames of the near context on each side. For iGluSnFR4f's fast events that is likely harmless. For slower indicators the window grows anyway (#32).
 
-With 1 to 3 together at k = 4, the cost is about 0.54 M MAC per output voxel against 1.52 M for the same geometry today (2.8x). Memory traffic falls roughly in proportion, since every activation after the first block has 1/k of the frames.
+With 1 to 3 together at k = 4, the cost is about 0.54 M MAC per output voxel against 1.39 M for the same geometry today (2.6x). Memory traffic falls roughly in proportion, since every activation after the first block has 1/k of the frames.
 
 ### What the decimation test says
 
@@ -3006,7 +3007,7 @@ So a network whose output is sampled at 20 Hz and interpolated to the frames wou
 
 ### Distillation plan (no training tonight)
 
-1. **Teacher:** s6_ft, or its successor after the retraining of #48. Run it with `--engine stream` (the same baselines, about 2x cheaper than tiles).
+1. **Teacher:** s6_ft, or its successor after the retraining of #48. Run it with `--engine stream` (the same baselines; 3.7x faster than tiles on the 4060 Ti).
 2. **Student:** the low-rate architecture above (k = 4; same widths first, then width 24 and half-plane width 16 if the time target needs it). Blind spot built in and covered by `test_blindspot.py`.
    - Warm start: blocks of the teacher's causal branches with dilation 4d map to the student's low-rate blocks with dilation d (same kernels, a natural initialization). The half-plane trunks copy as they are.
 3. **Loss.** Online distillation on the training windows: the teacher's forward pass (no gradient, float16) gives mu and var at every voxel of the loss region. The student fits:
