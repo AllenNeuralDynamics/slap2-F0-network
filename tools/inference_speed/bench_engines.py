@@ -101,8 +101,13 @@ def main():
         with h5py.File(a.stored, "r") as f:
             stored = f["baseline"][:].transpose(0, 2, 1)[:, rows, cols].astype(np.float32)
     ref = None
+    key = {"cache": str(Path(a.cache).resolve()), "ckpt": str(Path(a.ckpt).resolve()), "first": a.variants[0]}
+    keyf = Path(a.save_ref + ".json") if a.save_ref else None
     if a.save_ref and Path(a.save_ref).exists():
+        if not keyf.exists() or json.loads(keyf.read_text()) != key:
+            raise SystemExit(f"{a.save_ref} was saved for another trial-path, checkpoint or reference variant")
         ref = np.load(a.save_ref)
+        rec["reference"] = dict(key, loaded=True)
     for v in a.variants:
         parts = v.split(":")
         kind = parts[0]
@@ -129,8 +134,10 @@ def main():
         info["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
         if ref is None:
             ref = mu
+            rec["reference"] = dict(key, loaded=False)
             if a.save_ref:
                 np.save(a.save_ref, mu)
+                keyf.write_text(json.dumps(key))
         else:
             info["vs_ref"] = diff(mu, ref)
             f16 = lambda a: a.astype(np.float16).astype(np.float32)  # noqa: E731

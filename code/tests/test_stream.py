@@ -164,8 +164,8 @@ def test_speed_arguments_are_checked():
             check_speed_args(Namespace(**{**ok, name: bad}))
 
 
-@pytest.mark.parametrize("layout", ["ncdhw", "cl"])
-def test_out_of_memory_retries_give_the_same_output(tmp_path, monkeypatch, layout):
+@pytest.mark.parametrize("layout,where", [("ncdhw", "causal"), ("cl", "causal"), ("cl", "stats"), ("cl", "pooled")])
+def test_out_of_memory_retries_give_the_same_output(tmp_path, monkeypatch, layout, where):
     """Running out of memory part way through a rectangle restarts it with half
     the chunk (and, channels-last, smaller statistics and pooled passes): the
     output equals an uninterrupted run, and the retry is counted."""
@@ -180,20 +180,42 @@ def test_out_of_memory_retries_give_the_same_output(tmp_path, monkeypatch, layou
     with TrialFile(fn) as tr:
         rows, cols = valid_index(tr)
         ref, _ = StreamPredictor(model, wcfg, cpu, None, chunk=64, layout=layout).predict(tr, st, rows, cols)
-        cls = sm._CausalStateCL if layout == "cl" else sm._CausalState
-        orig, calls = cls.step, []
+        calls = []
+        if where == "causal":  # in the network's chunks, part way through each rectangle
+            cls = sm._CausalStateCL if layout == "cl" else sm._CausalState
+            orig = cls.step
 
-        def fail_on_long_chunks(self, x):
-            n = x.shape[0] if layout == "cl" else x.shape[2]
-            calls.append(n)
-            if n > 32 and len(calls) > 3:  # part way through the first rectangle
-                raise torch.OutOfMemoryError("CUDA out of memory (test)")
-            return orig(self, x)
+            def failing(self, x):
+                n = x.shape[0] if layout == "cl" else x.shape[2]
+                calls.append(n)
+                if n > 32 and len(calls) > 3:
+                    raise torch.OutOfMemoryError("CUDA out of memory (test)")
+                return orig(self, x)
 
-        monkeypatch.setattr(cls, "step", fail_on_long_chunks)
-        sp = StreamPredictor(model, wcfg, cpu, None, chunk=64, layout=layout)
+            monkeypatch.setattr(cls, "step", failing)
+        elif where == "stats":  # in the statistics pass, on its full pixel block
+            orig_s = sm.blind_window_stats
+
+            def failing(m, v, *a):
+                calls.append(m.shape[2])
+                if m.shape[2] > 64:  # blocks of the test's pixel_block (100); 64 after a retry
+                    raise torch.OutOfMemoryError("CUDA out of memory (test)")
+                return orig_s(m, v, *a)
+
+            monkeypatch.setattr(sm, "blind_window_stats", failing)
+        else:  # in the pooled pass, on its longest chunks
+            orig_p = sm.pooled_features_at
+
+            def failing(x, *a, **k):
+                calls.append(x.shape[2])
+                if x.shape[2] > 140:  # the whole trial (150 + 7 frames); 128 + 7 after two retries
+                    raise torch.OutOfMemoryError("CUDA out of memory (test)")
+                return orig_p(x, *a, **k)
+
+            monkeypatch.setattr(sm, "pooled_features_at", failing)
+        sp = StreamPredictor(model, wcfg, cpu, None, chunk=64, layout=layout, pixel_block=100)
         mu, _ = sp.predict(tr, st, rows, cols)
-    assert sp.timings["oom_retries"] >= 1 and min(sp.timings["chunks"]) <= 32
+    assert calls and sp.timings["oom_retries"] >= 1 and min(sp.timings["chunks"]) <= 32
     if layout == "cl":  # the passes that do not follow the chunk shrank as well
         assert sp.timings["pooled_frames"] < 512 and sp.timings["stats_block"] < sp.pixel_block
     np.testing.assert_allclose(mu, ref, rtol=2e-5, atol=2e-5)

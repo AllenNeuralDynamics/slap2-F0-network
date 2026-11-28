@@ -109,7 +109,7 @@ def check_supported(cfg, wcfg) -> None:
         raise ValueError(f"the stream engine supports spatial downsampling by 1 or 2, not {cfg.spatial_factor}")
     if wcfg.out_px % 2:
         raise ValueError(f"the stream engine needs an even tile size, not out_px {wcfg.out_px}")
-    if cfg.gap + cfg.window_reach >= wcfg.t_reach or wcfg.t_reach < 4:  # window stats and pooled frames
+    if cfg.gap + cfg.window_reach > wcfg.t_reach or wcfg.t_reach < 4:  # window stats and pooled frames
         raise ValueError(f"the stream engine needs the window statistics (gap + window_reach = "
                          f"{cfg.gap + cfg.window_reach}) and the pooled features (4 frames) within t_reach "
                          f"({wcfg.t_reach})")
@@ -665,6 +665,10 @@ class StreamPredictor:
                     pf[a:b, :, k] = fe.permute(1, 0, 2).to(half).to(pf.device)
                     del x, feats, fe
         tim["same_frame"] += time.time() - t0
+        if dev.type == "cuda":  # the chunk again, now that the stores and the movie hold their memory
+            L = max(16, min(L, int(self.mem_fraction * torch.cuda.mem_get_info()[0] * self._shrink
+                                   / (self.bytes_per_voxel * rect.area))))
+        tim["chunks_used"] = tim.get("chunks_used", []) + [L]
         # 2. future branch, backwards over trial frames [shift, T + tR): kept at the output pixels
         t0 = time.time()
         hf_store = self._store((T, cfg.width, N), half, 0.25)
