@@ -1,0 +1,592 @@
+"""Streaming inference: the same baselines as ``predict.predict_trial`` with
+far less work (slap2-F0-network#33).
+
+``predict_trial`` runs the whole network on each tile's window: the training
+tile (48 x 48 output pixels) plus the model's reach on every side (23 px and
+263 frames). Neighbouring tiles' windows overlap, so most input voxels are
+processed two to four times, and each causal branch also runs over the 263
+frames of the window that it never uses (the past branch over the future
+halo, the future branch over the past one). This engine computes each
+quantity once:
+
+* **Rectangles.** The tiles are the reference's (``predict.tile_origins``);
+  the union of their windows is split into rectangles (connected parts,
+  each its bounding box, split by row bands when it would hold too many
+  pixels). Corners stay at the windows' parity and sizes even, so the
+  half-resolution paths pair the same rows and columns as in every tile.
+  Convolutions are translation-equivariant and every output pixel lies at
+  least the reach inside its rectangle, so the branches give the tile's
+  values there.
+* **Time in chunks with state.** The causal branches run once over the
+  trial in chunks, the past forwards from frame -t_reach and the future
+  backwards from T - 1 + t_reach, each block keeping the last 2 x dilation
+  frames of its temporal convolution's input (zeros at the start, as the
+  window's padding). This is the same computation as one window over the
+  whole trial, without a temporal halo and in bounded memory. The future
+  branch runs first; its output at the output pixels is kept (GPU, or host
+  memory when it does not fit).
+* **Same-frame parts per chunk.** The half-plane branches (symmetric in
+  time, reach 31 frames) run per chunk with that halo. The pooled (and
+  motion) features depend on the window's geometry beyond the reach (half-
+  widths 32 and the whole window), so they are computed per tile on the
+  tile's own window, as in the reference. Window statistics and edge
+  features are per pixel in time and computed at the output pixels only.
+* **Fusion at the output pixels only**, as a flat list of pixels (the
+  fusion layers are pointwise), in blocks of pixels.
+
+Numerics: the same operations in the same precision (the model cast to
+float16 and float16 autocast, as ``predict.prepare``), but other shapes, so
+cuDNN may choose other algorithms and float sums run in another order: the
+outputs agree with the reference to float16 rounding, not bit for bit.
+``tests/test_stream.py`` checks the equality in float32 on the CPU.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from .model import (SlabBlindSpotNet, _residual, blind_window_stats, edge_features, make_inputs, motion_features,
+                    pooled_features)
+from .predict import tile_origins
+
+
+@dataclass
+class Rect:
+    """A rectangle of the trial grid (rows r0:r1, cols c0:c1, may extend past
+    the grid) and the tiles (output origins) whose windows it contains."""
+    r0: int
+    r1: int
+    c0: int
+    c1: int
+    tiles: list
+
+    @property
+    def area(self) -> int:
+        """Pixels in the rectangle."""
+        return (self.r1 - self.r0) * (self.c1 - self.c0)
+
+
+def _bbox(tiles, op: int, sR: int) -> tuple[int, int, int, int]:
+    """The rectangle holding the windows of these tiles."""
+    rs = [r for r, _ in tiles]
+    cs = [c for _, c in tiles]
+    return min(rs) - sR, max(rs) + op + sR, min(cs) - sR, max(cs) + op + sR
+
+
+def plan_rects(want: np.ndarray, op: int, sR: int, max_px: int = 0) -> list[Rect]:
+    """Rectangles covering the windows of ``tile_origins(want, op)``: the
+    connected parts of the windows' union (8-connected), each its bounding
+    box; a part whose box holds more than ``max_px`` pixels (0: no limit) is
+    split into groups of whole row bands. Every tile is in exactly one."""
+    bands = tile_origins(want, op)
+    tiles = [(r0, c0) for r0, cs in bands for c0 in cs]
+    if not tiles:
+        return []
+    # union-find over tiles whose windows touch or overlap
+    parent = list(range(len(tiles)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    w = op + 2 * sR
+    for i, (ra, ca) in enumerate(tiles):
+        for j in range(i):
+            rb, cb = tiles[j]
+            if abs(ra - rb) <= w and abs(ca - cb) <= w:
+                parent[find(i)] = find(j)
+    groups: dict[int, list] = {}
+    for i, t in enumerate(tiles):
+        groups.setdefault(find(i), []).append(t)
+    out = []
+    for g in groups.values():
+        g.sort()
+        parts = [g]
+        if max_px > 0:
+            parts, cur = [], []
+            for r0 in sorted({r for r, _ in g}):
+                band = [t for t in g if t[0] == r0]
+                trial = cur + band
+                a, b, c, d = _bbox(trial, op, sR)
+                if cur and (b - a) * (d - c) > max_px:
+                    parts.append(cur)
+                    cur = band
+                else:
+                    cur = trial
+            parts.append(cur)
+        for p in parts:
+            out.append(Rect(*_bbox(p, op, sR), tiles=p))
+    out.sort(key=lambda r: (r.r0, r.c0))
+    return out
+
+
+class _CausalState:
+    """A causal branch run forwards over chunks: each temporal convolution
+    keeps the last 2 x dilation frames of its input (``CausalBlock``)."""
+
+    def __init__(self, branch):
+        self.b = branch
+        self.full = [None] * len(branch.full)
+        self.low = [None] * len(branch.low)
+
+    @staticmethod
+    def _block(blk, x, cache):
+        h = F.gelu(blk.spatial(x))
+        d2 = blk.t_pad  # 2 x dilation
+        if cache is None:
+            cache = h.new_zeros(h.shape[:2] + (d2,) + h.shape[3:])
+        hh = torch.cat([cache, h], 2)
+        del h
+        new = hh[:, :, hh.shape[2] - d2:].clone()
+        t = F.conv3d(hh, blk.temporal.weight, blk.temporal.bias, dilation=blk.temporal.dilation)
+        del hh
+        out = _residual(x, blk.alpha, F.gelu(t))
+        for m in blk.mlp or ():
+            out = m(out)
+        return out, new
+
+    def step(self, x: torch.Tensor) -> torch.Tensor:
+        """The branch before its shift on the next chunk (B, C, L, H, W)."""
+        b = self.b
+        h = b.inp(x)
+        for i, blk in enumerate(b.full):
+            h, self.full[i] = self._block(blk, h, self.full[i])
+        if b.down is not None:
+            L, H, W = h.shape[2:]
+            f = b.cfg.spatial_factor
+            if H % f or W % f:
+                raise ValueError("rectangle sizes must be multiples of the spatial factor")
+            low = b.down(h)
+            for i, blk in enumerate(b.low):
+                low, self.low[i] = self._block(blk, low, self.low[i])
+            up = F.interpolate(low, size=(L, H, W), mode="nearest")
+            h = h + up
+        return h
+
+
+# ------------------------------------------------- channels-last fast path
+# The same layers on frames stored (T, H, W, C), channels last: the per-frame
+# convolutions run as 2-D convolutions on (T, C, H, W) views with channels-last
+# strides, the temporal ones as 2-D convolutions over (1, C, T, H * W) views,
+# the 1 x 1 x 1 layers as matrix products over the channels, and the
+# half-resolution paths are added at the output pixels only (no upsampled
+# copy). cuDNN then needs no layout conversions.
+
+
+def _conv_sp(x, conv, padding=0, stride=1):
+    """A (1, k, k) or (1, kh, kw) Conv3d applied per frame to x (T, H, W, C)."""
+    w = conv.weight[:, :, 0]
+    y = F.conv2d(x.permute(0, 3, 1, 2), w, conv.bias, stride=stride, padding=padding,
+                 dilation=conv.dilation[1:])
+    return y.permute(0, 2, 3, 1)
+
+
+def _conv_t(x, conv, padding=0):
+    """A (3, 1, 1) Conv3d in time on x (T, H, W, C): 2-D over (1, C, T, H * W)."""
+    T, H, W, C = x.shape
+    v = x.reshape(1, T, H * W, C).permute(0, 3, 1, 2)
+    y = F.conv2d(v, conv.weight[:, :, :, :, 0], conv.bias, padding=(padding, 0), dilation=(conv.dilation[0], 1))
+    return y.permute(0, 2, 3, 1).reshape(y.shape[2], H, W, -1)
+
+
+def _lin(x, conv):
+    """A 1 x 1 x 1 Conv3d on the last (channel) axis."""
+    return F.linear(x, conv.weight.flatten(1), conv.bias)
+
+
+def _pointwise_cl(blocks, x):
+    """PointwiseBlocks on (..., C)."""
+    for m in blocks or ():
+        x = _residual(x, m.alpha, _lin(F.gelu(_lin(x, m.w1)), m.w2))
+    return x
+
+
+class _CausalStateCL(_CausalState):
+    """``_CausalState`` on channels-last frames (T, H, W, C); ``step`` returns
+    the full-resolution part and the half-resolution part, which the caller
+    adds at its pixels (the reference upsamples by nearest neighbour)."""
+
+    @staticmethod
+    def _block(blk, x, cache):
+        if blk.spatial.kernel_size[1] > 1:
+            pad = (blk.spatial.padding[1], blk.spatial.padding[2])
+            h = F.gelu(_conv_sp(x, blk.spatial, padding=pad))
+        else:
+            h = F.gelu(_lin(x, blk.spatial))
+        d2 = blk.t_pad
+        if cache is None:
+            cache = h.new_zeros((d2,) + h.shape[1:])
+        hh = torch.cat([cache, h], 0)
+        del h
+        new = hh[hh.shape[0] - d2:].clone()
+        t = _conv_t(hh, blk.temporal)
+        del hh
+        out = _residual(x, blk.alpha, F.gelu(t))
+        return _pointwise_cl(blk.mlp, out), new
+
+    def step(self, x):
+        """x (L, H, W, n_inputs) -> (full (L, H, W, C), low (L, H/f, W/f, C) or None)."""
+        b = self.b
+        h = _lin(x, b.inp)
+        for i, blk in enumerate(b.full):
+            h, self.full[i] = self._block(blk, h, self.full[i])
+        low = None
+        if b.down is not None:
+            f = b.cfg.spatial_factor
+            if h.shape[1] % f or h.shape[2] % f:
+                raise ValueError("rectangle sizes must be multiples of the spatial factor")
+            low = _conv_sp(h, b.down, stride=f)
+            for i, blk in enumerate(b.low):
+                low, self.low[i] = self._block(blk, low, self.low[i])
+        return h, low
+
+
+def _half_plane_cl(br, x):
+    """HalfPlaneBranch on channels-last frames x (T, H, W, n_inputs) (H, W even),
+    before its final shift: (full (T, H, W, C), low (T, H/2, W/2, C) or None);
+    the output at row i is full[i - s] + low[(i - s - 1) // 2] (s = box_radius
+    + 1, rows i - s >= 1), as the reference's padding and shifts give."""
+    h = _lin(x, br.inp)
+
+    def block(blk, x):
+        d = blk.s_dil
+        H = x.shape[1]
+        hs = _conv_sp(x, blk.spatial, padding=(d, d))[:, :H]  # rows r - d and r
+        t = _conv_t(F.gelu(hs), blk.temporal, padding=blk.t_dil)
+        out = _residual(x, blk.alpha, F.gelu(t))
+        return _pointwise_cl(blk.mlp, out)
+
+    for blk in br.full:
+        h = block(blk, h)
+    low = None
+    if br.down is not None:
+        low = _conv_sp(h, br.down, stride=2)
+        for blk in br.low:
+            low = block(blk, low)
+    return h, low
+
+
+class StreamPredictor:
+    """``predict.predict_trial``'s baselines by streaming (module docstring)."""
+
+    def __init__(self, model: SlabBlindSpotNet, wcfg, device: torch.device, amp_dtype=None,
+                 chunk: int = 256, max_px: int = 0, pixel_block: int = 8192, keep_future_on_gpu: bool | None = None,
+                 layout: str = "ncdhw"):
+        if layout not in ("ncdhw", "cl"):
+            raise ValueError(f"layout must be ncdhw or cl, not {layout!r}")
+        self.cl = layout == "cl"
+        self.m, self.cfg = model, model.cfg
+        self.w = wcfg
+        self.device, self.amp = device, amp_dtype
+        self.chunk = int(chunk)
+        self.max_px = int(max_px)
+        self.pixel_block = int(pixel_block)
+        self.keep_future_on_gpu = keep_future_on_gpu
+        self.timings: dict = {}
+
+    def _autocast(self):
+        return torch.autocast(device_type=self.device.type, dtype=self.amp, enabled=self.amp is not None)
+
+    # ------------------------------------------------------------- inputs
+    def _maps(self, tr, st, pad: int):
+        """Whole-trial maps padded by `pad` on every side, as predict_trial."""
+        R, C = tr.n_rows, tr.n_cols
+        mean_p = np.full((R + 2 * pad, C + 2 * pad), np.nan, np.float32)
+        mean_p[pad:pad + R, pad:pad + C] = np.where(tr.valid, tr.mean_image, np.nan)
+        vf_p = np.zeros_like(mean_p)
+        vf_p[pad:pad + R, pad:pad + C] = np.nan_to_num(tr.varfac)
+        var_p = np.full_like(mean_p, np.nan)
+        var_p[pad:pad + R, pad:pad + C] = st["var_movie"]
+        var_p = np.where(np.isfinite(mean_p), var_p, np.nan).astype(np.float32)
+        return mean_p, vf_p, var_p
+
+    def _movie_rect(self, movie, f0, f1, r0, r1, c0, c1):
+        """movie[f0:f1, r0:r1, c0:c1] with NaN outside the trial (frames and
+        grid), at pixels that are not valid and on discarded frames (as
+        predict_trial reads its bands)."""
+        T, R, C = movie.shape
+        out = np.full((f1 - f0, r1 - r0, c1 - c0), np.nan, np.float32)
+        a, b = max(f0, 0), min(f1, T)
+        ra, rb, ca, cb = max(r0, 0), min(r1, R), max(c0, 0), min(c1, C)
+        if a < b and ra < rb and ca < cb:
+            m = movie[a:b, ra:rb, ca:cb].astype(np.float32)
+            m[:, ~self._valid[ra:rb, ca:cb]] = np.nan
+            m[self._discard[a:b]] = np.nan
+            out[a - f0:b - f0, ra - r0:rb - r0, ca - c0:cb - c0] = m
+        return out
+
+    def _x(self, movie_np, maps, rect_rc, pad, scale, gain):
+        """make_inputs of a movie block (L, H, W) over rows/cols rect_rc."""
+        r0, r1, c0, c1 = rect_rc
+        mean_p, vf_p, var_p = maps
+        dev = self.device
+        sl = (slice(r0 + pad, r1 + pad), slice(c0 + pad, c1 + pad))
+        t = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)[None]  # noqa: E731
+        return make_inputs(t(movie_np), t(mean_p[sl]), t(vf_p[sl]), scale, t(var_p[sl]), gain,
+                           varfac_norm=self.cfg.varfac_norm)
+
+    # ----------------------------------------------------------- predict
+    @torch.no_grad()
+    def predict(self, tr, st, rows: np.ndarray, cols: np.ndarray, movie: np.ndarray | None = None):
+        """Baseline and noise variance at the valid pixels (rows, cols): (frame,
+        N) float32 in counts and counts^2, as ``predict.predict_trial``.
+        ``movie`` (frame, row, col) in counts with NaN where not valid or
+        discarded; default read from ``tr``."""
+        import time
+        cfg, w = self.cfg, self.w
+        dev = self.device
+        if movie is None:
+            movie = tr._f["movie"][tr.channel]  # read in blocks as needed (an HDF5 dataset or an array)
+            if not isinstance(movie, np.ndarray):
+                movie = np.asarray(movie, np.float32)
+        self._valid = np.asarray(tr.valid, bool)
+        self._discard = np.asarray(tr.discard, bool)
+        T, R, C = movie.shape
+        tR, sR, op = w.t_reach, w.s_reach, w.out_px
+        shift = cfg.gap + 1
+        index = np.full((R, C), -1, np.int64)
+        index[rows, cols] = np.arange(len(rows))
+        rects = plan_rects(index >= 0, op, sR, self.max_px)
+        pad = sR + op + 2  # maps padded so every rectangle is a plain slice
+        maps = self._maps(tr, st, pad)
+        s = float(tr.scale)
+        scale = torch.full((1,), s, device=dev)
+        gain = torch.full((1,), float(st["gain"]), device=dev)
+        mu_out = np.full((T, len(rows)), np.nan, np.float32)
+        var_out = np.full((T, len(rows)), np.nan, np.float32)
+        L = max(1, self.chunk)
+        tim = {"future": 0.0, "past": 0.0, "same_frame": 0.0, "fusion": 0.0, "inputs": 0.0, "n_rects": len(rects),
+               "rect_px": [r.area for r in rects]}
+        for rect in rects:
+            # output pixels of this rectangle: the valid pixels of its tiles' regions, in index order
+            sel = []
+            for r0, c0 in rect.tiles:
+                sub = index[r0:r0 + op, c0:c0 + op]
+                sel.append(sub[sub >= 0])
+            px = np.sort(np.concatenate(sel)) if sel else np.zeros(0, np.int64)
+            if not len(px):
+                continue
+            pr, pc = rows[px] - rect.r0, cols[px] - rect.c0  # positions in the rectangle
+            pr, pc = pr.astype(np.int64), pc.astype(np.int64)
+            prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
+            N = len(px)
+            rc = (rect.r0, rect.r1, rect.c0, rect.c1)
+
+            # 1. future branch, backwards over trial frames [shift, T + tR): keep it at the output pixels
+            t0 = time.time()
+            on_gpu = self.keep_future_on_gpu
+            if on_gpu is None:
+                need = T * N * cfg.width * 2
+                on_gpu = dev.type != "cuda" or need < 0.25 * torch.cuda.mem_get_info()[0]
+            hf_store = (torch.empty((cfg.width, T, N), dtype=torch.float16 if self.amp else torch.float32,
+                                    device=dev if on_gpu else "cpu", pin_memory=(not on_gpu and dev.type == "cuda")))
+            fut = (_CausalStateCL if self.cl else _CausalState)(self.m.future)
+            hi = T + tR  # exclusive end of the reversed sequence's first chunk
+            while hi > shift:  # pre-shift frames shift..T-1+shift give outputs 0..T-1
+                lo = max(hi - L, shift)
+                ti = time.time()
+                xm = self._movie_rect(movie, lo, hi, *rc)
+                x = self._x(xm, maps, rc, pad, scale, gain)
+                tim["inputs"] += time.time() - ti
+                with self._autocast():
+                    g = self._branch(fut, x, pr, pc, flip=True)  # (C, frames lo..hi-1, N)
+                del x
+                # pre-shift frame f -> output frame f - shift
+                a, b = max(lo - shift, 0), min(hi - shift, T)
+                if a < b:
+                    g = g[:, a + shift - lo:b + shift - lo]
+                    hf_store[:, a:b] = g.to(hf_store.dtype) if on_gpu else g.to(hf_store.dtype).cpu()
+                del g
+                hi = lo
+            del fut
+            tim["future"] += time.time() - t0
+            # 2. past branch forwards from frame -tR; same-frame parts and fusion per chunk of output frames
+            past = (_CausalStateCL if self.cl else _CausalState)(self.m.past)
+            f_in = -tR  # next pre-shift frame to process (zero state before it, as the window's padding)
+            pending = None  # past branch at output frames out_t.., (C, frames, N)
+            out_t = 0
+            while out_t < T:
+                t1 = min(out_t + L, T)  # output frames out_t..t1-1 this round
+                t0 = time.time()
+                while f_in < t1 - shift:  # pre-shift frame f -> output frame f + shift
+                    fe = min(f_in + L, t1 - shift)
+                    ti = time.time()
+                    xm = self._movie_rect(movie, f_in, fe, *rc)
+                    x = self._x(xm, maps, rc, pad, scale, gain)
+                    tim["inputs"] += time.time() - ti
+                    with self._autocast():
+                        g = self._branch(past, x, pr, pc)
+                    del x
+                    first = f_in + shift
+                    f_in = fe
+                    if fe + shift <= out_t:  # pre-trial outputs only
+                        continue
+                    g = g[:, max(out_t - first, 0):]
+                    pending = g if pending is None else torch.cat([pending, g], 1)
+                tim["past"] += time.time() - t0
+                n = t1 - out_t
+                hp_chunk, pending = pending[:, :n], pending[:, n:]
+                mu, var = self._fuse(movie, maps, rc, pad, rect, index, px, pr, pc, prt, pct, out_t, t1, hp_chunk,
+                                     hf_store[:, out_t:t1], scale, gain, tim)
+                mu_out[out_t:t1, px] = mu * s
+                var_out[out_t:t1, px] = var * s * s
+                out_t = t1
+            del past, hf_store
+        self.timings = tim
+        return mu_out, var_out
+
+    def _branch(self, state, x, pr, pc, flip=False):
+        """A causal branch's next chunk (before its shift) at the output pixels
+        (rows pr, cols pc of the rectangle): (C, frames, N). ``flip``: the
+        future branch, which runs on the chunk in reversed time."""
+        if not self.cl:
+            dev = x.device
+            prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
+            h = state.step(x.flip(2) if flip else x)
+            if flip:
+                h = h.flip(2)
+            return h[0][:, :, prt, pct]
+        xc = x[0].permute(1, 2, 3, 0)  # (L, H, W, n_inputs)
+        xc = (xc.flip(0) if flip else xc).contiguous()
+        full, low = state.step(xc)
+        dev = x.device
+        prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
+        g = full[:, prt, pct]
+        if low is not None:
+            f = state.b.cfg.spatial_factor
+            g = g + low[:, prt // f, pct // f]
+        if flip:
+            g = g.flip(0)
+        return g.permute(2, 0, 1)
+
+    def _fuse(self, movie, maps, rc, pad, rect, index, px, pr, pc, prt, pct, t0, t1, hp, hf, scale, gain, tim):
+        """mu and var (frames, N) in scale units for output frames t0..t1 of one
+        rectangle, given the past and future branches there (C, frames, N)."""
+        import time
+        cfg, w = self.cfg, self.w
+        dev = self.device
+        n = t1 - t0
+        N = len(px)
+        tc = time.time()
+        extra = []
+        if cfg.box:
+            R = max(cfg.hp_temporal_reach, 4)  # the half-planes' reach; the pooled features need t-3..t+4
+            xm = self._movie_rect(movie, t0 - R, t1 + R, *rc)
+            x = self._x(xm, maps, rc, pad, scale, gain)  # (1, 5, n + 2R, H, W)
+            with self._autocast():
+                if self.cl:
+                    hh = self._half_planes_cl(x, pr, pc)[:, :, R:R + n]
+                else:
+                    hh = self._half_planes(x, prt, pct)[:, :, R:R + n]  # (1, 4 hp_width, n, N, 1)
+            # pooled (and motion) features per tile, on the tile's own window
+            op, sR = w.out_px, w.s_reach
+            npool = cfg.n_pool + cfg.n_motion
+            pf = torch.zeros((1, npool, n, N, 1), dtype=torch.float32, device=dev)
+            pos = {int(p): k for k, p in enumerate(px)}
+            for r0, c0 in rect.tiles:
+                sub = index[r0:r0 + op, c0:c0 + op]
+                ok = sub >= 0
+                if not ok.any():
+                    continue
+                wr, wc = r0 - sR - rect.r0, c0 - sR - rect.c0
+                ns = op + 2 * sR
+                xt = x[:, :, R - 3:R + n + 4, wr:wr + ns, wc:wc + ns]
+                feats = [pooled_features(xt, 3, 3 + n, cfg.box_radius, cfg.pool_scales)]
+                if cfg.motion_features:
+                    feats.append(motion_features(xt, 3, 3 + n, cfg.box_radius, cfg.pool_scales))
+                fe = torch.cat(feats, 1)[:, :, :, sR:sR + op, sR:sR + op][:, :, :, :sub.shape[0], :sub.shape[1]]
+                ii, jj = np.nonzero(ok)
+                k = torch.from_numpy(np.array([pos[int(p)] for p in sub[ok]], np.int64)).to(dev)
+                pf[:, :, :, k, 0] = fe[:, :, :, torch.from_numpy(ii).to(dev), torch.from_numpy(jj).to(dev)]
+            del x
+            extra = [hh, pf]
+        tim["same_frame"] += time.time() - tc
+        tf = time.time()
+        # per-pixel inputs at the output pixels: frames t0 - (gap + reach) .. t1 + gap + reach
+        span = cfg.gap + cfg.window_reach
+        rr = np.asarray(prt.cpu().numpy() + rect.r0)
+        cc = np.asarray(pct.cpu().numpy() + rect.c0)
+        T = movie.shape[0]
+        a, b = t0 - span, t1 + span
+        mv = np.full((b - a, N), np.nan, np.float32)
+        aa, bb = max(a, 0), min(b, T)
+        mv[aa - a:bb - a] = movie[aa:bb, rr, cc]
+        mv[aa - a:bb - a][self._discard[aa:bb]] = np.nan  # (the output pixels are valid)
+        mean_p, vf_p, var_p = maps
+        t = lambda q: torch.from_numpy(np.ascontiguousarray(q)).to(dev)  # noqa: E731
+        mi, vf, vm = (t(q[rr + pad, cc + pad])[None, :, None] for q in (mean_p, vf_p, var_p))
+        mus, vars_ = [], []
+        B = max(1, self.pixel_block)
+        for k0 in range(0, N, B):
+            k1 = min(k0 + B, N)
+            x = make_inputs(t(mv[:, k0:k1])[None, :, :, None], mi[:, k0:k1], vf[:, k0:k1], scale, vm[:, k0:k1], gain,
+                            varfac_norm=cfg.varfac_norm)  # (1, 5, b - a, n_px, 1)
+            wm, wv, nn_ = blind_window_stats(x[:, 0], x[:, 1], cfg.gap, cfg.window_reach)
+            core = slice(span, span + n)
+            edge = gates = None
+            if cfg.edge_features:
+                edge, gates = edge_features(x[:, 0], x[:, 1], x[:, 2, 0], cfg.gap, cfg.window_reach, cfg.edge_near,
+                                            (span, span + n))
+            p = {"hp": hp[None, :, :, k0:k1, None], "hf": hf[None, :, :, k0:k1, None].to(hp.device),
+                 "wm": wm[:, core], "wv": wv[:, core], "n": nn_[:, core],
+                 "extra": [e[:, :, :, k0:k1] for e in extra], "edge": edge, "gates": gates,
+                 "x": x[:, :, core], "s": scale.float(), "g": gain.float()}
+            if extra:
+                p["extra"] = [e.to(extra[0].dtype) for e in p["extra"]]
+            with self._autocast():
+                mu, var = self.m.head(p)
+            mus.append(mu[0, :, :, 0].float().cpu().numpy())
+            vars_.append(var[0, :, :, 0].float().cpu().numpy())
+        tim["fusion"] += time.time() - tf
+        return np.concatenate(mus, 1), np.concatenate(vars_, 1)
+
+    def _half_planes(self, x, prt, pct):
+        """SlabBlindSpotNet._half_planes at the output pixels only: (1, 4 *
+        hp_width, frames, N, 1), one direction at a time."""
+        m = self.m
+        H, W = x.shape[3:]
+        xp = F.pad(x, (0, W % 2, 0, H % 2))
+        outs = []
+        for k in range(4):
+            br = m.hp_views[k] if m.hp_views is not None else m.hp
+            o = torch.rot90(br(torch.rot90(xp, k, (3, 4))), -k, (3, 4))[..., :H, :W]
+            outs.append(o[:, :, :, prt, pct][..., None])
+            del o
+        return torch.cat(outs, 1)
+
+    def _half_planes_cl(self, x, pr, pc):
+        """``_half_planes`` on channels-last frames, at the output pixels only:
+        each direction runs on the rotated rectangle and is read at the output
+        pixels' rotated positions (no rotation back): (1, 4 * hp_width,
+        frames, N, 1)."""
+        m = self.m
+        H, W = x.shape[3:]
+        if H % 2 or W % 2:
+            raise ValueError("rectangle sizes must be even")
+        s = self.cfg.box_radius + 1
+        dev = x.device
+        idx = torch.arange(H * W).view(H, W)
+        outs = []
+        for k in range(4):
+            br = m.hp_views[k] if m.hp_views is not None else m.hp
+            xr = torch.rot90(x[0], k, (2, 3)).permute(1, 2, 3, 0).contiguous()  # (T, H', W', n_inputs)
+            ridx = torch.rot90(idx, k, (0, 1))
+            Wr = ridx.shape[1]
+            inv = torch.empty(H * W, dtype=torch.long)
+            inv[ridx.flatten()] = torch.arange(H * W)
+            pos = inv[torch.from_numpy(pr * W + pc)]
+            i = (pos // Wr).to(dev) - s
+            j = (pos % Wr).to(dev)
+            full, low = _half_plane_cl(br, xr)
+            g = full[:, i, j]
+            if low is not None:
+                g = g + low[:, (i - 1) // 2, j // 2]
+            outs.append(g)
+            del full, low
+        return torch.cat(outs, 2).permute(2, 0, 1)[None, :, :, :, None]

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -122,20 +123,24 @@ def stage_records(folder: Path, data: Path) -> dict:
     return out
 
 
-def write_wrapper(folder: Path, report: Path) -> Path:
+def write_wrapper(folder: Path, report: Path, extra: str = "") -> Path:
     """An executable that runs this repository's ``slap2-f0`` with this
-    interpreter and adds ``--report`` (predict_baselines runs it)."""
+    interpreter and adds ``--report`` and the options in ``extra`` (say,
+    ``--engine stream --prefetch 1``; predict_baselines runs it)."""
     folder.mkdir(parents=True, exist_ok=True)
     code = Path(__file__).resolve().parent
+    words = shlex.split(extra)
     if os.name == "nt":
         exe = folder / "slap2-f0.cmd"
+        more = "".join(f' "{w}"' for w in words)
         exe.write_text(f'@set "PYTHONPATH={code};%PYTHONPATH%"\r\n'
-                       f'@"{sys.executable}" -u -m slap2_f0.cli %* --report "{report}"\r\n')
+                       f'@"{sys.executable}" -u -m slap2_f0.cli %* --report "{report}"{more}\r\n')
     else:
         exe = folder / "slap2-f0"
+        more = "".join(f" {shlex.quote(w)}" for w in words)
         exe.write_text("#!/bin/sh\n"
                        f'export PYTHONPATH="{code}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
-                       f'exec "{sys.executable}" -u -m slap2_f0.cli "$@" --report "{report}"\n')
+                       f'exec "{sys.executable}" -u -m slap2_f0.cli "$@" --report "{report}"{more}\n')
         exe.chmod(0o755)
     return exe
 
@@ -295,7 +300,9 @@ def run_session(name: str, folder: Path, args, env: dict, info: dict) -> None:
     out.mkdir(parents=True, exist_ok=True)
     info["removed_incomplete"] = clear_incomplete(session, out, units)
     report = out / "predict_report.jsonl"
-    exe = args.f0_command or str(write_wrapper(scratch / "bin", report))
+    if args.f0_command and args.f0_args:
+        raise SystemExit("--f0_args goes with this repository's slap2-f0, not with --f0_command")
+    exe = args.f0_command or str(write_wrapper(scratch / "bin", report, args.f0_args))
     t0 = time.time()
     rec = predict_baselines(session, params, out, args.ckpt, units=units, device=args.device, command=exe,
                             verbose=True, out_frames=args.out_frames or None, digests=True)
@@ -354,6 +361,8 @@ def main(argv=None) -> int:
     p.add_argument("--device", default="cuda", help="predict-registered's device (cuda, cpu, auto)")
     p.add_argument("--asset_ids", default="", help="mount=id,... of the attached registration assets (recorded)")
     p.add_argument("--f0_command", default="", help="a slap2-f0 executable (default: this repository's)")
+    p.add_argument("--f0_args", default="", help="more slap2-f0 predict-registered options for this repository's "
+                                                 "slap2-f0, e.g. '--engine stream --prefetch 1 --async_write'")
     p.add_argument("--scratch", type=Path, default=None, help="working folder (default OUT/../scratch_predict)")
     args = p.parse_args(argv)
     args.scratch = args.scratch or args.out.parent / "scratch_predict"

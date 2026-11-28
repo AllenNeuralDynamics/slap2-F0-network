@@ -120,6 +120,7 @@ ckpt_label=""
 trial_paths=""
 out_frames=0
 asset_ids=""
+f0_args=""  # predict_registered: more slap2-f0 predict-registered options, e.g. "--engine stream --prefetch 1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -128,7 +129,7 @@ while [[ $# -gt 0 ]]; do
         *) shift; continue ;;
     esac
     case $name in
-        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args|giant_python_ref|ckpt|keep_registered|ckpt_label|trial_paths|out_frames|asset_ids) printf -v "$name" '%s' "$value" ;;
+        mode|giant_ref|max_duration_s|datasets|n_workers|export_workers|channels|keep_giant_outputs|compensate_online|save_tif|peak_method|wmf_peakth|stats|disk_gb|train_args|finetune_args|eval_args|predict_args|giant_python_ref|ckpt|keep_registered|ckpt_label|trial_paths|out_frames|asset_ids|f0_args) printf -v "$name" '%s' "$value" ;;
         *) echo "Ignoring unknown parameter --$name" ;;
     esac
 done
@@ -256,7 +257,7 @@ elif [[ "$mode" == "register" || "$mode" == "predict_registered" ]]; then
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$pypath" python3 -u "$CODE/predict_registered.py" \
             "$DATA" "$RESULTS/baselines" --ckpt "$ckpt" --ckpt_label "$ckpt_label" --sessions "$datasets" \
             --trial_paths "$trial_paths" --out_frames "$out_frames" --asset_ids "$asset_ids" \
-            --scratch "$SCRATCH/predict_registered" 2>&1 | tee "$RESULTS/logs/predict_registered.log"
+            --f0_args "$f0_args" --scratch "$SCRATCH/predict_registered" 2>&1 | tee "$RESULTS/logs/predict_registered.log"
         status="${PIPESTATUS[0]}"
     fi
     kill "$monitor" 2>/dev/null
