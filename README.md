@@ -6,6 +6,17 @@ The network is pretrained on simulated trials with a known baseline, built on re
 
 The design, measurements and phases are in [docs/plan.md](docs/plan.md).
 
+## What the released checkpoint is built for
+
+The released checkpoint, `s6_ft` (run S6_full fine-tuned, step 1700, locked 2026-11-26), was trained for one indicator, one frame rate and one blind window. Use it only on recordings that match all three:
+
+- **Indicator: iGluSnFR4f.** Every training session is a SLAP2 multi-ROI raster recording of iGluSnFR4f: the 40 exported sessions (`sessions/export_phase1.csv`, `export_phase2.csv`) are all in `sessions/slap2_iglusnfr4f_multiroi.csv`. The pretraining simulations are built on these trials as templates. The red channel (jRGECO1a, RCaMP3 or none) is not used.
+- **Frame rate: 80 Hz.** The network reads GIAnT's registered 80 Hz movies (`*_REGISTERED_DOWNSAMPLED-80Hz`), 12.5 ms per frame.
+- **Blind window: 8 frames on each side** (`ModelConfig.gap` = 8). The baseline at frame t never sees frames t − 8 to t + 8, i.e. 17 frames (212.5 ms, ±100 ms) around the output frame. In those frames it also never sees the pixels within 4 rows and columns (`box_radius` = 4, a 9 × 9 pixel box). Pixels further away are seen in every frame, the output frame included.
+- **Context:** 263 frames (3.3 s) on each side and 23 pixels around. The blind window statistics cover 8 < |dt| ≤ 262 frames.
+
+The blind window only keeps events out of the baseline while they are shorter than it; its size was chosen for iGluSnFR4f's kinetics. With a slower indicator (iGluSnFR4s, RCaMP3) the events outlast the window and leak into the baseline, so such recordings need their own checkpoint (issue #32).
+
 ## Status
 
 | Piece | State |
