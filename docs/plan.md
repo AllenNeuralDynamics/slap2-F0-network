@@ -3001,7 +3001,16 @@ With 1 to 3 together at k = 4, the cost is about 0.54 M MAC per output voxel aga
 - **Spectrum.** s6_ft's baseline moves by 4-5% of its mean over a trial (median pixel). Of that (mean-removed) power, 10-14% lies above 5 Hz, 3-5% above 10 Hz and 1.1-1.6% above 20 Hz (median over pixels; 780125 and the GFP copy alike).
 - **The baseline itself.** Block means at 20 Hz, linearly interpolated, change it by 0.6-0.75% (median relative), 4-9% at the 99.9th percentile. At 10 Hz: 0.9-1.2% and 6-12%.
 - **GFP copy against the truth (trial 1).** 40 and 20 Hz leave share found, amplitude, trace r, F0 and false events unchanged within 0.003, 0.04, 0.001, 0.001 and 0.01. 10 Hz loses 0.4 and 1.1 points of share found at injected sizes 0.25 and 0.5.
-- **Real data:** 780125 (see the 780125 table).
+- **Real data.** 780125, 5 trials x 2 paths, giant silo with the network baseline at the current dev defaults; each arm against full rate. Sources are matched by Hungarian assignment within 2 px; per matched source:
+
+  | arm | path | sources kept, full / arm | F1 | trace r | F0 | amplitude | events per source | event mass pooled |
+  |---|---|---|---|---|---|---|---|---|
+  | 20 Hz | 1 | 149 / 141 | 0.952 | 0.995 | 1.004 | 0.998 | 1.001 | 1.010 |
+  | 20 Hz | 2 | 124 / 124 | 0.960 | 0.995 | 1.003 | 0.998 | 1.001 | 1.005 |
+  | 10 Hz | 1 | 149 / 143 | 0.938 | 0.990 | 1.008 | 0.997 | 1.002 | 1.015 |
+  | 10 Hz | 2 | 124 / 119 | 0.955 | 0.990 | 1.007 | 0.997 | 1.002 | 1.016 |
+
+  On matched sources, 20 Hz changes F0, amplitude and events by at most 0.4%, and 10 Hz by about twice that. 4-6% of the sources differ between arms; they are not only the weakest (their event mass ranks at the 4th-83rd percentile of the matched ones).
 
 So a network whose output is sampled at 20 Hz and interpolated to the frames would change nothing that SILo's scores on ground truth resolve. This is the design target k = 4; k = 8 is the first factor that costs small events.
 
