@@ -300,7 +300,16 @@ class _Done:
         return self.value
 
 
+def check_speed_args(args: argparse.Namespace) -> None:
+    """Refuse speed options that would silently do nothing (a batch of 0 tiles
+    leaves every value NaN) or fail later."""
+    for name, least in (("batch", 1), ("stream_frames", 1), ("prefetch", 0), ("stream_px", 0), ("out_frames", 0)):
+        if getattr(args, name, least) < least:
+            raise SystemExit(f"--{name} must be at least {least}, not {getattr(args, name)}")
+
+
 def run(args: argparse.Namespace) -> None:
+    check_speed_args(args)
     if args.fast:
         args.engine = "stream"
         args.prefetch = args.prefetch or 1

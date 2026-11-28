@@ -147,3 +147,18 @@ def test_unsupported_checkpoints_are_refused():
     from dataclasses import replace
     with pytest.raises(ValueError, match="even tile"):
         check_supported(model.cfg, replace(wcfg, out_px=7))
+    with pytest.raises(ValueError, match="window statistics"):
+        check_supported(ModelConfig(**{**asdict(model.cfg), "window_reach": wcfg.t_reach}), wcfg)
+
+
+def test_speed_arguments_are_checked():
+    """A batch of 0 tiles (all-NaN output) and other impossible sizes are refused."""
+    from argparse import Namespace
+
+    from slap2_f0.registered import check_speed_args
+
+    ok = dict(batch=1, stream_frames=256, prefetch=0, stream_px=0, out_frames=0)
+    check_speed_args(Namespace(**ok))
+    for name, bad in (("batch", 0), ("batch", -2), ("stream_frames", 0), ("prefetch", -1), ("out_frames", -5)):
+        with pytest.raises(SystemExit):
+            check_speed_args(Namespace(**{**ok, name: bad}))

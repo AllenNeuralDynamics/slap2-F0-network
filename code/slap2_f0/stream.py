@@ -99,6 +99,8 @@ def check_supported(cfg, wcfg) -> None:
     - the variance-factor input relative to the window's median (v6 and older);
     - spatial downsampling by more than 2: rectangles keep the windows' parity,
       not their phase modulo a larger factor; odd tile sizes (odd rectangles);
+    - window statistics or pooled features reaching beyond the window's
+      temporal halo (the streams would see frames the tiles do not);
     - half-plane branches reaching further in time than the window (their
       inputs would then be clipped at the window's edge, as the streams do not)."""
     if cfg.varfac_norm != "trial":
@@ -107,6 +109,10 @@ def check_supported(cfg, wcfg) -> None:
         raise ValueError(f"the stream engine supports spatial downsampling by 1 or 2, not {cfg.spatial_factor}")
     if wcfg.out_px % 2:
         raise ValueError(f"the stream engine needs an even tile size, not out_px {wcfg.out_px}")
+    if cfg.gap + cfg.window_reach >= wcfg.t_reach or wcfg.t_reach < 4:  # window stats and pooled frames
+        raise ValueError(f"the stream engine needs the window statistics (gap + window_reach = "
+                         f"{cfg.gap + cfg.window_reach}) and the pooled features (4 frames) within t_reach "
+                         f"({wcfg.t_reach})")
     if cfg.box and cfg.hp_temporal_reach > wcfg.t_reach:
         raise ValueError(f"the stream engine needs the half-planes' temporal reach ({cfg.hp_temporal_reach}) within "
                          f"the window's ({wcfg.t_reach})")
