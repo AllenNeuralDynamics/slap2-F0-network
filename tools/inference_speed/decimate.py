@@ -97,7 +97,7 @@ def main():
             T = full.shape[0]
             valid = np.isfinite(full).all(0)
             b = full[:, valid]  # (T, N)
-            key = f"{ds}/{f.name[:8]}"
+            key = f"{ds}/{f.name.split('_BASELINE')[0]}"
             spec[key] = power_shares(b)
             err[key] = {}
             for k, tag in FACTORS.items():

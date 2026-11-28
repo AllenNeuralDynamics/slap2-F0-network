@@ -257,7 +257,7 @@ elif [[ "$mode" == "register" || "$mode" == "predict_registered" ]]; then
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH="$pypath" python3 -u "$CODE/predict_registered.py" \
             "$DATA" "$RESULTS/baselines" --ckpt "$ckpt" --ckpt_label "$ckpt_label" --sessions "$datasets" \
             --trial_paths "$trial_paths" --out_frames "$out_frames" --asset_ids "$asset_ids" \
-            --f0_args "$f0_args" --scratch "$SCRATCH/predict_registered" 2>&1 | tee "$RESULTS/logs/predict_registered.log"
+            --f0_args="$f0_args" --scratch "$SCRATCH/predict_registered" 2>&1 | tee "$RESULTS/logs/predict_registered.log"
         status="${PIPESTATUS[0]}"
     fi
     kill "$monitor" 2>/dev/null

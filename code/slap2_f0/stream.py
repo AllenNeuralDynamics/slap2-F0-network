@@ -502,6 +502,7 @@ class StreamPredictor:
                 torch.cuda.empty_cache()
                 free = torch.cuda.mem_get_info()[0] - T * len(px) * cfg.width * 2  # the future branch's store
                 Lr = max(16, min(L, int(self.mem_fraction * free / (self.bytes_per_voxel * rect.area))))
+            self._shrink = 1.0
             while True:
                 try:
                     (self._rect_cl if self.cl else self._rect)(movie, maps, pad, rect, index, rows, cols, px, Lr,
@@ -514,6 +515,7 @@ class StreamPredictor:
                 # retry outside the except block, so the failed pass's tensors are freed
                 tim["oom_retries"] += 1
                 Lr = max(16, Lr // 2)
+                self._shrink /= 2  # the passes that do not follow the chunk shrink too
                 torch.cuda.empty_cache()
         self.timings = tim
         return mu_out, var_out
@@ -542,7 +544,7 @@ class StreamPredictor:
         tR, sR, op = w.t_reach, w.s_reach, w.out_px
         shift = cfg.gap + 1
         s = float(scale[0])
-        half = torch.float16 if self.amp else torch.float32
+        half = self.amp or torch.float32  # the dtype the branches compute in (autocast's)
         pr, pc = (rows[px] - rect.r0).astype(np.int64), (cols[px] - rect.c0).astype(np.int64)
         prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
         N = len(px)
@@ -552,6 +554,11 @@ class StreamPredictor:
         tt = lambda q: torch.from_numpy(np.ascontiguousarray(q)).to(dev)  # noqa: E731
         mi, vf, vm = (tt(q[rr + pad, cc + pad])[None, :, None] for q in (mean_p, vf_p, var_p))
         B = max(1, self.pixel_block)
+        span = cfg.gap + cfg.window_reach
+        Bs = B
+        if dev.type == "cuda":  # ~16 float32 values per pixel and frame in the statistics pass
+            Bs = int(0.2 * torch.cuda.mem_get_info()[0] / ((T + 2 * span) * 4 * 16))
+            Bs = max(64, int(min(B, Bs) * self._shrink))  # halved on each retry
         # the rectangle's movie on the GPU once when it fits; inputs are then sliced there
         rmov = None
         if dev.type == "cuda" and (T + 2 * tR) * rect.area * 4 < 0.15 * torch.cuda.mem_get_info()[0]:
@@ -575,16 +582,19 @@ class StreamPredictor:
 
         # 0. per-pixel temporal statistics over the whole trial (window stats, edge features)
         t0 = time.time()
-        span = cfg.gap + cfg.window_reach
         wst = [self._store((T, N), torch.float32, 0.1) for _ in range(3)]
         est = gst = None
         if cfg.edge_features:
             est, gst = self._store((6, T, N), torch.float32, 0.1), self._store((2, T, N), torch.float32, 0.1)
-        for k0 in range(0, N, B):
-            k1 = min(k0 + B, N)
-            mv = np.full((T + 2 * span, k1 - k0), np.nan, np.float32)
-            mv[span:span + T] = movie[:, rr[k0:k1], cc[k0:k1]]  # (masked: NaN on discarded frames)
-            x = make_inputs(tt(mv)[None, :, :, None], mi[:, k0:k1], vf[:, k0:k1], scale, vm[:, k0:k1], gain,
+        for k0 in range(0, N, Bs):
+            k1 = min(k0 + Bs, N)
+            if rmov is not None:  # frames -span .. T + span - 1 at the output pixels, on the GPU
+                mvt = rmov[tR - span:tR + T + span][:, prt[k0:k1], pct[k0:k1]]
+            else:
+                mv = np.full((T + 2 * span, k1 - k0), np.nan, np.float32)
+                mv[span:span + T] = movie[:, rr[k0:k1], cc[k0:k1]]  # (masked: NaN on discarded frames)
+                mvt = tt(mv)
+            x = make_inputs(mvt[None, :, :, None], mi[:, k0:k1], vf[:, k0:k1], scale, vm[:, k0:k1], gain,
                             varfac_norm=cfg.varfac_norm)
             for st_, a in zip(wst, blind_window_stats(x[:, 0], x[:, 1], cfg.gap, cfg.window_reach)):
                 st_[:, k0:k1] = a[0, span:span + T, :, 0].to(st_.device)
@@ -597,7 +607,7 @@ class StreamPredictor:
         # the per-pixel inputs the fusion reads (maps only; constant in time)
         xpx = make_inputs(torch.full((1, 1, N, 1), float("nan"), device=dev), mi, vf, scale, vm, gain,
                           varfac_norm=cfg.varfac_norm)  # (1, 5, 1, N, 1)
-        tim["fusion"] += time.time() - t0
+        tim["pixel_stats"] = tim.get("pixel_stats", 0.0) + time.time() - t0
         # 1. pooled (and motion) features per tile, on the tile's own window
         t0 = time.time()
         pf = None
@@ -606,7 +616,7 @@ class StreamPredictor:
             pos = np.full(index.max() + 1, -1, np.int64)
             pos[px] = np.arange(N)
             ns = op + 2 * sR
-            Lp = 512
+            Lp = min(512, max(L, 16))  # the planned chunk (halved on retries), at most 512
             for r0, c0 in rect.tiles:
                 sub = index[r0:r0 + op, c0:c0 + op]
                 ok = sub >= 0
@@ -787,9 +797,9 @@ class StreamPredictor:
         t0 = time.time()
         on_gpu = self.keep_future_on_gpu
         if on_gpu is None:
-            need = T * N * cfg.width * 2
+            need = T * N * cfg.width * torch.empty((), dtype=self.amp or torch.float32).element_size()
             on_gpu = dev.type != "cuda" or need < 0.25 * torch.cuda.mem_get_info()[0]
-        hf_store = (torch.empty((cfg.width, T, N), dtype=torch.float16 if self.amp else torch.float32,
+        hf_store = (torch.empty((cfg.width, T, N), dtype=self.amp or torch.float32,
                                 device=dev if on_gpu else "cpu", pin_memory=(not on_gpu and dev.type == "cuda")))
         fut = (_CausalStateCL if self.cl else _CausalState)(self.m.future)
         hi = T + tR  # exclusive end of the reversed sequence's first chunk

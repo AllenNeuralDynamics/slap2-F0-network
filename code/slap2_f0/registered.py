@@ -418,9 +418,9 @@ def run(args: argparse.Namespace) -> None:
             if sp is not None:
                 entry["stream"] = {k: v for k, v in sp.timings.items() if k != "rect_px"}
                 entry["stream"]["rect_px"] = sp.timings.get("rect_px")
+            finish(block=True)  # the previous write (it overlapped this unit's prediction): one pending at most
             writes.append((writer.submit(write_baseline, *job) if writer is not None else _Done(write_baseline(*job)),
                            entry, msg))
-            finish(block=False)
         finish(block=True)
     finally:
         for pool in (loaders, writer):

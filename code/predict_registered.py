@@ -123,13 +123,43 @@ def stage_records(folder: Path, data: Path) -> dict:
     return out
 
 
+# predict-registered options that --f0_args may pass: speed only, so that the records (settings,
+# checkpoint) still describe the prediction
+SPEED_FLAGS = {"--fast", "--async_write", "--valid_stats", "--fast_read", "--cudnn_benchmark", "--compile"}
+SPEED_VALUES = {"--engine", "--stream_frames", "--stream_px", "--stream_layout", "--prefetch", "--batch"}
+
+
+def speed_args(extra: str) -> list:
+    """The words of --f0_args, checked to be speed options only (flags, and
+    options with one value, as ``--name value`` or ``--name=value``)."""
+    words, out, i = shlex.split(extra), [], 0
+    while i < len(words):
+        w = words[i]
+        name = w.split("=", 1)[0]
+        if name in SPEED_FLAGS and "=" not in w:
+            out.append(w)
+        elif name in SPEED_VALUES:
+            if "=" in w:
+                out.append(w)
+            elif i + 1 < len(words):
+                out += [w, words[i + 1]]
+                i += 1
+            else:
+                raise SystemExit(f"--f0_args: {w} needs a value")
+        else:
+            raise SystemExit(f"--f0_args takes speed options only ({', '.join(sorted(SPEED_FLAGS | SPEED_VALUES))}), "
+                             f"not {w}: settings and checkpoint go through predict_registered's own options")
+        i += 1
+    return out
+
+
 def write_wrapper(folder: Path, report: Path, extra: str = "") -> Path:
     """An executable that runs this repository's ``slap2-f0`` with this
     interpreter and adds ``--report`` and the options in ``extra`` (say,
     ``--engine stream --prefetch 1``; predict_baselines runs it)."""
     folder.mkdir(parents=True, exist_ok=True)
     code = Path(__file__).resolve().parent
-    words = shlex.split(extra)
+    words = speed_args(extra)
     if os.name == "nt":
         exe = folder / "slap2-f0.cmd"
         more = "".join(f' "{w}"' for w in words)
@@ -361,7 +391,7 @@ def main(argv=None) -> int:
     p.add_argument("--device", default="cuda", help="predict-registered's device (cuda, cpu, auto)")
     p.add_argument("--asset_ids", default="", help="mount=id,... of the attached registration assets (recorded)")
     p.add_argument("--f0_command", default="", help="a slap2-f0 executable (default: this repository's)")
-    p.add_argument("--f0_args", default="", help="more slap2-f0 predict-registered options for this repository's "
+    p.add_argument("--f0_args", default="", help="speed options for this repository's slap2-f0 predict-registered "
                                                  "slap2-f0, e.g. '--engine stream --prefetch 1 --async_write'")
     p.add_argument("--scratch", type=Path, default=None, help="working folder (default OUT/../scratch_predict)")
     args = p.parse_args(argv)

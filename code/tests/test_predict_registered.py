@@ -241,3 +241,16 @@ def test_unreadable_record_counts_as_missing(tmp_path):
     rec.write_text('{"baseline": {"sha256": "a"}}')
     assert pr._read_record(rec) == {"baseline": {"sha256": "a"}}
     assert not pr._complete(pr._read_record(rec))
+
+
+def test_f0_args_take_speed_options_only(tmp_path):
+    """--f0_args passes speed options to the wrapper and refuses settings or a
+    checkpoint, which would make the records describe another prediction."""
+    want = ["--fast", "--prefetch", "2", "--stream_frames=128"]
+    assert pr.speed_args("--fast --prefetch 2 --stream_frames=128") == want
+    assert pr.speed_args("") == []
+    for bad in ("--channel 2", "--motion_thresh 1.5", "--ckpt other.pt", "--fast=1", "--prefetch"):
+        with pytest.raises(SystemExit):
+            pr.speed_args(bad)
+    exe = pr.write_wrapper(tmp_path / "bin", tmp_path / "r.jsonl", "--engine stream --async_write")
+    assert "--engine stream --async_write" in exe.read_text().replace('"', "")
