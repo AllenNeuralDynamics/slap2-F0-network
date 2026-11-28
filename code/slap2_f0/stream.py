@@ -94,6 +94,22 @@ def pooled_features_at(x: torch.Tensor, t0: int, t1: int, radius: int, scales: l
     return torch.stack(out, 1)
 
 
+def check_supported(cfg, wcfg) -> None:
+    """Raise ValueError for checkpoints whose tiles the engine cannot reproduce:
+    - the variance-factor input relative to the window's median (v6 and older);
+    - spatial downsampling by more than 2: rectangles keep the windows' parity,
+      not their phase modulo a larger factor;
+    - half-plane branches reaching further in time than the window (their
+      inputs would then be clipped at the window's edge, as the streams do not)."""
+    if cfg.varfac_norm != "trial":
+        raise ValueError("the stream engine needs a checkpoint with varfac_norm 'trial' (after v6)")
+    if cfg.spatial_factor > 2:
+        raise ValueError(f"the stream engine supports spatial downsampling by 1 or 2, not {cfg.spatial_factor}")
+    if cfg.box and cfg.hp_temporal_reach > wcfg.t_reach:
+        raise ValueError(f"the stream engine needs the half-planes' temporal reach ({cfg.hp_temporal_reach}) within "
+                         f"the window's ({wcfg.t_reach})")
+
+
 @dataclass
 class Rect:
     """A rectangle of the trial grid (rows r0:r1, cols c0:c1, may extend past
@@ -457,8 +473,7 @@ class StreamPredictor:
         otherwise a masked copy is made."""
         cfg, w = self.cfg, self.w
         dev = self.device
-        if cfg.varfac_norm != "trial":  # the window's median (checkpoints up to v6) depends on the tiles
-            raise ValueError("the stream engine needs a checkpoint with varfac_norm 'trial' (after v6)")
+        check_supported(cfg, w)
         self._valid = np.asarray(tr.valid, bool)
         self._discard = np.asarray(tr.discard, bool)
         if movie is None:

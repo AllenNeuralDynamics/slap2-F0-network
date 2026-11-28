@@ -131,3 +131,16 @@ def test_pooled_features_at_equal_the_full_map():
     full = pooled_features(x, 3, 27, 1, [2, 6, 0])
     got = pooled_features_at(x, 3, 27, 1, [2, 6, 0], r, c)
     assert torch.equal(got, full[:, :, :, 5:15, 4:18])
+
+
+def test_unsupported_checkpoints_are_refused():
+    """Geometries the rectangles or streams cannot reproduce raise before any work."""
+    from slap2_f0.stream import check_supported
+
+    model, wcfg = _model("box")
+    check_supported(model.cfg, wcfg)
+    for change, match in ((dict(varfac_norm="window"), "varfac_norm"), (dict(downsample=4), "spatial downsampling"),
+                          (dict(hp_temporal_dilations=[64, 64]), "temporal reach")):
+        cfg = ModelConfig(**{**asdict(model.cfg), **change})
+        with pytest.raises(ValueError, match=match):
+            check_supported(cfg, wcfg)
