@@ -381,7 +381,7 @@ def run(args: argparse.Namespace) -> None:
             t2 = time.time()
             rows, cols = valid_index(tr)
             if sp is not None:
-                mu, var = sp.predict(tr, st, rows, cols, movie=movie)
+                mu, var = sp.predict(tr, st, rows, cols, movie=movie, masked=True)  # load_registered masked it
                 tile = sp.chunk
             else:
                 # the tile size predict_trial would choose, made explicit for the report

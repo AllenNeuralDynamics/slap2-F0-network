@@ -50,6 +50,7 @@ import torch
 import torch.nn.functional as F
 
 from .model import (SlabBlindSpotNet, _residual, blind_window_stats, edge_features, make_inputs, motion_features,
+                    soft_cap,
                     pooled_features)
 from .predict import _is_oom, tile_origins
 
@@ -423,17 +424,14 @@ class StreamPredictor:
 
     def _movie_rect(self, movie, f0, f1, r0, r1, c0, c1):
         """movie[f0:f1, r0:r1, c0:c1] with NaN outside the trial (frames and
-        grid), at pixels that are not valid and on discarded frames (as
-        predict_trial reads its bands)."""
+        grid); the movie is NaN at pixels that are not valid and on discarded
+        frames already (``predict``), as predict_trial reads its bands."""
         T, R, C = movie.shape
         out = np.full((f1 - f0, r1 - r0, c1 - c0), np.nan, np.float32)
         a, b = max(f0, 0), min(f1, T)
         ra, rb, ca, cb = max(r0, 0), min(r1, R), max(c0, 0), min(c1, C)
-        if a < b and ra < rb and ca < cb:
-            m = movie[a:b, ra:rb, ca:cb].astype(np.float32)
-            m[:, ~self._valid[ra:rb, ca:cb]] = np.nan
-            m[self._discard[a:b]] = np.nan
-            out[a - f0:b - f0, ra - r0:rb - r0, ca - c0:cb - c0] = m
+        if a < b and ra < rb and ca < cb:  # the movie is masked (predict)
+            out[a - f0:b - f0, ra - r0:rb - r0, ca - c0:cb - c0] = movie[a:b, ra:rb, ca:cb]
         return out
 
     def _x(self, movie_np, maps, rect_rc, pad, scale, gain):
@@ -448,21 +446,29 @@ class StreamPredictor:
 
     # ----------------------------------------------------------- predict
     @torch.no_grad()
-    def predict(self, tr, st, rows: np.ndarray, cols: np.ndarray, movie: np.ndarray | None = None):
+    def predict(self, tr, st, rows: np.ndarray, cols: np.ndarray, movie: np.ndarray | None = None,
+                masked: bool = False):
         """Baseline and noise variance at the valid pixels (rows, cols): (frame,
         N) float32 in counts and counts^2, as ``predict.predict_trial``.
         ``movie`` (frame, row, col) in counts with NaN where not valid or
-        discarded; default read from ``tr``."""
+        discarded; default read from ``tr``. ``masked``: the movie is NaN already
+        at every pixel that is not valid and on every discarded frame (as
+        ``registered.load_registered`` makes it), so it is used as it is;
+        otherwise a masked copy is made."""
         cfg, w = self.cfg, self.w
         dev = self.device
         if cfg.varfac_norm != "trial":  # the window's median (checkpoints up to v6) depends on the tiles
             raise ValueError("the stream engine needs a checkpoint with varfac_norm 'trial' (after v6)")
-        if movie is None:
-            movie = tr._f["movie"][tr.channel]  # an HDF5 dataset or an array
-            if not isinstance(movie, np.ndarray):
-                movie = np.asarray(movie, np.float32)
         self._valid = np.asarray(tr.valid, bool)
         self._discard = np.asarray(tr.discard, bool)
+        if movie is None:
+            movie, masked = tr._f["movie"][tr.channel], False  # an HDF5 dataset or an array
+        if not masked:  # NaN where predict_trial reads NaN: pixels not valid, discarded frames
+            movie = np.array(movie, np.float32)
+            movie[:, ~self._valid] = np.nan
+            movie[self._discard] = np.nan
+        elif movie.dtype != np.float32:
+            movie = movie.astype(np.float32)
         T, R, C = movie.shape
         sR, op = w.s_reach, w.out_px
         index = np.full((R, C), -1, np.int64)
@@ -556,8 +562,7 @@ class StreamPredictor:
         for k0 in range(0, N, B):
             k1 = min(k0 + B, N)
             mv = np.full((T + 2 * span, k1 - k0), np.nan, np.float32)
-            mv[span:span + T] = movie[:, rr[k0:k1], cc[k0:k1]]
-            mv[span:span + T][self._discard] = np.nan  # (the output pixels are valid)
+            mv[span:span + T] = movie[:, rr[k0:k1], cc[k0:k1]]  # (masked: NaN on discarded frames)
             x = make_inputs(tt(mv)[None, :, :, None], mi[:, k0:k1], vf[:, k0:k1], scale, vm[:, k0:k1], gain,
                             varfac_norm=cfg.varfac_norm)
             for st_, a in zip(wst, blind_window_stats(x[:, 0], x[:, 1], cfg.gap, cfg.window_reach)):
@@ -682,9 +687,10 @@ class StreamPredictor:
                 f_in = fe
             tim["past"] += time.time() - t0
             ready = min([got_p] + got_h + [T])
-            if ready - out_t < min(L, T - out_t) and f_in < f_end:
+            piece = max(L, 128)  # frames fused at a time
+            if ready - out_t < min(piece, T - out_t) and f_in < f_end:
                 continue
-            t1 = min(ready, T, out_t + max(L, 64))  # fused in pieces of about a chunk (memory)
+            t1 = min(ready, T, out_t + piece)
             n = t1 - out_t
             if n <= 0:
                 raise RuntimeError("stream engine: no output frames became ready")
@@ -698,21 +704,47 @@ class StreamPredictor:
             mus, vars_ = [], []
             for k0 in range(0, N, B):
                 k1 = min(k0 + B, N)
-                ws = [st_[out_t:t1, k0:k1].to(dev)[None, :, :, None] for st_ in wst]
-                p = {"hp": hp_c[None, :, :, k0:k1, None], "hf": hf_store[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
-                     "wm": ws[0], "wv": ws[1], "n": ws[2],
-                     "extra": [e[None, :, :, k0:k1, None].to(half) for e in extra],
-                     "edge": None if est is None else est[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
-                     "gates": None if gst is None else gst[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
-                     "x": xpx[:, :, :, k0:k1].expand(-1, -1, n, -1, -1), "s": scale.float(), "g": gain.float()}
+                ws = [st_[out_t:t1, k0:k1].to(dev) for st_ in wst]
                 with self._autocast():
-                    mu, var = self.m.head(p)
-                mus.append(mu[0, :, :, 0].float().cpu().numpy())
-                vars_.append(var[0, :, :, 0].float().cpu().numpy())
+                    mu, var = self._head_cl(
+                        hp_c[:, :, k0:k1], hf_store[:, out_t:t1, k0:k1].to(dev), [e[:, :, k0:k1] for e in extra],
+                        None if est is None else est[:, out_t:t1, k0:k1].to(dev),
+                        None if gst is None else gst[:, out_t:t1, k0:k1].to(dev),
+                        ws, xpx[:, :, :, k0:k1].expand(-1, -1, n, -1, -1), scale.float(), gain.float())
+                mus.append(mu.float().cpu().numpy())
+                vars_.append(var.float().cpu().numpy())
             mu_out[out_t:t1, px] = np.concatenate(mus, 1) * s
             var_out[out_t:t1, px] = np.concatenate(vars_, 1) * s * s
             tim["fusion"] += time.time() - tf
             out_t = t1
+
+    def _head_cl(self, hp, hf, extra, edge, gates, ws, x, s, g):
+        """``SlabBlindSpotNet.head`` on flat pixels, channels last: the same
+        features (the model's ``_features``) and layers (its 1 x 1 x 1 weights
+        as matrix products). hp, hf (C, n, P); extra, edge (C', n, P); gates
+        (2, n, P); ws = window mean, variance, count (n, P); x (1, 5, n, P, 1)
+        inputs at the voxels; s, g (1,). Returns mu and var (n, P), scale units."""
+        m, cfg = self.m, self.cfg
+        gs = (g / s).view(-1, 1, 1, 1)
+        wm, wv, nn_ = (a[None, :, :, None] for a in ws)
+        feats = m._features(x.float(), wm, wv, nn_, gs).to(hp.dtype)[0, :, :, :, 0]  # (6, n, P)
+        parts = [hp, hf, feats] + [e.to(hp.dtype) for e in extra + ([] if edge is None else [edge])]
+        z = torch.cat([q.permute(1, 2, 0) for q in parts], -1)  # (n, P, inputs), ModelConfig.fusion_inputs order
+        h = F.gelu(_lin(F.gelu(_lin(z, m.fuse[0])), m.fuse[2]))
+        del z
+        h = _pointwise_cl(m.fuse_more, h)
+        mi = x[0, 2, :, :, 0].float()
+        wm = torch.where(ws[2] > 0, ws[0], mi)
+        mix = torch.tanh(_lin(h, m.head_mix)[..., 0].float())
+        base = (mi + mix * (wm - mi)).clamp_min(1e-4)
+        c_mu, c_var = _lin(h, m.head_mu)[..., 0].float(), _lin(h, m.head_var)[..., 0].float()
+        if m.head_edge is not None:
+            e, gt = _lin(h, m.head_edge).float(), gates.float()
+            c_mu = c_mu + gt[0] * e[..., 0] + gt[1] * e[..., 1]
+            c_var = c_var + gt[0] * e[..., 2] + gt[1] * e[..., 3]
+        mu = base * torch.exp(soft_cap(c_mu, cfg.max_log_correction))
+        var = (gs[0, 0] * mu + m.log_floor.exp() / s.view(-1, 1) ** 2) * torch.exp(soft_cap(c_var, cfg.max_log_var))
+        return mu, var
 
     def _rect(self, movie, maps, pad, rect, index, rows, cols, px, L, scale, gain, mu_out, var_out, tim):
         """One rectangle in chunks of L frames: the future branch backwards
@@ -865,8 +897,7 @@ class StreamPredictor:
         a, b = t0 - span, t1 + span
         mv = np.full((b - a, N), np.nan, np.float32)
         aa, bb = max(a, 0), min(b, T)
-        mv[aa - a:bb - a] = movie[aa:bb, rr, cc]
-        mv[aa - a:bb - a][self._discard[aa:bb]] = np.nan  # (the output pixels are valid)
+        mv[aa - a:bb - a] = movie[aa:bb, rr, cc]  # (masked: NaN on discarded frames)
         mean_p, vf_p, var_p = maps
         t = lambda q: torch.from_numpy(np.ascontiguousarray(q)).to(dev)  # noqa: E731
         mi, vf, vm = (t(q[rr + pad, cc + pad])[None, :, None] for q in (mean_p, vf_p, var_p))
