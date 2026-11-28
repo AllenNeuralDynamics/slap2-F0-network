@@ -2945,7 +2945,7 @@ The network is memory-bound: three quarters of its time is outside the convoluti
 - Window statistics are computed once per output pixel. Pooled features are computed per tile on the tile's own window, since they depend on it beyond the reach.
 - The fusion runs at the output pixels only, as matrix products.
 
-The engine is equal to `predict_trial` within float32 rounding on the CPU (`test_stream.py`). On 780125 E1T1DMD1 on the 4060 Ti (float16) it differs from the reference by at most 5.1 counts, by 0.38 counts at the 99.9th percentile, and by 0.08% relative at the 99.9th percentile. That is float16 rounding: fp16 and fp32 differ by 3e-4 at the 99th percentile, per `prepare`.
+Network time for 780125 E1T1DMD1 on the 4060 Ti: 469 s with the reference's 512-frame tiles (GPU busy 87%), 116 s streamed (75%). The engine is equal to `predict_trial` within float32 rounding on the CPU (`test_stream.py`). On 780125 E1T1DMD1 on the 4060 Ti (float16) it differs from the reference by at most 5.1 counts, by 0.38 counts at the 99.9th percentile, and by 0.08% relative at the 99.9th percentile. That is float16 rounding: fp16 and fp32 differ by 3e-4 at the 99th percentile, per `prepare`.
 
 
 ### Where the cost sits today
