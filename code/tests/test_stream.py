@@ -94,7 +94,7 @@ def test_rectangles_hold_every_tile_window():
 
 
 @pytest.mark.parametrize("kind", ["slab", "box", "shared", "edge_motion"])
-@pytest.mark.parametrize("chunk,max_px,layout", [(7, 0, "ncdhw"), (40, 600, "cl"), (400, 0, "cl")])
+@pytest.mark.parametrize("chunk,max_px,layout", [(7, 0, "ncdhw"), (5, 0, "cl"), (40, 600, "cl"), (400, 0, "cl")])
 def test_stream_matches_predict_trial(tmp_path, kind, chunk, max_px, layout):
     """Same baselines and variances as the reference tiling (float32, CPU), for
     chunks shorter than the dilations, rectangles split into bands, one chunk

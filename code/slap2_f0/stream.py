@@ -247,6 +247,77 @@ class _CausalStateCL(_CausalState):
         return h, low
 
 
+class _SymBlockCL:
+    """A HalfPlaneBlock streamed in time on channels-last frames: its temporal
+    convolution is symmetric (frames f - d, f, f + d), so the output for a
+    frame comes d frames after its input; ``step`` returns the outputs that
+    became computable, oldest first, for consecutive frames from the stream's
+    start. Before the start the convolution sees zeros (the window's padding);
+    only outputs whose reach lies inside the stream are used."""
+
+    def __init__(self, blk):
+        self.blk, self.d = blk, blk.t_dil
+        self.hbuf = self.xbuf = None  # h frames [p - d, q), x frames [p, q): p = next output frame
+
+    def step(self, x):
+        """x (L, H, W, C) -> outputs (n, H, W, C) for the next n frames (n may be 0)."""
+        blk, d = self.blk, self.d
+        if x.shape[0] == 0:
+            return x
+        H = x.shape[1]
+        h = F.gelu(_conv_sp(x, blk.spatial, padding=(blk.s_dil, blk.s_dil))[:, :H])  # rows r - d and r
+        if self.hbuf is None:
+            self.hbuf, self.xbuf = h.new_zeros((d,) + h.shape[1:]), x[:0]
+        hh = torch.cat([self.hbuf, h], 0)
+        del h
+        xx = torch.cat([self.xbuf, x], 0)
+        n = hh.shape[0] - 2 * d
+        if n <= 0:
+            self.hbuf, self.xbuf = hh, xx
+            return x[:0]
+        t = _conv_t(hh, blk.temporal)  # valid: frames p .. p + n - 1
+        self.hbuf, self.xbuf = hh[n:].clone(), xx[n:].clone()
+        del hh
+        out = _residual(xx[:n], blk.alpha, F.gelu(t))
+        return _pointwise_cl(blk.mlp, out)
+
+
+class _HalfPlaneStreamCL:
+    """A HalfPlaneBranch streamed in time (``_SymBlockCL`` blocks), read at the
+    output pixels: rows ``i`` (in the branch's rotated frame, before its row
+    shift) and columns ``j``. ``step`` returns the branch's output at those
+    pixels, (n, N, C), for the next n frames from the stream's start (delay:
+    the sum of the temporal dilations)."""
+
+    def __init__(self, br, i, j):
+        self.br = br
+        self.full = [_SymBlockCL(b) for b in br.full]
+        self.low = [_SymBlockCL(b) for b in br.low]
+        self.i, self.j = i, j
+        self.fb = self.lb = None  # gathered full and low outputs not yet combined
+
+    def step(self, x):
+        """x (L, H, W, n_inputs) rotated frames -> (n, N, C)."""
+        br = self.br
+        h = _lin(x, br.inp)
+        for b in self.full:
+            h = b.step(h)
+        g = h[:, self.i, self.j]
+        if br.down is None:
+            return g
+        low = _conv_sp(h, br.down, stride=2) if h.shape[0] else h[:, ::2, ::2]
+        del h
+        for b in self.low:
+            low = b.step(low)
+        gl = low[:, (self.i - 1) // 2, self.j // 2]  # row r <- low row (r - 1) // 2
+        self.fb = g if self.fb is None else torch.cat([self.fb, g], 0)
+        self.lb = gl if self.lb is None else torch.cat([self.lb, gl], 0)
+        n = min(self.fb.shape[0], self.lb.shape[0])
+        out = self.fb[:n] + self.lb[:n]
+        self.fb, self.lb = self.fb[n:], self.lb[n:]
+        return out
+
+
 def _half_plane_cl(br, x):
     """HalfPlaneBranch on channels-last frames x (T, H, W, n_inputs) (H, W even),
     before its final shift: (full (T, H, W, C), low (T, H/2, W/2, C) or None);
@@ -345,6 +416,8 @@ class StreamPredictor:
         discarded; default read from ``tr``."""
         cfg, w = self.cfg, self.w
         dev = self.device
+        if cfg.varfac_norm != "trial":  # the window's median (checkpoints up to v6) depends on the tiles
+            raise ValueError("the stream engine needs a checkpoint with varfac_norm 'trial' (after v6)")
         if movie is None:
             movie = tr._f["movie"][tr.channel]  # an HDF5 dataset or an array
             if not isinstance(movie, np.ndarray):
@@ -386,7 +459,8 @@ class StreamPredictor:
                 Lr = max(16, min(L, int(self.mem_fraction * free / (self.bytes_per_voxel * rect.area))))
             while True:
                 try:
-                    self._rect(movie, maps, pad, rect, index, rows, cols, px, Lr, scale, gain, mu_out, var_out, tim)
+                    (self._rect_cl if self.cl else self._rect)(movie, maps, pad, rect, index, rows, cols, px, Lr,
+                                                               scale, gain, mu_out, var_out, tim)
                     tim["chunks"].append(Lr)
                     break
                 except (torch.OutOfMemoryError, RuntimeError) as e:
@@ -398,6 +472,206 @@ class StreamPredictor:
                 torch.cuda.empty_cache()
         self.timings = tim
         return mu_out, var_out
+
+    def _store(self, shape, dtype, budget: float):
+        """An empty store on the GPU if it takes less than `budget` of the free
+        memory, else in pinned host memory."""
+        dev = self.device
+        n = int(np.prod(shape)) * torch.empty((), dtype=dtype).element_size()
+        on_gpu = dev.type != "cuda" or n < budget * torch.cuda.mem_get_info()[0]
+        return torch.empty(shape, dtype=dtype, device=dev if on_gpu else "cpu",
+                           pin_memory=(not on_gpu and dev.type == "cuda"))
+
+    def _rect_cl(self, movie, maps, pad, rect, index, rows, cols, px, L, scale, gain, mu_out, var_out, tim):
+        """One rectangle on channels-last frames, in passes that each choose
+        their own chunks: (0) window statistics (and edge features) at the
+        output pixels over the whole trial; (1) pooled (and motion) features
+        per tile on the tile's own window, in chunks of up to 512 frames;
+        (2) the future branch backwards; (3) the past branch and the four
+        half-plane branches forwards over the same input chunks, both carried
+        in state (no halo), and the fusion as their outputs become available."""
+        import time
+        cfg, w = self.cfg, self.w
+        dev = self.device
+        T = movie.shape[0]
+        tR, sR, op = w.t_reach, w.s_reach, w.out_px
+        shift = cfg.gap + 1
+        s = float(scale[0])
+        half = torch.float16 if self.amp else torch.float32
+        pr, pc = (rows[px] - rect.r0).astype(np.int64), (cols[px] - rect.c0).astype(np.int64)
+        prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
+        N = len(px)
+        rc = (rect.r0, rect.r1, rect.c0, rect.c1)
+        rr, cc = rows[px], cols[px]
+        mean_p, vf_p, var_p = maps
+        tt = lambda q: torch.from_numpy(np.ascontiguousarray(q)).to(dev)  # noqa: E731
+        mi, vf, vm = (tt(q[rr + pad, cc + pad])[None, :, None] for q in (mean_p, vf_p, var_p))
+        B = max(1, self.pixel_block)
+        # 0. per-pixel temporal statistics over the whole trial (window stats, edge features)
+        t0 = time.time()
+        span = cfg.gap + cfg.window_reach
+        wst = [self._store((T, N), torch.float32, 0.1) for _ in range(3)]
+        est = gst = None
+        if cfg.edge_features:
+            est, gst = self._store((6, T, N), torch.float32, 0.1), self._store((2, T, N), torch.float32, 0.1)
+        for k0 in range(0, N, B):
+            k1 = min(k0 + B, N)
+            mv = np.full((T + 2 * span, k1 - k0), np.nan, np.float32)
+            mv[span:span + T] = movie[:, rr[k0:k1], cc[k0:k1]]
+            mv[span:span + T][self._discard] = np.nan  # (the output pixels are valid)
+            x = make_inputs(tt(mv)[None, :, :, None], mi[:, k0:k1], vf[:, k0:k1], scale, vm[:, k0:k1], gain,
+                            varfac_norm=cfg.varfac_norm)
+            for st_, a in zip(wst, blind_window_stats(x[:, 0], x[:, 1], cfg.gap, cfg.window_reach)):
+                st_[:, k0:k1] = a[0, span:span + T, :, 0].to(st_.device)
+            if cfg.edge_features:
+                e, g = edge_features(x[:, 0], x[:, 1], x[:, 2, 0], cfg.gap, cfg.window_reach, cfg.edge_near,
+                                     (span, span + T))
+                est[:, :, k0:k1] = e[0, :, :, :, 0].to(est.device)
+                gst[:, :, k0:k1] = g[0, :, :, :, 0].to(gst.device)
+            del x
+        # the per-pixel inputs the fusion reads (maps only; constant in time)
+        xpx = make_inputs(torch.full((1, 1, N, 1), float("nan"), device=dev), mi, vf, scale, vm, gain,
+                          varfac_norm=cfg.varfac_norm)  # (1, 5, 1, N, 1)
+        tim["fusion"] += time.time() - t0
+        # 1. pooled (and motion) features per tile, on the tile's own window
+        t0 = time.time()
+        pf = None
+        if cfg.box:
+            pf = self._store((cfg.n_pool + cfg.n_motion, T, N), half, 0.15)
+            pos = np.full(index.max() + 1, -1, np.int64)
+            pos[px] = np.arange(N)
+            ns = op + 2 * sR
+            Lp = 512
+            for r0, c0 in rect.tiles:
+                sub = index[r0:r0 + op, c0:c0 + op]
+                ok = sub >= 0
+                if not ok.any():
+                    continue
+                ii, jj = (torch.from_numpy(v).to(dev) for v in np.nonzero(ok))
+                k = torch.from_numpy(pos[sub[ok]]).to(pf.device)
+                wrc = (r0 - sR, r0 - sR + ns, c0 - sR, c0 - sR + ns)
+                for a in range(0, T, Lp):
+                    b = min(a + Lp, T)
+                    x = self._x(self._movie_rect(movie, a - 3, b + 4, *wrc), maps, wrc, pad, scale, gain)
+                    feats = [pooled_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales)]
+                    if cfg.motion_features:
+                        feats.append(motion_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales))
+                    fe = torch.cat(feats, 1)[0, :, :, sR:sR + op, sR:sR + op][:, :, ii, jj]  # (npool, frames, K)
+                    pf[:, a:b, k] = fe.to(half).to(pf.device)
+                    del x, feats, fe
+        tim["same_frame"] += time.time() - t0
+        # 2. future branch, backwards over trial frames [shift, T + tR): kept at the output pixels
+        t0 = time.time()
+        hf_store = self._store((cfg.width, T, N), half, 0.25)
+        fut = _CausalStateCL(self.m.future)
+        hi = T + tR
+        while hi > shift:
+            lo = max(hi - L, shift)
+            ti = time.time()
+            x = self._x(self._movie_rect(movie, lo, hi, *rc), maps, rc, pad, scale, gain)
+            tim["inputs"] += time.time() - ti
+            with self._autocast():
+                g = self._branch(fut, x, pr, pc, flip=True)
+            del x
+            a, b = max(lo - shift, 0), min(hi - shift, T)
+            if a < b:
+                hf_store[:, a:b] = g[:, a + shift - lo:b + shift - lo].to(half).to(hf_store.device)
+            del g
+            hi = lo
+        del fut
+        tim["future"] += time.time() - t0
+        # 3. past branch and half-planes forwards on the same input chunks; fusion as outputs arrive
+        R = cfg.hp_temporal_reach if cfg.box else 0
+        past = _CausalStateCL(self.m.past)
+        hps = []
+        if cfg.box:
+            H, W = rect.r1 - rect.r0, rect.c1 - rect.c0
+            if H % 2 or W % 2:
+                raise ValueError("rectangle sizes must be even")
+            idx = torch.arange(H * W).view(H, W)
+            for k in range(4):
+                br = self.m.hp_views[k] if self.m.hp_views is not None else self.m.hp
+                ridx = torch.rot90(idx, k, (0, 1))
+                inv = torch.empty(H * W, dtype=torch.long)
+                inv[ridx.flatten()] = torch.arange(H * W)
+                p = inv[torch.from_numpy(pr * W + pc)]
+                hps.append((k, _HalfPlaneStreamCL(br, (p // ridx.shape[1]).to(dev) - (cfg.box_radius + 1),
+                                                  (p % ridx.shape[1]).to(dev))))
+        pend_p, pend_h = None, [None] * len(hps)  # outputs from frame out_t on
+        got_p = 0  # past outputs for frames < got_p are in pend_p (or fused)
+        got_h = [-R] * len(hps)  # half-plane streams start at frame -R
+        f_in = -tR
+        out_t = 0
+        f_end = T + R  # last input frame + 1 the half-planes need; the past branch needs T - shift
+        while out_t < T:
+            t0 = time.time()
+            if f_in < f_end:
+                fe = min(f_in + L, f_end)
+                ti = time.time()
+                x = self._x(self._movie_rect(movie, f_in, fe, *rc), maps, rc, pad, scale, gain)
+                xc = x[0].permute(1, 2, 3, 0).contiguous()  # (frames, H, W, n_inputs)
+                del x
+                tim["inputs"] += time.time() - ti
+                with self._autocast():
+                    if f_in < T - shift:  # past branch: pre-shift frame f -> output f + shift
+                        n_p = min(fe, T - shift) - f_in
+                        full, low = past.step(xc[:n_p])
+                        g = full[:, prt, pct]
+                        if low is not None:
+                            f = past.b.cfg.spatial_factor
+                            g = g + low[:, prt // f, pct // f]
+                        del full, low
+                        first = f_in + shift
+                        g = g.permute(2, 0, 1)[:, max(out_t - first, 0):]
+                        if first + n_p > out_t:
+                            pend_p = g if pend_p is None else torch.cat([pend_p, g], 1)
+                        got_p = first + n_p
+                    tt0 = time.time()
+                    a = max(f_in, -R)  # half-planes see frames -R .. T + R - 1
+                    if hps and fe > a:
+                        for n_k, (k, hs) in enumerate(hps):
+                            g = hs.step(torch.rot90(xc[a - f_in:], k, (1, 2)).contiguous())  # (n, N, C)
+                            first = got_h[n_k]
+                            got_h[n_k] += g.shape[0]
+                            g = g.permute(2, 0, 1)[:, max(out_t - first, 0):]
+                            if got_h[n_k] > out_t and g.shape[1]:
+                                pend_h[n_k] = g if pend_h[n_k] is None else torch.cat([pend_h[n_k], g], 1)
+                    tim["same_frame"] += time.time() - tt0
+                del xc
+                f_in = fe
+            tim["past"] += time.time() - t0
+            ready = min([got_p] + got_h + [T])
+            if ready - out_t < min(L, T - out_t) and f_in < f_end:
+                continue
+            t1 = min(ready, T, out_t + max(L, 64))  # fused in pieces of about a chunk (memory)
+            n = t1 - out_t
+            if n <= 0:
+                raise RuntimeError("stream engine: no output frames became ready")
+            tf = time.time()
+            hp_c, pend_p = pend_p[:, :n], pend_p[:, n:]
+            extra = []
+            if hps:
+                hh = torch.cat([ph[:, :n] for ph in pend_h], 0)  # direction order 0..3, as the reference
+                pend_h = [ph[:, n:] for ph in pend_h]
+                extra = [hh, pf[:, out_t:t1].to(dev)]
+            mus, vars_ = [], []
+            for k0 in range(0, N, B):
+                k1 = min(k0 + B, N)
+                ws = [st_[out_t:t1, k0:k1].to(dev)[None, :, :, None] for st_ in wst]
+                p = {"hp": hp_c[None, :, :, k0:k1, None], "hf": hf_store[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
+                     "wm": ws[0], "wv": ws[1], "n": ws[2],
+                     "extra": [e[None, :, :, k0:k1, None].to(half) for e in extra],
+                     "edge": None if est is None else est[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
+                     "gates": None if gst is None else gst[:, out_t:t1, k0:k1].to(dev)[None, ..., None],
+                     "x": xpx[:, :, :, k0:k1].expand(-1, -1, n, -1, -1), "s": scale.float(), "g": gain.float()}
+                with self._autocast():
+                    mu, var = self.m.head(p)
+                mus.append(mu[0, :, :, 0].float().cpu().numpy())
+                vars_.append(var[0, :, :, 0].float().cpu().numpy())
+            mu_out[out_t:t1, px] = np.concatenate(mus, 1) * s
+            var_out[out_t:t1, px] = np.concatenate(vars_, 1) * s * s
+            tim["fusion"] += time.time() - tf
+            out_t = t1
 
     def _rect(self, movie, maps, pad, rect, index, rows, cols, px, L, scale, gain, mu_out, var_out, tim):
         """One rectangle in chunks of L frames: the future branch backwards
