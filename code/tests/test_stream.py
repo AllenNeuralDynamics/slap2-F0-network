@@ -114,3 +114,20 @@ def test_stream_matches_predict_trial(tmp_path, kind, chunk, max_px, layout):
     assert np.std(mu_a / mu_a.mean(0)) > 1e-3  # the activated network varies in time
     np.testing.assert_allclose(mu_b, mu_a, rtol=2e-5, atol=2e-5)
     np.testing.assert_allclose(var_b, var_a, rtol=2e-5, atol=2e-5)
+
+
+def test_pooled_features_at_equal_the_full_map():
+    """pooled_features_at gives the full map's values at the chosen pixels, bit for bit."""
+    from slap2_f0.model import make_inputs, pooled_features
+    from slap2_f0.stream import pooled_features_at
+
+    rng = np.random.default_rng(6)
+    movie = torch.from_numpy(rng.poisson(8.0, (1, 30, 20, 22)).astype(np.float32))
+    movie[:, :, :3, :4] = float("nan")
+    mi = movie.nanmean(1)
+    one = torch.ones(1)
+    x = make_inputs(movie, mi, torch.ones_like(mi), one, mi * 1.5, one * 2)
+    r, c = torch.arange(5, 15), torch.arange(4, 18)
+    full = pooled_features(x, 3, 27, 1, [2, 6, 0])
+    got = pooled_features_at(x, 3, 27, 1, [2, 6, 0], r, c)
+    assert torch.equal(got, full[:, :, :, 5:15, 4:18])

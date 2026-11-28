@@ -54,6 +54,45 @@ from .model import (SlabBlindSpotNet, _residual, blind_window_stats, edge_featur
 from .predict import _is_oom, tile_origins
 
 
+def _box_sums_at(a: torch.Tensor, half: int, r: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """``model._box_sums`` at rows r and columns c only: (N, len(r), len(c)),
+    the same arithmetic for each element."""
+    N, H, W = a.shape
+    ii = F.pad(a.cumsum(1).cumsum(2), (1, 0, 1, 0))  # integral image
+    r0, r1 = (r - half).clamp(0, H), (r + half + 1).clamp(0, H)
+    c0, c1 = (c - half).clamp(0, W), (c + half + 1).clamp(0, W)
+    return ii[:, r1][:, :, c1] - ii[:, r0][:, :, c1] - ii[:, r1][:, :, c0] + ii[:, r0][:, :, c0]
+
+
+def pooled_features_at(x: torch.Tensor, t0: int, t1: int, radius: int, scales: list[int], r: torch.Tensor,
+                       c: torch.Tensor) -> torch.Tensor:
+    """``model.pooled_features`` evaluated at rows r and columns c of the window
+    only (B, 2 * len(scales), t1 - t0, len(r), len(c)): the box sums are
+    taken from the same integral images, so the values equal those of the
+    full map at these pixels."""
+    B, _, T, H, W = x.shape
+    a, b = max(0, t0 - 3), min(T, t1 + 4)
+    m, v, mi = x[:, 0, a:b].float(), x[:, 1, a:b].float(), x[:, 2, a:b].float()
+    num = (v * (m - mi)).reshape(-1, H, W)
+    den = (v * mi.clamp_min(0)).reshape(-1, H, W)
+    bn, bd = _box_sums_at(num, radius, r, c), _box_sums_at(den, radius, r, c)
+    nr, nc = len(r), len(c)
+    out = []
+    for s in scales:
+        half = s if s > 0 else max(H, W)
+        sn = (_box_sums_at(num, half, r, c) - bn).view(B, b - a, nr, nc)
+        sd = (_box_sums_at(den, half, r, c) - bd).view(B, b - a, nr, nc)
+        r1 = torch.where(sd > 1e-6, sn / sd.clamp_min(1e-6), torch.zeros_like(sn))
+        cn = F.pad(sn.cumsum(1), (0, 0, 0, 0, 1, 0))
+        cd = F.pad(sd.cumsum(1), (0, 0, 0, 0, 1, 0))
+        t = torch.arange(t0, t1, device=x.device)
+        lo, hi = (t - 3).clamp(a, b) - a, (t + 5).clamp(a, b) - a
+        n8, d8 = cn[:, hi] - cn[:, lo], cd[:, hi] - cd[:, lo]
+        r8 = torch.where(d8 > 1e-6, n8 / d8.clamp_min(1e-6), torch.zeros_like(n8))
+        out += [r1[:, t0 - a: t1 - a].clamp(-1, 1), r8.clamp(-1, 1)]
+    return torch.stack(out, 1)
+
+
 @dataclass
 class Rect:
     """A rectangle of the trial grid (rows r0:r1, cols c0:c1, may extend past
@@ -553,10 +592,12 @@ class StreamPredictor:
                 for a in range(0, T, Lp):
                     b = min(a + Lp, T)
                     x = self._x(self._movie_rect(movie, a - 3, b + 4, *wrc), maps, wrc, pad, scale, gain)
-                    feats = [pooled_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales)]
+                    region = torch.arange(sR, sR + op, device=dev)
+                    feats = [pooled_features_at(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales, region, region)]
                     if cfg.motion_features:
-                        feats.append(motion_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales))
-                    fe = torch.cat(feats, 1)[0, :, :, sR:sR + op, sR:sR + op][:, :, ii, jj]  # (npool, frames, K)
+                        mf = motion_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales)
+                        feats.append(mf[:, :, :, sR:sR + op, sR:sR + op])
+                    fe = torch.cat(feats, 1)[0][:, :, ii, jj]  # (npool, frames, K)
                     pf[:, a:b, k] = fe.to(half).to(pf.device)
                     del x, feats, fe
         tim["same_frame"] += time.time() - t0
