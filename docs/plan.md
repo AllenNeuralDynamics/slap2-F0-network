@@ -2923,3 +2923,116 @@ Mean over the 8 evaluated mice (8-frame error vs the reference; lower is better)
 - **SiLo with the network baseline** (the localization tests) has not been rerun with the locked model.
 
 **Tools.** `tools/s4_eval.py` and `tools/heldout_eval.py` give the tables of the held-out evaluation. The GFP measures are `tools/gfp_check.py` (offsets, share removed, rings) and `tools/gfp_mse.py` (8-frame error); the scores without the activity fit are `tools/trusted_scores.py` (from an evaluation's `eval.csv`).
+
+## Inference speed: streaming engine, pipeline options, decimation test (2026-11-27, #33)
+
+**Before (L40S, stage test pred_780125_s6_ft, 14 trial-paths = 180 s of recording on both paths).** Load 552 s, stats 103 s, network 1047 s, write 75 s: 1778 s, i.e. 9.9 min per recorded minute. The GPU was idle in 45% of the 30-s samples.
+
+**Profile of the reference (4060 Ti, one 512-frame tile of 780125 E1T1DMD1, 94 x 94 window).** 1.88 s per tile; 190 tiles per trial-path.
+- Per module: past branch 0.41 s, future branch 0.49, the four half-plane branches 0.60, fusion 0.02, the rest (window statistics and pooled features over the whole window, crops) 0.36.
+- Self CUDA time by operation: convolution 26%, in-place adds 22% (the bias after every cuDNN convolution, and the residuals), concatenation 16% (the 96-channel half-plane output over the whole window), GELU 10.5%, copies 6% (rotations, flips), indexing 4%, padding 3%.
+
+The network is memory-bound: three quarters of its time is outside the convolutions. On the L40S it reaches about 4.5 TFLOPS, about 2% of the card's float16 peak.
+
+**What the reference computes twice.**
+- Neighbouring tiles' windows overlap: 38 tile windows of 94² pixels (336 k) cover a union of 145 k pixels on 780125 E1T1DMD1, whose 36 k pixels are valid.
+- Each causal branch runs over the whole window, including the 263 frames on the side it never uses.
+
+**Streaming engine (`--engine stream`, `code/slap2_f0/stream.py`).** It computes each quantity once:
+- Each causal branch runs once over the trial in chunks, each block carrying the last 2 x dilation frames of its temporal convolution.
+- The half-plane branches are streamed the same way: their symmetric convolutions emit each frame d frames later.
+- Everything runs on rectangles that cover the tiles' windows, with corners at the windows' parity.
+- Window statistics are computed once per output pixel. Pooled features are computed per tile on the tile's own window, since they depend on it beyond the reach.
+- The fusion runs at the output pixels only, as matrix products.
+
+Network time for 780125 E1T1DMD1 on the 4060 Ti: 469 s with the reference's 512-frame tiles (GPU busy 87%), 116 s streamed (75%). The engine is equal to `predict_trial` within float32 rounding on the CPU (`test_stream.py`). On 780125 E1T1DMD1 on the 4060 Ti (float16) it differs from the reference by at most 5.1 counts, by 0.38 counts at the 99.9th percentile, and by 0.08% relative at the 99.9th percentile. That is float16 rounding: fp16 and fp32 differ by 3e-4 at the 99th percentile, per `prepare`.
+
+
+### Where the cost sits today
+
+Convolution MACs per output voxel (valid pixel x frame) for s6_ft on 780125 E1T1DMD1 (`tools/inference_speed/macs.py`):
+
+| geometry | MAC per output voxel |
+|---|---|
+| tiles, 512 frames (the 8 GB card) | 3.42 M |
+| tiles, whole trial (L40S) | 2.14 M |
+| streaming, rectangles, `--stream_layout ncdhw` (half-planes with a halo per 256-frame chunk) | 1.52 M |
+| streaming, rectangles, `--stream_layout cl` (half-planes streamed once) | 1.39 M |
+| low-rate design, factor 2 (40 Hz), streaming | 0.82 M |
+| low-rate design, factor 4 (20 Hz), streaming | 0.54 M |
+
+In the channels-last streaming geometry:
+- The causal branches are about 57% of the MACs (2 x 54.4 k per input voxel).
+- The four half-plane branches are about 41% (4 x 21.3 k).
+- The fusion is 2% (29.7 k per output voxel).
+
+The rectangles hold 6.5 pixels per valid pixel. SLAP2 fields are sparse: 13% of the 780125 grid is valid. Dense convolutions pay for the empty part between ROIs and for the 23-pixel reach around each ROI.
+
+MACs are not the limit, though. On the 4060 Ti, convolutions are only 26% of the reference's GPU time; the rest is memory traffic (bias adds, concatenations, GELU, copies). A lower rate inside the network cuts both in proportion.
+
+### Where temporal downsampling can enter without opening the blind spot
+
+The blind spot: the output at frame t never sees frames t - 8 to t + 8 at the pixel and within 4 rows and columns (`gap` 8, `box_radius` 4).
+
+1. **Causal branches (past and future): a low-rate trunk after the first full-rate block.**
+   - The first block (dilation 1) stays at 80 Hz.
+   - A causal strided convolution (kernel k, stride k) then makes low step j from frames jk..jk+k-1.
+   - The remaining blocks run at 80/k Hz with dilations divided by k. For k = 4, dilations 1, 2, 4, 8, 16 at 20 Hz reach 2 x 31 x 4 = 248 frames, plus 6 at full rate: the same 254 frames as now.
+   - Frame t takes the newest low step whose frames all lie at or before t - gap - 1, i.e. j = floor((t - gap - k) / k).
+   - The few frames between that step and t - gap - 1 reach t only through the full-rate block, as today through its shift.
+   - This is exact by construction, like the half-resolution spatial path of the half-plane branch. `test_blindspot.py`'s gradient test applies unchanged.
+
+2. **Half-plane branches: any temporal pooling.** Their hidden set is spatial only: rows at or below r - 5 in the branch's own orientation, at every frame. So they may pool symmetrically in time, run at 80/k Hz and be interpolated back to the frames without touching the blind spot. Cost: 1/k.
+
+   They carry the fast changes shared across the field (residual motion, brightness), which is where the baseline's high-frequency power comes from. The baseline's power above 10 Hz is 3-5% of its (mean-removed) variance (median over pixels), above 20 Hz 1.1-1.6%. The decimation test measures what SILo loses without it.
+
+3. **Output at the low rate, interpolated to the frames.** Linear interpolation mixes low-rate outputs up to k frames away from t. So each low-rate output must be blind to |dt| <= gap + k:
+   - the slab branches' shift becomes gap + k + 1;
+   - the window statistics' gap becomes gap + k.
+
+   For k = 4: 12 frames (150 ms) hidden at the low-rate samples, so every frame keeps at least its 8 hidden frames on each side. The fusion then runs at 1/k of the frames.
+
+   The price: the network loses 4 frames of the near context on each side. For iGluSnFR4f's fast events that is likely harmless. For slower indicators the window grows anyway (#32).
+
+With 1 to 3 together at k = 4, the cost is about 0.54 M MAC per output voxel against 1.39 M for the same geometry today (2.6x). Memory traffic falls roughly in proportion, since every activation after the first block has 1/k of the frames.
+
+### What the decimation test says
+
+- **Spectrum.** s6_ft's baseline moves by 4-5% of its mean over a trial (median pixel). Of that (mean-removed) power, 10-14% lies above 5 Hz, 3-5% above 10 Hz and 1.1-1.6% above 20 Hz (median over pixels; 780125 and the GFP copy alike).
+- **The baseline itself.** Block means at 20 Hz, linearly interpolated, change it by 0.6-0.75% (median relative), 4-9% at the 99.9th percentile. At 10 Hz: 0.9-1.2% and 6-12%.
+- **GFP copy against the truth (trial 1).** 40 and 20 Hz leave share found, amplitude, trace r, F0 and false events unchanged within 0.003, 0.04, 0.001, 0.001 and 0.01. 10 Hz loses 0.4 and 1.1 points of share found at injected sizes 0.25 and 0.5.
+- **Real data.** 780125, 5 trials x 2 paths, giant silo with the network baseline at the current dev defaults; each arm against full rate. Sources are matched by Hungarian assignment within 2 px; per matched source:
+
+  | arm | path | sources kept, full / arm | F1 | trace r | F0 | amplitude | events per source | event mass pooled |
+  |---|---|---|---|---|---|---|---|---|
+  | 40 Hz | 1 | 149 / 148 | 0.970 | 0.998 | 1.001 | 0.999 | 1.000 | 1.003 |
+  | 40 Hz | 2 | 124 / 119 | 0.971 | 0.998 | 1.001 | 0.999 | 1.000 | 1.006 |
+  | 20 Hz | 1 | 149 / 141 | 0.952 | 0.995 | 1.004 | 0.998 | 1.001 | 1.010 |
+  | 20 Hz | 2 | 124 / 124 | 0.960 | 0.995 | 1.003 | 0.998 | 1.001 | 1.005 |
+  | 10 Hz | 1 | 149 / 143 | 0.938 | 0.990 | 1.008 | 0.997 | 1.002 | 1.015 |
+  | 10 Hz | 2 | 124 / 119 | 0.955 | 0.990 | 1.007 | 0.997 | 1.002 | 1.016 |
+
+  On matched sources, 20 Hz changes F0, amplitude and events by at most 0.4%, and 10 Hz by about twice that.
+
+  The source set is more sensitive. Even 40 Hz, whose baseline change is the smallest (0.4% median), moves 3% of the sources; 20 Hz moves 4-5% and 10 Hz 4.5-6%. The sources that move are not only the weakest: their event mass ranks at the 4th-83rd percentile of the matched ones. So SILo's source set reacts to any small change of the baseline at the detection margin, and 20 Hz adds 1-2 points to what 40 Hz already moves.
+
+So a network whose output is sampled at 20 Hz and interpolated to the frames would change nothing that SILo's scores on ground truth resolve. This is the design target k = 4; k = 8 is the first factor that costs small events.
+
+### Distillation plan (no training tonight)
+
+1. **Teacher:** s6_ft, or its successor after the retraining of #48. Run it with `--engine stream` (the same baselines; 3.7x faster than tiles on the 4060 Ti).
+2. **Student:** the low-rate architecture above (k = 4; same widths first, then width 24 and half-plane width 16 if the time target needs it). Blind spot built in and covered by `test_blindspot.py`.
+   - Warm start: blocks of the teacher's causal branches with dilation 4d map to the student's low-rate blocks with dilation d (same kernels, a natural initialization). The half-plane trunks copy as they are.
+3. **Loss.** Online distillation on the training windows: the teacher's forward pass (no gradient, float16) gives mu and var at every voxel of the loss region. The student fits:
+   - log mu to the teacher's (squared error, weighted by the teacher's mu / var, so that bright and dim pixels count alike);
+   - log var to the teacher's.
+
+   All valid pixels count, not only labeled ones: the teacher's baseline already excludes events, so no event mask is needed. Plus the existing supervised loss on simulated windows (true baseline), at a weight to be tuned, so the student is not bound to the teacher where the truth is known. The teacher's known bias (2-3% low) would otherwise be copied.
+4. **Data and cost.** The same 40 sessions and simulation templates as S6. The teacher's forward adds about a third of a training step, so a run costs about 1.3x a fine-tuning run (about 5-7 h on the GPU capsule).
+5. **Judging (as for every change, issue #33):**
+   - ground truth: GFP 847983 with injected events (share found and amplitude by size, F0 against the true F0, false events on the copy and the original), labeled pixels outside footprints (8 mice), activity-free simulations;
+   - time per recorded minute on the L40S and the 4060 Ti.
+
+   Accept if the scores are within the teacher's checkpoint-to-checkpoint spread and the time falls by at least 2x.
+6. **If the student cannot match the teacher at k = 4:** k = 2 (0.82 M MAC per voxel), or the teacher's architecture at width 16 (about 4x fewer MACs at full rate), distilled the same way.
+
