@@ -602,7 +602,7 @@ class StreamPredictor:
         wst = [self._store((T, N), torch.float32, 0.1) for _ in range(3)]
         est = gst = None
         if cfg.edge_features:
-            est, gst = self._store((6, T, N), torch.float32, 0.1), self._store((2, T, N), torch.float32, 0.1)
+            est, gst = self._store((T, 6, N), torch.float32, 0.1), self._store((T, 2, N), torch.float32, 0.1)
         for k0 in range(0, N, Bs):
             k1 = min(k0 + Bs, N)
             if rmov is not None:  # frames -span .. T + span - 1 at the output pixels, on the GPU
@@ -618,8 +618,8 @@ class StreamPredictor:
             if cfg.edge_features:
                 e, g = edge_features(x[:, 0], x[:, 1], x[:, 2, 0], cfg.gap, cfg.window_reach, cfg.edge_near,
                                      (span, span + T))
-                est[:, :, k0:k1] = e[0, :, :, :, 0].to(est.device)
-                gst[:, :, k0:k1] = g[0, :, :, :, 0].to(gst.device)
+                est[:, :, k0:k1] = e[0, :, :, :, 0].permute(1, 0, 2).to(est.device)
+                gst[:, :, k0:k1] = g[0, :, :, :, 0].permute(1, 0, 2).to(gst.device)
             del x
         # the per-pixel inputs the fusion reads (maps only; constant in time)
         xpx = make_inputs(torch.full((1, 1, N, 1), float("nan"), device=dev), mi, vf, scale, vm, gain,
@@ -629,11 +629,14 @@ class StreamPredictor:
         t0 = time.time()
         pf = None
         if cfg.box:
-            pf = self._store((cfg.n_pool + cfg.n_motion, T, N), half, 0.15)
+            pf = self._store((T, cfg.n_pool + cfg.n_motion, N), half, 0.15)
             pos = np.full(index.max() + 1, -1, np.int64)
             pos[px] = np.arange(N)
             ns = op + 2 * sR
-            Lp = min(512, max(L, 16))  # the planned chunk (halved on retries), at most 512
+            Lp = 512  # frames per tile and pass: ~64 B per window voxel, within 10% of the free memory
+            if dev.type == "cuda":
+                Lp = min(Lp, int(0.1 * torch.cuda.mem_get_info()[0] / (ns * ns * 64)))
+            Lp = max(16, int(Lp * self._shrink))  # smaller on retries
             for r0, c0 in rect.tiles:
                 sub = index[r0:r0 + op, c0:c0 + op]
                 ok = sub >= 0
@@ -651,12 +654,12 @@ class StreamPredictor:
                         mf = motion_features(x, 3, 3 + b - a, cfg.box_radius, cfg.pool_scales)
                         feats.append(mf[:, :, :, sR:sR + op, sR:sR + op])
                     fe = torch.cat(feats, 1)[0][:, :, ii, jj]  # (npool, frames, K)
-                    pf[:, a:b, k] = fe.to(half).to(pf.device)
+                    pf[a:b, :, k] = fe.permute(1, 0, 2).to(half).to(pf.device)
                     del x, feats, fe
         tim["same_frame"] += time.time() - t0
         # 2. future branch, backwards over trial frames [shift, T + tR): kept at the output pixels
         t0 = time.time()
-        hf_store = self._store((cfg.width, T, N), half, 0.25)
+        hf_store = self._store((T, cfg.width, N), half, 0.25)
         fut = _CausalStateCL(self.m.future)
         hi = T + tR
         while hi > shift:
@@ -669,7 +672,7 @@ class StreamPredictor:
             del x
             a, b = max(lo - shift, 0), min(hi - shift, T)
             if a < b:
-                hf_store[:, a:b] = g[:, a + shift - lo:b + shift - lo].to(half).to(hf_store.device)
+                hf_store[a:b] = g[:, a + shift - lo:b + shift - lo].permute(1, 0, 2).to(half).to(hf_store.device)
             del g
             hi = lo
         del fut
@@ -748,17 +751,22 @@ class StreamPredictor:
             if hps:
                 hh = torch.cat([ph[:, :n] for ph in pend_h], 0)  # direction order 0..3, as the reference
                 pend_h = [ph[:, n:] for ph in pend_h]
-                extra = [hh, pf[:, out_t:t1].to(dev)]
+                extra = [hh, pf[out_t:t1].to(dev, non_blocking=True).permute(1, 0, 2)]
             mus, vars_ = [], []
+            # this piece's frames of each store, moved once as contiguous blocks
+            hf_p = hf_store[out_t:t1].to(dev, non_blocking=True).permute(1, 0, 2)  # (C, n, N)
+            ws_p = [st_[out_t:t1].to(dev, non_blocking=True) for st_ in wst]
+            est_p = None if est is None else est[out_t:t1].to(dev, non_blocking=True).permute(1, 0, 2)
+            gst_p = None if gst is None else gst[out_t:t1].to(dev, non_blocking=True).permute(1, 0, 2)
             for k0 in range(0, N, B):
                 k1 = min(k0 + B, N)
-                ws = [st_[out_t:t1, k0:k1].to(dev) for st_ in wst]
                 with self._autocast():
                     mu, var = self._head_cl(
-                        hp_c[:, :, k0:k1], hf_store[:, out_t:t1, k0:k1].to(dev), [e[:, :, k0:k1] for e in extra],
-                        None if est is None else est[:, out_t:t1, k0:k1].to(dev),
-                        None if gst is None else gst[:, out_t:t1, k0:k1].to(dev),
-                        ws, xpx[:, :, :, k0:k1].expand(-1, -1, n, -1, -1), scale.float(), gain.float())
+                        hp_c[:, :, k0:k1], hf_p[:, :, k0:k1], [e[:, :, k0:k1] for e in extra],
+                        None if est_p is None else est_p[:, :, k0:k1],
+                        None if gst_p is None else gst_p[:, :, k0:k1],
+                        [w[:, k0:k1] for w in ws_p], xpx[:, :, :, k0:k1].expand(-1, -1, n, -1, -1),
+                        scale.float(), gain.float())
                 mus.append(mu.float().cpu().numpy())
                 vars_.append(var.float().cpu().numpy())
             mu_out[out_t:t1, px] = np.concatenate(mus, 1) * s
