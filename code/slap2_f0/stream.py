@@ -51,7 +51,7 @@ import torch.nn.functional as F
 
 from .model import (SlabBlindSpotNet, _residual, blind_window_stats, edge_features, make_inputs, motion_features,
                     pooled_features)
-from .predict import tile_origins
+from .predict import _is_oom, tile_origins
 
 
 @dataclass
@@ -277,10 +277,15 @@ class StreamPredictor:
 
     def __init__(self, model: SlabBlindSpotNet, wcfg, device: torch.device, amp_dtype=None,
                  chunk: int = 256, max_px: int = 0, pixel_block: int = 8192, keep_future_on_gpu: bool | None = None,
-                 layout: str = "ncdhw"):
+                 layout: str = "ncdhw", mem_fraction: float = 0.6, bytes_per_voxel: int = 0):
         if layout not in ("ncdhw", "cl"):
             raise ValueError(f"layout must be ncdhw or cl, not {layout!r}")
         self.cl = layout == "cl"
+        # GPU memory planning: a rectangle of A pixels in chunks of L frames needs about
+        # bytes_per_voxel * A * L; rectangles are split and chunks shortened to stay within
+        # mem_fraction of the free memory (and halved on running out)
+        self.mem_fraction = float(mem_fraction)
+        self.bytes_per_voxel = int(bytes_per_voxel) or (1000 if self.cl else 1600)
         self.m, self.cfg = model, model.cfg
         self.w = wcfg
         self.device, self.amp = device, amp_dtype
@@ -338,21 +343,24 @@ class StreamPredictor:
         N) float32 in counts and counts^2, as ``predict.predict_trial``.
         ``movie`` (frame, row, col) in counts with NaN where not valid or
         discarded; default read from ``tr``."""
-        import time
         cfg, w = self.cfg, self.w
         dev = self.device
         if movie is None:
-            movie = tr._f["movie"][tr.channel]  # read in blocks as needed (an HDF5 dataset or an array)
+            movie = tr._f["movie"][tr.channel]  # an HDF5 dataset or an array
             if not isinstance(movie, np.ndarray):
                 movie = np.asarray(movie, np.float32)
         self._valid = np.asarray(tr.valid, bool)
         self._discard = np.asarray(tr.discard, bool)
         T, R, C = movie.shape
-        tR, sR, op = w.t_reach, w.s_reach, w.out_px
-        shift = cfg.gap + 1
+        sR, op = w.s_reach, w.out_px
         index = np.full((R, C), -1, np.int64)
         index[rows, cols] = np.arange(len(rows))
-        rects = plan_rects(index >= 0, op, sR, self.max_px)
+        cuda = dev.type == "cuda"
+        L = max(1, self.chunk)
+        max_px = self.max_px
+        if max_px <= 0 and cuda:  # rectangles that fit a chunk of L frames in a share of the free memory
+            max_px = int(self.mem_fraction * torch.cuda.mem_get_info()[0] / (self.bytes_per_voxel * L))
+        rects = plan_rects(index >= 0, op, sR, max_px)
         pad = sR + op + 2  # maps padded so every rectangle is a plain slice
         maps = self._maps(tr, st, pad)
         s = float(tr.scale)
@@ -360,9 +368,8 @@ class StreamPredictor:
         gain = torch.full((1,), float(st["gain"]), device=dev)
         mu_out = np.full((T, len(rows)), np.nan, np.float32)
         var_out = np.full((T, len(rows)), np.nan, np.float32)
-        L = max(1, self.chunk)
         tim = {"future": 0.0, "past": 0.0, "same_frame": 0.0, "fusion": 0.0, "inputs": 0.0, "n_rects": len(rects),
-               "rect_px": [r.area for r in rects]}
+               "rect_px": [r.area for r in rects], "max_px": max_px, "chunks": [], "oom_retries": 0}
         for rect in rects:
             # output pixels of this rectangle: the valid pixels of its tiles' regions, in index order
             sel = []
@@ -372,74 +379,101 @@ class StreamPredictor:
             px = np.sort(np.concatenate(sel)) if sel else np.zeros(0, np.int64)
             if not len(px):
                 continue
-            pr, pc = rows[px] - rect.r0, cols[px] - rect.c0  # positions in the rectangle
-            pr, pc = pr.astype(np.int64), pc.astype(np.int64)
-            prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
-            N = len(px)
-            rc = (rect.r0, rect.r1, rect.c0, rect.c1)
+            Lr = L
+            if cuda:  # a rectangle larger than planned (one row band): shorter chunks
+                torch.cuda.empty_cache()
+                free = torch.cuda.mem_get_info()[0] - T * len(px) * cfg.width * 2  # the future branch's store
+                Lr = max(16, min(L, int(self.mem_fraction * free / (self.bytes_per_voxel * rect.area))))
+            while True:
+                try:
+                    self._rect(movie, maps, pad, rect, index, rows, cols, px, Lr, scale, gain, mu_out, var_out, tim)
+                    tim["chunks"].append(Lr)
+                    break
+                except (torch.OutOfMemoryError, RuntimeError) as e:
+                    if not _is_oom(e) or Lr <= 16:
+                        raise
+                # retry outside the except block, so the failed pass's tensors are freed
+                tim["oom_retries"] += 1
+                Lr = max(16, Lr // 2)
+                torch.cuda.empty_cache()
+        self.timings = tim
+        return mu_out, var_out
 
-            # 1. future branch, backwards over trial frames [shift, T + tR): keep it at the output pixels
+    def _rect(self, movie, maps, pad, rect, index, rows, cols, px, L, scale, gain, mu_out, var_out, tim):
+        """One rectangle in chunks of L frames: the future branch backwards
+        (kept at the output pixels), then the past branch forwards with the
+        same-frame parts and the fusion; fills mu_out and var_out at px."""
+        import time
+        cfg, w = self.cfg, self.w
+        dev = self.device
+        T = movie.shape[0]
+        tR = w.t_reach
+        shift = cfg.gap + 1
+        s = float(scale[0])
+        pr, pc = rows[px] - rect.r0, cols[px] - rect.c0  # positions in the rectangle
+        pr, pc = pr.astype(np.int64), pc.astype(np.int64)
+        prt, pct = torch.from_numpy(pr).to(dev), torch.from_numpy(pc).to(dev)
+        N = len(px)
+        rc = (rect.r0, rect.r1, rect.c0, rect.c1)
+        # 1. future branch, backwards over trial frames [shift, T + tR): keep it at the output pixels
+        t0 = time.time()
+        on_gpu = self.keep_future_on_gpu
+        if on_gpu is None:
+            need = T * N * cfg.width * 2
+            on_gpu = dev.type != "cuda" or need < 0.25 * torch.cuda.mem_get_info()[0]
+        hf_store = (torch.empty((cfg.width, T, N), dtype=torch.float16 if self.amp else torch.float32,
+                                device=dev if on_gpu else "cpu", pin_memory=(not on_gpu and dev.type == "cuda")))
+        fut = (_CausalStateCL if self.cl else _CausalState)(self.m.future)
+        hi = T + tR  # exclusive end of the reversed sequence's first chunk
+        while hi > shift:  # pre-shift frames shift..T-1+shift give outputs 0..T-1
+            lo = max(hi - L, shift)
+            ti = time.time()
+            xm = self._movie_rect(movie, lo, hi, *rc)
+            x = self._x(xm, maps, rc, pad, scale, gain)
+            tim["inputs"] += time.time() - ti
+            with self._autocast():
+                g = self._branch(fut, x, pr, pc, flip=True)  # (C, frames lo..hi-1, N)
+            del x
+            # pre-shift frame f -> output frame f - shift
+            a, b = max(lo - shift, 0), min(hi - shift, T)
+            if a < b:
+                g = g[:, a + shift - lo:b + shift - lo]
+                hf_store[:, a:b] = g.to(hf_store.dtype) if on_gpu else g.to(hf_store.dtype).cpu()
+            del g
+            hi = lo
+        del fut
+        tim["future"] += time.time() - t0
+        # 2. past branch forwards from frame -tR; same-frame parts and fusion per chunk of output frames
+        past = (_CausalStateCL if self.cl else _CausalState)(self.m.past)
+        f_in = -tR  # next pre-shift frame to process (zero state before it, as the window's padding)
+        pending = None  # past branch at output frames out_t.., (C, frames, N)
+        out_t = 0
+        while out_t < T:
+            t1 = min(out_t + L, T)  # output frames out_t..t1-1 this round
             t0 = time.time()
-            on_gpu = self.keep_future_on_gpu
-            if on_gpu is None:
-                need = T * N * cfg.width * 2
-                on_gpu = dev.type != "cuda" or need < 0.25 * torch.cuda.mem_get_info()[0]
-            hf_store = (torch.empty((cfg.width, T, N), dtype=torch.float16 if self.amp else torch.float32,
-                                    device=dev if on_gpu else "cpu", pin_memory=(not on_gpu and dev.type == "cuda")))
-            fut = (_CausalStateCL if self.cl else _CausalState)(self.m.future)
-            hi = T + tR  # exclusive end of the reversed sequence's first chunk
-            while hi > shift:  # pre-shift frames shift..T-1+shift give outputs 0..T-1
-                lo = max(hi - L, shift)
+            while f_in < t1 - shift:  # pre-shift frame f -> output frame f + shift
+                fe = min(f_in + L, t1 - shift)
                 ti = time.time()
-                xm = self._movie_rect(movie, lo, hi, *rc)
+                xm = self._movie_rect(movie, f_in, fe, *rc)
                 x = self._x(xm, maps, rc, pad, scale, gain)
                 tim["inputs"] += time.time() - ti
                 with self._autocast():
-                    g = self._branch(fut, x, pr, pc, flip=True)  # (C, frames lo..hi-1, N)
+                    g = self._branch(past, x, pr, pc)
                 del x
-                # pre-shift frame f -> output frame f - shift
-                a, b = max(lo - shift, 0), min(hi - shift, T)
-                if a < b:
-                    g = g[:, a + shift - lo:b + shift - lo]
-                    hf_store[:, a:b] = g.to(hf_store.dtype) if on_gpu else g.to(hf_store.dtype).cpu()
-                del g
-                hi = lo
-            del fut
-            tim["future"] += time.time() - t0
-            # 2. past branch forwards from frame -tR; same-frame parts and fusion per chunk of output frames
-            past = (_CausalStateCL if self.cl else _CausalState)(self.m.past)
-            f_in = -tR  # next pre-shift frame to process (zero state before it, as the window's padding)
-            pending = None  # past branch at output frames out_t.., (C, frames, N)
-            out_t = 0
-            while out_t < T:
-                t1 = min(out_t + L, T)  # output frames out_t..t1-1 this round
-                t0 = time.time()
-                while f_in < t1 - shift:  # pre-shift frame f -> output frame f + shift
-                    fe = min(f_in + L, t1 - shift)
-                    ti = time.time()
-                    xm = self._movie_rect(movie, f_in, fe, *rc)
-                    x = self._x(xm, maps, rc, pad, scale, gain)
-                    tim["inputs"] += time.time() - ti
-                    with self._autocast():
-                        g = self._branch(past, x, pr, pc)
-                    del x
-                    first = f_in + shift
-                    f_in = fe
-                    if fe + shift <= out_t:  # pre-trial outputs only
-                        continue
-                    g = g[:, max(out_t - first, 0):]
-                    pending = g if pending is None else torch.cat([pending, g], 1)
-                tim["past"] += time.time() - t0
-                n = t1 - out_t
-                hp_chunk, pending = pending[:, :n], pending[:, n:]
-                mu, var = self._fuse(movie, maps, rc, pad, rect, index, px, pr, pc, prt, pct, out_t, t1, hp_chunk,
-                                     hf_store[:, out_t:t1], scale, gain, tim)
-                mu_out[out_t:t1, px] = mu * s
-                var_out[out_t:t1, px] = var * s * s
-                out_t = t1
-            del past, hf_store
-        self.timings = tim
-        return mu_out, var_out
+                first = f_in + shift
+                f_in = fe
+                if fe + shift <= out_t:  # pre-trial outputs only
+                    continue
+                g = g[:, max(out_t - first, 0):]
+                pending = g if pending is None else torch.cat([pending, g], 1)
+            tim["past"] += time.time() - t0
+            n = t1 - out_t
+            hp_chunk, pending = pending[:, :n], pending[:, n:]
+            mu, var = self._fuse(movie, maps, rc, pad, rect, index, px, pr, pc, prt, pct, out_t, t1, hp_chunk,
+                                 hf_store[:, out_t:t1], scale, gain, tim)
+            mu_out[out_t:t1, px] = mu * s
+            var_out[out_t:t1, px] = var * s * s
+            out_t = t1
 
     def _branch(self, state, x, pr, pc, flip=False):
         """A causal branch's next chunk (before its shift) at the output pixels

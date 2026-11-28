@@ -304,7 +304,7 @@ def run(args: argparse.Namespace) -> None:
     if args.fast:
         args.engine = "stream"
         args.prefetch = args.prefetch or 1
-        args.async_write = args.valid_stats = args.fast_read = args.cudnn_benchmark = True
+        args.async_write = args.valid_stats = args.fast_read = True  # not --cudnn_benchmark: slower on some GPUs
     moco, out = Path(args.moco_dir), Path(args.out)
     movies = registered_movies(moco)
     if args.files:
@@ -387,7 +387,7 @@ def run(args: argparse.Namespace) -> None:
                 # the tile size predict_trial would choose, made explicit for the report
                 tile = args.out_frames if args.out_frames > 0 else tile_frames(
                     model, wcfg, movie.shape[0], device, amp_dtype, wcfg.out_px)
-                mu, var = predict_trial(model, wcfg, tr, st, device, amp_dtype, tile, None, 1, rows, cols)
+                mu, var = predict_trial(model, wcfg, tr, st, device, amp_dtype, tile, None, args.batch, rows, cols)
             t3 = time.time()
             shape = movie.shape
             T, R, C = shape
@@ -407,6 +407,7 @@ def run(args: argparse.Namespace) -> None:
             entry = {
                 "stem": stem, "movie": movie_path.name, "baseline": dest.name, "frames": T, "rows": R, "cols": C,
                 "valid_px": int(valid.sum()), "discarded": int(discard.sum()), "out_frames": int(tile),
+                "batch": args.batch,
                 "load_s": attrs["seconds_load"], "stats_s": attrs["seconds_stats"], "network_s": t3 - t2,
                 "wait_s": wait_s, "engine": args.engine, "prefetch": args.prefetch,
                 "async_write": bool(args.async_write), "cudnn_benchmark": bool(args.cudnn_benchmark),
@@ -448,6 +449,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--engine", default="tiles", choices=["tiles", "stream"],
                    help="tiles: the network on each tile's window (predict.predict_trial); stream: each branch once "
                         "over the trial in chunks, the same baselines to float16 rounding (stream.py)")
+    p.add_argument("--batch", type=int, default=1,
+                   help="--engine tiles: tiles per forward pass (split again when the GPU runs out of memory)")
     p.add_argument("--stream_frames", type=int, default=256, help="--engine stream: frames per chunk")
     p.add_argument("--stream_layout", default="cl", choices=["cl", "ncdhw"],
                    help="--engine stream: channels-last frames with 2-D convolutions (cl), or the model's 3-D layers")
@@ -462,6 +465,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="read HDF5 movies chunk by chunk (identical values; h5py's strided read of a channel is slow)")
     p.add_argument("--cudnn_benchmark", action="store_true", help="let cuDNN time its algorithms once per shape")
     p.add_argument("--fast", action="store_true",
-                   help="all of the speed options that keep the baselines (to float16 rounding): --engine stream, "
-                        "--prefetch 1 (unless given), --async_write, --valid_stats, --fast_read, --cudnn_benchmark")
+                   help="the speed options that keep the baselines (to float16 rounding): --engine stream, --prefetch "
+                        "1 (unless given), --async_write, --valid_stats, --fast_read (--cudnn_benchmark separately: "
+                        "it was slower on an 8 GB display GPU)")
     p.add_argument("--compile", action="store_true", help="torch.compile the model (needs Triton; --engine tiles)")
