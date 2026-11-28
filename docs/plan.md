@@ -3005,12 +3005,16 @@ With 1 to 3 together at k = 4, the cost is about 0.54 M MAC per output voxel aga
 
   | arm | path | sources kept, full / arm | F1 | trace r | F0 | amplitude | events per source | event mass pooled |
   |---|---|---|---|---|---|---|---|---|
+  | 40 Hz | 1 | 149 / 148 | 0.970 | 0.998 | 1.001 | 0.999 | 1.000 | 1.003 |
+  | 40 Hz | 2 | 124 / 119 | 0.971 | 0.998 | 1.001 | 0.999 | 1.000 | 1.006 |
   | 20 Hz | 1 | 149 / 141 | 0.952 | 0.995 | 1.004 | 0.998 | 1.001 | 1.010 |
   | 20 Hz | 2 | 124 / 124 | 0.960 | 0.995 | 1.003 | 0.998 | 1.001 | 1.005 |
   | 10 Hz | 1 | 149 / 143 | 0.938 | 0.990 | 1.008 | 0.997 | 1.002 | 1.015 |
   | 10 Hz | 2 | 124 / 119 | 0.955 | 0.990 | 1.007 | 0.997 | 1.002 | 1.016 |
 
-  On matched sources, 20 Hz changes F0, amplitude and events by at most 0.4%, and 10 Hz by about twice that. 4-6% of the sources differ between arms; they are not only the weakest (their event mass ranks at the 4th-83rd percentile of the matched ones).
+  On matched sources, 20 Hz changes F0, amplitude and events by at most 0.4%, and 10 Hz by about twice that.
+
+  The source set is more sensitive. Even 40 Hz, whose baseline change is the smallest (0.4% median), moves 3% of the sources; 20 Hz moves 4-5% and 10 Hz 4.5-6%. The sources that move are not only the weakest: their event mass ranks at the 4th-83rd percentile of the matched ones. So SILo's source set reacts to any small change of the baseline at the detection margin, and 20 Hz adds 1-2 points to what 40 Hz already moves.
 
 So a network whose output is sampled at 20 Hz and interpolated to the frames would change nothing that SILo's scores on ground truth resolve. This is the design target k = 4; k = 8 is the first factor that costs small events.
 
