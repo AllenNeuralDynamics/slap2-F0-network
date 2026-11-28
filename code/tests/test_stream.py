@@ -162,3 +162,38 @@ def test_speed_arguments_are_checked():
     for name, bad in (("batch", 0), ("batch", -2), ("stream_frames", 0), ("prefetch", -1), ("out_frames", -5)):
         with pytest.raises(SystemExit):
             check_speed_args(Namespace(**{**ok, name: bad}))
+
+
+@pytest.mark.parametrize("layout", ["ncdhw", "cl"])
+def test_out_of_memory_retries_give_the_same_output(tmp_path, monkeypatch, layout):
+    """Running out of memory part way through a rectangle restarts it with half
+    the chunk (and, channels-last, smaller statistics and pooled passes): the
+    output equals an uninterrupted run, and the retry is counted."""
+    import slap2_f0.stream as sm
+
+    fn = tmp_path / "s" / "Path1" / "trial_000.h5"
+    fn.parent.mkdir(parents=True)
+    _trial(fn, 3)
+    model, wcfg = _model("box")
+    st = load_stats([fn])[str(fn)]
+    cpu = torch.device("cpu")
+    with TrialFile(fn) as tr:
+        rows, cols = valid_index(tr)
+        ref, _ = StreamPredictor(model, wcfg, cpu, None, chunk=64, layout=layout).predict(tr, st, rows, cols)
+        cls = sm._CausalStateCL if layout == "cl" else sm._CausalState
+        orig, calls = cls.step, []
+
+        def fail_on_long_chunks(self, x):
+            n = x.shape[0] if layout == "cl" else x.shape[2]
+            calls.append(n)
+            if n > 32 and len(calls) > 3:  # part way through the first rectangle
+                raise torch.OutOfMemoryError("CUDA out of memory (test)")
+            return orig(self, x)
+
+        monkeypatch.setattr(cls, "step", fail_on_long_chunks)
+        sp = StreamPredictor(model, wcfg, cpu, None, chunk=64, layout=layout)
+        mu, _ = sp.predict(tr, st, rows, cols)
+    assert sp.timings["oom_retries"] >= 1 and min(sp.timings["chunks"]) <= 32
+    if layout == "cl":  # the passes that do not follow the chunk shrank as well
+        assert sp.timings["pooled_frames"] < 512 and sp.timings["stats_block"] < sp.pixel_block
+    np.testing.assert_allclose(mu, ref, rtol=2e-5, atol=2e-5)

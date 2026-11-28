@@ -580,8 +580,9 @@ class StreamPredictor:
         span = cfg.gap + cfg.window_reach
         Bs = B
         if dev.type == "cuda":  # ~16 float32 values per pixel and frame in the statistics pass
-            Bs = int(0.2 * torch.cuda.mem_get_info()[0] / ((T + 2 * span) * 4 * 16))
-            Bs = max(64, int(min(B, Bs) * self._shrink))  # halved on each retry
+            Bs = min(B, int(0.2 * torch.cuda.mem_get_info()[0] / ((T + 2 * span) * 4 * 16)))
+        Bs = max(64, int(Bs * self._shrink))  # halved on each retry
+        tim["stats_block"] = Bs
         # the rectangle's movie on the GPU once when it fits; inputs are then sliced there
         rmov = None
         if dev.type == "cuda" and (T + 2 * tR) * rect.area * 4 < 0.15 * torch.cuda.mem_get_info()[0]:
@@ -643,6 +644,7 @@ class StreamPredictor:
             if dev.type == "cuda":
                 Lp = min(Lp, int(0.1 * torch.cuda.mem_get_info()[0] / (ns * ns * 64)))
             Lp = max(16, int(Lp * self._shrink))  # smaller on retries
+            tim["pooled_frames"] = Lp
             for r0, c0 in rect.tiles:
                 sub = index[r0:r0 + op, c0:c0 + op]
                 ok = sub >= 0
